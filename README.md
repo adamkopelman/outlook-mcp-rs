@@ -17,6 +17,41 @@ your MCP client at it directly — no install step.
 - Windows
 - Classic Outlook desktop installed and signed in
 
+## Available tools
+
+21 MCP tools, grouped by category:
+
+**Email**
+- `list_folders` — list mail folders (name, path, item counts)
+- `list_emails` — list recent emails in a folder (default: inbox)
+- `search_emails` — search emails by subject/sender/body text in a folder
+- `get_email` — get the full body and attachment list of one email by id
+- `send_email` — send a new email immediately
+- `create_draft` — create a draft email without sending it
+- `reply_email` — reply to an existing email
+- `move_email` — move an email to a different folder
+- `delete_email` — delete an email
+
+**Calendar**
+- `list_events` — list calendar events in a date range (default: next 7 days)
+- `get_event` — get the full details of one calendar event by id
+- `create_event` — create a new calendar event
+- `respond_to_meeting` — respond to a meeting invite (accept, decline, or tentative)
+
+**Attachments**
+- `list_attachments` — list an email's attachments (filename and size)
+- `save_attachments` — save an email's attachments to disk
+
+**Tasks**
+- `list_tasks` — list Outlook tasks
+- `create_task` — create a new Outlook task
+- `complete_task` — mark a task as complete
+
+**Notes**
+- `list_notes` — list Outlook notes
+- `get_note` — get the full body of one note by id
+- `create_note` — create a new Outlook note
+
 ## Development
 
 See `TESTING.md` for how to run the unit test suite and the local live-Outlook
