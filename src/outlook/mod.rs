@@ -1,3 +1,4 @@
+pub mod com;
 pub mod fake;
 pub mod types;
 
