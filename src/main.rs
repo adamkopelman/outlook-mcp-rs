@@ -1,6 +1,14 @@
-use outlook_mcp_rs::server;
+use std::sync::Arc;
 
-fn main() {
-    println!("outlook-mcp-rs: scaffold only, real server wired in a later task");
-    let _ = &server::OutlookMcpServer::new; // silence unused-import warning until Task 17
+use outlook_mcp_rs::outlook::client::WindowsOutlookClient;
+use outlook_mcp_rs::server::OutlookMcpServer;
+use rmcp::{transport::stdio, ServiceExt};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let client = Arc::new(WindowsOutlookClient::new());
+    let server = OutlookMcpServer::new(client);
+    let service = server.serve(stdio()).await?;
+    service.waiting().await?;
+    Ok(())
 }
