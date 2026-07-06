@@ -2,10 +2,11 @@ use std::sync::Arc;
 
 use outlook_mcp_rs::outlook::fake::{FakeOutlookClient, EMAIL_ID};
 use outlook_mcp_rs::server::{
-    CompleteTaskParams, CreateDraftParams, CreateEventParams, CreateTaskParams, DeleteEmailParams,
-    GetEmailParams, GetEventParams, ListAttachmentsParams, ListEmailsParams, ListEventsParams,
-    ListTasksParams, MoveEmailParams, OutlookMcpServer, ReplyEmailParams, RespondToMeetingParams,
-    SaveAttachmentsParams, SearchEmailsParams, SendEmailParams,
+    CompleteTaskParams, CreateDraftParams, CreateEventParams, CreateNoteParams, CreateTaskParams,
+    DeleteEmailParams, GetEmailParams, GetEventParams, GetNoteParams, ListAttachmentsParams,
+    ListEmailsParams, ListEventsParams, ListTasksParams, MoveEmailParams, OutlookMcpServer,
+    ReplyEmailParams, RespondToMeetingParams, SaveAttachmentsParams, SearchEmailsParams,
+    SendEmailParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -321,5 +322,40 @@ async fn complete_task_records_call() {
         .unwrap();
     assert_eq!(fake.calls(), vec![
         ("complete_task".to_string(), json!({"task_id": TASK_ID})),
+    ]);
+}
+
+// ---- Notes ----
+
+#[tokio::test]
+async fn list_notes_records_call() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    server.list_notes().await.unwrap();
+    assert_eq!(fake.calls(), vec![("list_notes".to_string(), json!({}))]);
+}
+
+#[tokio::test]
+async fn get_note_returns_body() {
+    use outlook_mcp_rs::outlook::fake::NOTE_ID;
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let result = server
+        .get_note(Parameters(GetNoteParams { note_id: NOTE_ID.to_string() }))
+        .await
+        .unwrap();
+    assert!(result_json(&result)["body"].as_str().unwrap().starts_with("Ideas"));
+}
+
+#[tokio::test]
+async fn create_note_records_body() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    server
+        .create_note(Parameters(CreateNoteParams { body: "Ideas\n- one".to_string() }))
+        .await
+        .unwrap();
+    assert_eq!(fake.calls(), vec![
+        ("create_note".to_string(), json!({"body": "Ideas\n- one"})),
     ]);
 }

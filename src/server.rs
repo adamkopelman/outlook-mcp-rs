@@ -201,6 +201,18 @@ pub struct CompleteTaskParams {
     pub task_id: String,
 }
 
+// ---- Notes ----
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetNoteParams {
+    pub note_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateNoteParams {
+    pub body: String,
+}
+
 #[tool_router]
 impl OutlookMcpServer {
     #[tool(description = "List Outlook mail folders (name, path, item counts).")]
@@ -387,6 +399,35 @@ impl OutlookMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
         let result = run_blocking(move || client.complete_task(task_id)).await?;
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    // ---- Notes ----
+
+    #[tool(description = "List Outlook notes.")]
+    pub async fn list_notes(&self) -> Result<CallToolResult, McpError> {
+        let client = self.client.clone();
+        let result = run_blocking(move || client.list_notes()).await?;
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    #[tool(description = "Get the full body of one note by id.")]
+    pub async fn get_note(
+        &self,
+        Parameters(GetNoteParams { note_id }): Parameters<GetNoteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.clone();
+        let result = run_blocking(move || client.get_note(note_id)).await?;
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    #[tool(description = "Create a new note.")]
+    pub async fn create_note(
+        &self,
+        Parameters(CreateNoteParams { body }): Parameters<CreateNoteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.clone();
+        let result = run_blocking(move || client.create_note(body)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 }
