@@ -1,0 +1,572 @@
+//! Win32 COM implementation of the `OutlookClient` trait.
+//!
+//! Direct port of `outlook_mcp/outlook/client.py`'s email section
+//! (lines 133-336). Every public method wraps its body in [`with_com`],
+//! which initializes COM on the current thread (mirroring the Python
+//! `@_com` decorator) and maps `windows::core::Error` into [`ToolError`].
+//!
+//! Only the 9 email methods are real in this task (Task 12). The remaining
+//! 12 trait methods (calendar/attachments/tasks/notes) are `todo!()` stubs
+//! that name the task that will implement them (Tasks 13-16); Rust requires
+//! the whole trait to be implemented for the `impl` block to compile.
+
+use serde_json::{json, Value};
+use windows::Win32::System::Com::IDispatch;
+use windows::Win32::System::Variant::VARIANT;
+
+use crate::constants as c;
+use crate::error::ToolError;
+use crate::outlook::com::{
+    call_method, create_com_object, format_com_error, get_property, jet_datetime, make_item_id,
+    parse_item_id, put_property, variant_from_bool, variant_from_i32, variant_from_str,
+    variant_to_bool, variant_to_i32, variant_to_iso_string, variant_to_string, ComGuard,
+};
+use crate::outlook::types::*;
+use crate::outlook::OutlookClient;
+
+/// Matches `MAX_EMAIL_COUNT` in `client.py`.
+const MAX_EMAIL_COUNT: i32 = 50;
+/// Matches `MAX_BODY_CHARS` in `client.py`.
+const MAX_BODY_CHARS: usize = 100_000;
+
+/// Lets `?` turn a `windows::core::Error` into a [`ToolError`] anywhere in
+/// this module, so COM-plumbing calls (`call_method`, `get_property`, …) and
+/// context-carrying helpers (`get_item`, `resolve_folder`) can share one
+/// `Result<_, ToolError>` error channel. Mirrors the Python `@_com`
+/// decorator translating `pywintypes.com_error` into `ToolError`.
+impl From<windows::core::Error> for ToolError {
+    fn from(err: windows::core::Error) -> Self {
+        ToolError::new(format_com_error(&err))
+    }
+}
+
+pub struct WindowsOutlookClient;
+
+impl Default for WindowsOutlookClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WindowsOutlookClient {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Wraps every public method body: initializes COM on the current
+    /// (blocking-pool) thread for the duration of the call, then runs `f`.
+    /// The closure returns `Result<T, ToolError>` (a small deviation from the
+    /// task brief's `WinResult<T>`) so that `get_item`/`resolve_folder` can
+    /// surface the exact, context-rich messages the Python client produces
+    /// instead of routing every failure through `format_com_error`. COM
+    /// plumbing errors still convert automatically via the `From` impl above.
+    fn with_com<T>(&self, f: impl FnOnce() -> Result<T, ToolError>) -> Result<T, ToolError> {
+        let _guard = ComGuard::new().map_err(|e| ToolError::new(format_com_error(&e)))?;
+        f()
+    }
+}
+
+// ---- module-level plumbing helpers (translated from client.py) ----------
+
+/// `IDispatch`-returning `VARIANT` unwrap. `TryFrom<&VARIANT> for IDispatch`
+/// borrows, so this takes the `VARIANT` by value and borrows it internally.
+fn to_disp(v: VARIANT) -> Result<IDispatch, ToolError> {
+    Ok(IDispatch::try_from(&v)?)
+}
+
+/// `client.py::_mapi`: the `Outlook.Application` object plus its MAPI namespace.
+fn mapi() -> Result<(IDispatch, IDispatch), ToolError> {
+    let app = create_com_object("Outlook.Application")?;
+    let ns = to_disp(call_method(&app, "GetNamespace", &mut [variant_from_str("MAPI")])?)?;
+    Ok((app, ns))
+}
+
+/// `client.py::_make_id`: `"{EntryID}|{Parent.StoreID}"`.
+fn make_id(item: &IDispatch) -> Result<String, ToolError> {
+    let entry_id = variant_to_string(&get_property(item, "EntryID")?);
+    let parent = to_disp(get_property(item, "Parent")?)?;
+    let store_id = variant_to_string(&get_property(&parent, "StoreID")?);
+    Ok(make_item_id(&entry_id, &store_id))
+}
+
+/// `client.py::_get_item`: parse the opaque id, then `Namespace.GetItemFromID`.
+fn get_item(ns: &IDispatch, item_id: &str) -> Result<IDispatch, ToolError> {
+    let (entry_id, store_id) = parse_item_id(item_id)?;
+    let item = call_method(
+        ns,
+        "GetItemFromID",
+        &mut [variant_from_str(&entry_id), variant_from_str(&store_id)],
+    )
+    .map_err(|e| {
+        ToolError::new(format!(
+            "Item not found — it may have been moved or deleted (item ids change \
+             when an item moves to another folder). {}",
+            format_com_error(&e)
+        ))
+    })?;
+    to_disp(item)
+}
+
+/// `client.py::_resolve_folder`: a well-known folder name maps to a default
+/// folder id; otherwise walk a `Inbox/Sub/Sub` path from the store root.
+fn resolve_folder(ns: &IDispatch, folder: Option<&str>) -> Result<IDispatch, ToolError> {
+    let name = folder.unwrap_or("inbox").trim();
+    if let Some(id) = c::folder_name_to_id(name) {
+        return to_disp(call_method(ns, "GetDefaultFolder", &mut [variant_from_i32(id)])?);
+    }
+    let inbox = to_disp(call_method(
+        ns,
+        "GetDefaultFolder",
+        &mut [variant_from_i32(c::OL_FOLDER_INBOX)],
+    )?)?;
+    let mut current = to_disp(get_property(&inbox, "Parent")?)?;
+    for part in name.split(['/', '\\']).filter(|p| !p.is_empty()) {
+        let folders = to_disp(get_property(&current, "Folders")?)?;
+        let count = variant_to_i32(&get_property(&folders, "Count")?).unwrap_or(0);
+        let mut found = None;
+        for i in 1..=count {
+            let sub = to_disp(call_method(&folders, "Item", &mut [variant_from_i32(i)])?)?;
+            let sub_name = variant_to_string(&get_property(&sub, "Name")?);
+            if sub_name.eq_ignore_ascii_case(part) {
+                found = Some(sub);
+                break;
+            }
+        }
+        current = match found {
+            Some(f) => f,
+            None => {
+                let cur_name = variant_to_string(&get_property(&current, "Name")?);
+                return Err(ToolError::new(format!(
+                    "Folder not found: {name:?} (no subfolder named {part:?} under {cur_name:?})"
+                )));
+            }
+        };
+    }
+    Ok(current)
+}
+
+/// `client.py::_truncate`: cap long bodies at `MAX_BODY_CHARS` *characters*
+/// (not bytes) so multi-byte UTF-8 content is never split mid-codepoint.
+fn truncate(text: &str) -> String {
+    if text.chars().count() > MAX_BODY_CHARS {
+        let head: String = text.chars().take(MAX_BODY_CHARS).collect();
+        format!("{head}\n\n[... truncated at {MAX_BODY_CHARS} characters]")
+    } else {
+        text.to_string()
+    }
+}
+
+/// `client.py::_email_summary`.
+fn email_summary(item: &IDispatch) -> Result<EmailSummary, ToolError> {
+    let att_count = {
+        let attachments = to_disp(get_property(item, "Attachments")?)?;
+        variant_to_i32(&get_property(&attachments, "Count")?).unwrap_or(0)
+    };
+    Ok(EmailSummary {
+        id: make_id(item)?,
+        subject: variant_to_string(&get_property(item, "Subject")?),
+        sender: variant_to_string(&get_property(item, "SenderName")?),
+        sender_email: variant_to_string(&get_property(item, "SenderEmailAddress")?),
+        to: variant_to_string(&get_property(item, "To")?),
+        received: variant_to_iso_string(&get_property(item, "ReceivedTime")?),
+        unread: variant_to_bool(&get_property(item, "UnRead")?).unwrap_or(false),
+        has_attachments: att_count > 0,
+    })
+}
+
+/// Shared tail of `list_emails`/`search_emails`: iterate a (sorted, possibly
+/// restricted) `Items` collection by 1-based index, building summaries until
+/// `count` is reached. Item order reflects the prior `Sort` call.
+fn collect_summaries(items: &IDispatch, count: i32) -> Result<Vec<EmailSummary>, ToolError> {
+    let total = variant_to_i32(&get_property(items, "Count")?).unwrap_or(0);
+    let mut results = Vec::new();
+    for i in 1..=total {
+        let item = to_disp(call_method(items, "Item", &mut [variant_from_i32(i)])?)?;
+        results.push(email_summary(&item)?);
+        if results.len() as i32 >= count {
+            break;
+        }
+    }
+    Ok(results)
+}
+
+/// `client.py::_compose`: build a `MailItem`, set recipients/subject/body.
+fn compose(
+    app: &IDispatch,
+    to: &[String],
+    subject: &str,
+    body: &str,
+    cc: Option<&[String]>,
+    bcc: Option<&[String]>,
+    html: bool,
+) -> Result<IDispatch, ToolError> {
+    let mail = to_disp(call_method(app, "CreateItem", &mut [variant_from_i32(c::OL_MAIL_ITEM)])?)?;
+    put_property(&mail, "To", variant_from_str(&to.join("; ")))?;
+    if let Some(cc) = cc {
+        if !cc.is_empty() {
+            put_property(&mail, "CC", variant_from_str(&cc.join("; ")))?;
+        }
+    }
+    if let Some(bcc) = bcc {
+        if !bcc.is_empty() {
+            put_property(&mail, "BCC", variant_from_str(&bcc.join("; ")))?;
+        }
+    }
+    put_property(&mail, "Subject", variant_from_str(subject))?;
+    if html {
+        put_property(&mail, "BodyFormat", variant_from_i32(c::OL_FORMAT_HTML))?;
+        put_property(&mail, "HTMLBody", variant_from_str(body))?;
+    } else {
+        put_property(&mail, "BodyFormat", variant_from_i32(c::OL_FORMAT_PLAIN))?;
+        put_property(&mail, "Body", variant_from_str(body))?;
+    }
+    Ok(mail)
+}
+
+impl OutlookClient for WindowsOutlookClient {
+    // ---- Email (implemented in Task 12) --------------------------------
+
+    fn list_folders(&self) -> Result<Vec<FolderInfo>, ToolError> {
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let inbox = to_disp(call_method(
+                &ns,
+                "GetDefaultFolder",
+                &mut [variant_from_i32(c::OL_FOLDER_INBOX)],
+            )?)?;
+            let root = to_disp(get_property(&inbox, "Parent")?)?;
+
+            fn walk(
+                folder: &IDispatch,
+                path: &str,
+                depth: u32,
+                results: &mut Vec<FolderInfo>,
+            ) -> Result<(), ToolError> {
+                let name = variant_to_string(&get_property(folder, "Name")?);
+                // `folder.Items.Count` can raise for some special folders;
+                // fall back to 0 like the Python try/except does.
+                let item_count = (|| -> Result<i32, ToolError> {
+                    let items = to_disp(get_property(folder, "Items")?)?;
+                    Ok(variant_to_i32(&get_property(&items, "Count")?).unwrap_or(0))
+                })()
+                .unwrap_or(0);
+                let unread = variant_to_i32(&get_property(folder, "UnReadItemCount")?).unwrap_or(0);
+                results.push(FolderInfo {
+                    name,
+                    path: path.to_string(),
+                    items: item_count,
+                    unread,
+                });
+                if depth >= 3 {
+                    return Ok(());
+                }
+                let subfolders = to_disp(get_property(folder, "Folders")?)?;
+                let count = variant_to_i32(&get_property(&subfolders, "Count")?).unwrap_or(0);
+                for i in 1..=count {
+                    let sub =
+                        to_disp(call_method(&subfolders, "Item", &mut [variant_from_i32(i)])?)?;
+                    let sub_name = variant_to_string(&get_property(&sub, "Name")?);
+                    walk(&sub, &format!("{path}/{sub_name}"), depth + 1, results)?;
+                }
+                Ok(())
+            }
+
+            let mut results = Vec::new();
+            let root_folders = to_disp(get_property(&root, "Folders")?)?;
+            let count = variant_to_i32(&get_property(&root_folders, "Count")?).unwrap_or(0);
+            for i in 1..=count {
+                let sub = to_disp(call_method(&root_folders, "Item", &mut [variant_from_i32(i)])?)?;
+                let sub_name = variant_to_string(&get_property(&sub, "Name")?);
+                walk(&sub, &sub_name, 1, &mut results)?;
+            }
+            Ok(results)
+        })
+    }
+
+    fn list_emails(
+        &self,
+        folder: String,
+        count: i32,
+        unread_only: bool,
+    ) -> Result<Vec<EmailSummary>, ToolError> {
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let count = count.clamp(1, MAX_EMAIL_COUNT);
+            let folder_obj = resolve_folder(&ns, Some(&folder))?;
+            let mut items = to_disp(get_property(&folder_obj, "Items")?)?;
+            if unread_only {
+                items = to_disp(call_method(
+                    &items,
+                    "Restrict",
+                    &mut [variant_from_str("[UnRead] = True")],
+                )?)?;
+            }
+            call_method(
+                &items,
+                "Sort",
+                &mut [variant_from_str("[ReceivedTime]"), variant_from_bool(true)],
+            )?;
+            collect_summaries(&items, count)
+        })
+    }
+
+    fn search_emails(
+        &self,
+        query: String,
+        folder: String,
+        count: i32,
+        since_days: Option<i32>,
+    ) -> Result<Vec<EmailSummary>, ToolError> {
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let count = count.clamp(1, MAX_EMAIL_COUNT);
+            // Escape single quotes by doubling them, exactly like the Python
+            // `query.replace("'", "''")` before interpolating into the DASL.
+            let q = query.replace('\'', "''");
+            let dasl = format!(
+                "@SQL=(\"urn:schemas:httpmail:subject\" LIKE '%{q}%' \
+                 OR \"urn:schemas:httpmail:fromname\" LIKE '%{q}%' \
+                 OR \"urn:schemas:httpmail:textdescription\" LIKE '%{q}%')"
+            );
+            let folder_obj = resolve_folder(&ns, Some(&folder))?;
+            let base_items = to_disp(get_property(&folder_obj, "Items")?)?;
+            let mut items =
+                to_disp(call_method(&base_items, "Restrict", &mut [variant_from_str(&dasl)])?)?;
+            if since_days.is_some_and(|d| d != 0) {
+                let days = since_days.unwrap();
+                let cutoff = chrono::Local::now().naive_local() - chrono::Duration::days(days as i64);
+                let filter = format!("[ReceivedTime] >= '{}'", jet_datetime(&cutoff));
+                items = to_disp(call_method(&items, "Restrict", &mut [variant_from_str(&filter)])?)?;
+            }
+            call_method(
+                &items,
+                "Sort",
+                &mut [variant_from_str("[ReceivedTime]"), variant_from_bool(true)],
+            )?;
+            collect_summaries(&items, count)
+        })
+    }
+
+    fn get_email(&self, email_id: String, prefer_html: bool) -> Result<EmailDetail, ToolError> {
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let item = get_item(&ns, &email_id)?;
+            let summary = email_summary(&item)?;
+            let cc = variant_to_string(&get_property(&item, "CC")?);
+            let bcc = variant_to_string(&get_property(&item, "BCC")?);
+            let body = truncate(&variant_to_string(&get_property(&item, "Body")?));
+            let html_body = if prefer_html {
+                Some(truncate(&variant_to_string(&get_property(&item, "HTMLBody")?)))
+            } else {
+                None
+            };
+            let attachments_obj = to_disp(get_property(&item, "Attachments")?)?;
+            let att_count = variant_to_i32(&get_property(&attachments_obj, "Count")?).unwrap_or(0);
+            let mut attachments = Vec::new();
+            for i in 1..=att_count {
+                let att =
+                    to_disp(call_method(&attachments_obj, "Item", &mut [variant_from_i32(i)])?)?;
+                attachments.push(variant_to_string(&get_property(&att, "FileName")?));
+            }
+            Ok(EmailDetail {
+                summary,
+                cc,
+                bcc,
+                body,
+                html_body,
+                attachments,
+            })
+        })
+    }
+
+    fn send_email(
+        &self,
+        to: Vec<String>,
+        subject: String,
+        body: String,
+        cc: Option<Vec<String>>,
+        bcc: Option<Vec<String>>,
+        html: bool,
+    ) -> Result<Value, ToolError> {
+        if to.is_empty() {
+            return Err(ToolError::new(
+                "send_email requires at least one recipient in 'to'.",
+            ));
+        }
+        self.with_com(|| {
+            let (app, _ns) = mapi()?;
+            let mail = compose(&app, &to, &subject, &body, cc.as_deref(), bcc.as_deref(), html)?;
+            call_method(&mail, "Send", &mut [])?;
+            Ok(json!({"status": "sent", "to": to.join("; "), "subject": subject}))
+        })
+    }
+
+    fn create_draft(
+        &self,
+        to: Vec<String>,
+        subject: String,
+        body: String,
+        cc: Option<Vec<String>>,
+        bcc: Option<Vec<String>>,
+        html: bool,
+    ) -> Result<Value, ToolError> {
+        self.with_com(|| {
+            let (app, _ns) = mapi()?;
+            let mail = compose(&app, &to, &subject, &body, cc.as_deref(), bcc.as_deref(), html)?;
+            call_method(&mail, "Save", &mut [])?; // Save first so EntryID exists
+            let id = make_id(&mail)?;
+            Ok(json!({"status": "draft_saved", "id": id, "subject": subject}))
+        })
+    }
+
+    fn reply_email(
+        &self,
+        email_id: String,
+        body: String,
+        reply_all: bool,
+        html: bool,
+        send: bool,
+    ) -> Result<Value, ToolError> {
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let item = get_item(&ns, &email_id)?;
+            let reply = to_disp(call_method(
+                &item,
+                if reply_all { "ReplyAll" } else { "Reply" },
+                &mut [],
+            )?)?;
+            if html {
+                let existing = variant_to_string(&get_property(&reply, "HTMLBody")?);
+                put_property(&reply, "HTMLBody", variant_from_str(&format!("{body}{existing}")))?;
+            } else {
+                let existing = variant_to_string(&get_property(&reply, "Body")?);
+                put_property(&reply, "Body", variant_from_str(&format!("{body}\n\n{existing}")))?;
+            }
+            if send {
+                call_method(&reply, "Send", &mut [])?;
+                let subject = variant_to_string(&get_property(&reply, "Subject")?);
+                Ok(json!({"status": "sent", "subject": subject}))
+            } else {
+                call_method(&reply, "Save", &mut [])?;
+                let id = make_id(&reply)?;
+                let subject = variant_to_string(&get_property(&reply, "Subject")?);
+                Ok(json!({"status": "draft_saved", "id": id, "subject": subject}))
+            }
+        })
+    }
+
+    fn move_email(&self, email_id: String, target_folder: String) -> Result<Value, ToolError> {
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let item = get_item(&ns, &email_id)?;
+            let target = resolve_folder(&ns, Some(&target_folder))?;
+            // `Move` takes the destination folder as its argument; wrap the
+            // IDispatch in a VARIANT (clone — `From<IDispatch>` consumes it).
+            let moved = to_disp(call_method(
+                &item,
+                "Move",
+                &mut [VARIANT::from(target.clone())],
+            )?)?;
+            let folder_name = variant_to_string(&get_property(&target, "Name")?);
+            let id = make_id(&moved)?; // EntryID changes on Move — return the new id.
+            Ok(json!({"status": "moved", "folder": folder_name, "id": id}))
+        })
+    }
+
+    fn delete_email(&self, email_id: String) -> Result<Value, ToolError> {
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let item = get_item(&ns, &email_id)?;
+            let subject = variant_to_string(&get_property(&item, "Subject")?);
+            call_method(&item, "Delete", &mut [])?;
+            Ok(json!({"status": "deleted", "subject": subject, "note": "Moved to Deleted Items."}))
+        })
+    }
+
+    // ---- Calendar (Task 13) --------------------------------------------
+
+    fn list_events(
+        &self,
+        _start_date: Option<String>,
+        _end_date: Option<String>,
+    ) -> Result<Vec<EventSummary>, ToolError> {
+        todo!("implemented in Task 13")
+    }
+
+    fn get_event(&self, _event_id: String) -> Result<EventDetail, ToolError> {
+        todo!("implemented in Task 13")
+    }
+
+    fn create_event(
+        &self,
+        _subject: String,
+        _start: String,
+        _end: String,
+        _body: Option<String>,
+        _location: Option<String>,
+        _attendees: Option<Vec<String>>,
+        _all_day: bool,
+        _reminder_minutes: Option<i32>,
+    ) -> Result<Value, ToolError> {
+        todo!("implemented in Task 13")
+    }
+
+    fn respond_to_meeting(
+        &self,
+        _event_id: String,
+        _response: String,
+        _comment: Option<String>,
+        _send: bool,
+    ) -> Result<Value, ToolError> {
+        todo!("implemented in Task 13")
+    }
+
+    // ---- Attachments (Task 14) -----------------------------------------
+
+    fn list_attachments(&self, _email_id: String) -> Result<Vec<AttachmentInfo>, ToolError> {
+        todo!("implemented in Task 14")
+    }
+
+    fn save_attachments(
+        &self,
+        _email_id: String,
+        _save_dir: String,
+        _attachment_names: Option<Vec<String>>,
+    ) -> Result<Vec<Value>, ToolError> {
+        todo!("implemented in Task 14")
+    }
+
+    // ---- Tasks (Task 15) -----------------------------------------------
+
+    fn list_tasks(&self, _include_completed: bool) -> Result<Vec<TaskSummary>, ToolError> {
+        todo!("implemented in Task 15")
+    }
+
+    fn create_task(
+        &self,
+        _subject: String,
+        _body: Option<String>,
+        _due_date: Option<String>,
+        _importance: String,
+    ) -> Result<Value, ToolError> {
+        todo!("implemented in Task 15")
+    }
+
+    fn complete_task(&self, _task_id: String) -> Result<Value, ToolError> {
+        todo!("implemented in Task 15")
+    }
+
+    // ---- Notes (Task 16) -----------------------------------------------
+
+    fn list_notes(&self) -> Result<Vec<NoteSummary>, ToolError> {
+        todo!("implemented in Task 16")
+    }
+
+    fn get_note(&self, _note_id: String) -> Result<NoteDetail, ToolError> {
+        todo!("implemented in Task 16")
+    }
+
+    fn create_note(&self, _body: String) -> Result<Value, ToolError> {
+        todo!("implemented in Task 16")
+    }
+}
