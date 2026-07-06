@@ -78,7 +78,9 @@ use windows::Win32::System::Com::{
     CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, DISPATCH_METHOD, DISPATCH_PROPERTYGET,
     DISPATCH_PROPERTYPUT, DISPPARAMS, EXCEPINFO,
 };
-use windows::Win32::System::Variant::{VARIANT, VariantTimeToSystemTime};
+use windows::Win32::System::Variant::{
+    SystemTimeToVariantTime, VariantTimeToSystemTime, VARIANT, VT_DATE,
+};
 use windows::Win32::Foundation::SYSTEMTIME;
 
 /// One per COM call (mirrors `pythoncom.CoInitialize()` inside `client.py`'s
@@ -186,6 +188,15 @@ pub fn call_method(disp: &IDispatch, name: &str, args: &mut [VARIANT]) -> WinRes
     invoke(disp, name, DISPATCH_METHOD, args)
 }
 
+/// Mirrors Python's `hasattr(obj, name)` for a COM dispatch member: resolves
+/// the name via `GetIDsOfNames`, returning `false` when the member doesn't
+/// exist. Used by `respond_to_meeting` to distinguish a `MeetingItem` (which
+/// exposes `GetAssociatedAppointment`) from an `AppointmentItem` (which does
+/// not) without invoking the method for its side effect.
+pub fn has_member(disp: &IDispatch, name: &str) -> bool {
+    name_to_dispid(disp, name).is_ok()
+}
+
 /// Translation of `outlook_mcp/errors.py::format_com_error`. Errors enriched
 /// by `enrich_error` above already carry the COM exception's own description
 /// text in `message()` (equivalent to Python's `excepinfo[2]`).
@@ -213,6 +224,40 @@ pub fn variant_from_i32(value: i32) -> VARIANT {
 
 pub fn variant_from_bool(value: bool) -> VARIANT {
     VARIANT::from(value)
+}
+
+/// Builds a `VT_DATE` VARIANT (OLE Automation date) from a `NaiveDateTime`,
+/// so Outlook properties typed as `Date` (e.g. `AppointmentItem.Start`/`End`)
+/// receive the exact type pywin32 marshals a Python `datetime` to. There is no
+/// `From<…> for VARIANT` that yields `VT_DATE` (a plain `f64` becomes `VT_R8`),
+/// so this converts via `SystemTimeToVariantTime` and writes the union by hand.
+pub fn variant_from_datetime(dt: &chrono::NaiveDateTime) -> WinResult<VARIANT> {
+    use chrono::{Datelike, Timelike};
+    let st = SYSTEMTIME {
+        wYear: dt.year() as u16,
+        wMonth: dt.month() as u16,
+        wDayOfWeek: 0,
+        wDay: dt.day() as u16,
+        wHour: dt.hour() as u16,
+        wMinute: dt.minute() as u16,
+        wSecond: dt.second() as u16,
+        wMilliseconds: 0,
+    };
+    let mut date: f64 = 0.0;
+    // Returns nonzero on success; 0 signals an out-of-range date.
+    if unsafe { SystemTimeToVariantTime(&st, &mut date) } == 0 {
+        return Err(WinError::new(
+            windows::core::HRESULT(-2147024809), // E_INVALIDARG (0x80070057)
+            format!("Could not convert {dt} to an OLE Automation date"),
+        ));
+    }
+    let mut variant = VARIANT::default();
+    unsafe {
+        let inner = &mut *variant.Anonymous.Anonymous;
+        inner.vt = VT_DATE;
+        inner.Anonymous.date = date;
+    }
+    Ok(variant)
 }
 
 /// For VT_BSTR-typed properties (Outlook `Subject`/`Name`/etc.). Returns an

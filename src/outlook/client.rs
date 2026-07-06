@@ -17,15 +17,20 @@ use windows::Win32::System::Variant::VARIANT;
 use crate::constants as c;
 use crate::error::ToolError;
 use crate::outlook::com::{
-    call_method, create_com_object, format_com_error, get_property, jet_datetime, make_item_id,
-    parse_item_id, put_property, variant_from_bool, variant_from_i32, variant_from_str,
-    variant_to_bool, variant_to_i32, variant_to_iso_string, variant_to_string, ComGuard,
+    call_method, create_com_object, format_com_error, get_property, has_member, jet_datetime,
+    make_item_id, parse_item_id, put_property, variant_from_bool, variant_from_datetime,
+    variant_from_i32, variant_from_str, variant_to_bool, variant_to_i32, variant_to_iso_string,
+    variant_to_string, ComGuard,
 };
 use crate::outlook::types::*;
 use crate::outlook::OutlookClient;
 
 /// Matches `MAX_EMAIL_COUNT` in `client.py`.
 const MAX_EMAIL_COUNT: i32 = 50;
+/// Matches `MAX_CALENDAR_ITEMS` in `client.py`. Caps `list_events` because a
+/// recurring appointment without an end date expands forever under
+/// `IncludeRecurrences`.
+const MAX_CALENDAR_ITEMS: usize = 250;
 /// Matches `MAX_BODY_CHARS` in `client.py`.
 const MAX_BODY_CHARS: usize = 100_000;
 
@@ -154,6 +159,46 @@ fn truncate(text: &str) -> String {
     } else {
         text.to_string()
     }
+}
+
+/// `client.py::_parse_dt`: parse a user-supplied ISO date/datetime. Mirrors
+/// Python's `datetime.fromisoformat`, accepting a bare date (`2026-06-10`) or a
+/// date-time with `T` or space separator, with or without seconds/fractional
+/// seconds. The error message mirrors the Python original (with this file's
+/// `{:?}` quoting convention rather than Python's `!r`).
+fn parse_dt(value: &str, field: &str) -> Result<chrono::NaiveDateTime, ToolError> {
+    let trimmed = value.trim();
+    // Normalize a single space separator to `T` so one set of formats covers
+    // both `2026-06-10T14:30` and `2026-06-10 14:30` (Python 3.11+ accepts it).
+    let normalized = trimmed.replacen(' ', "T", 1);
+    for fmt in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"] {
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&normalized, fmt) {
+            return Ok(dt);
+        }
+    }
+    if let Ok(d) = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        return Ok(d.and_hms_opt(0, 0, 0).unwrap());
+    }
+    Err(ToolError::new(format!(
+        "Invalid {field} {value:?}: expected ISO format like '2026-06-10' or '2026-06-10T14:30'"
+    )))
+}
+
+/// `client.py::_event_summary`.
+fn event_summary(item: &IDispatch) -> Result<EventSummary, ToolError> {
+    let meeting_status =
+        variant_to_i32(&get_property(item, "MeetingStatus")?).unwrap_or(c::OL_NONMEETING);
+    Ok(EventSummary {
+        id: make_id(item)?,
+        subject: variant_to_string(&get_property(item, "Subject")?),
+        start: variant_to_iso_string(&get_property(item, "Start")?),
+        end: variant_to_iso_string(&get_property(item, "End")?),
+        location: variant_to_string(&get_property(item, "Location")?),
+        organizer: variant_to_string(&get_property(item, "Organizer")?),
+        all_day: variant_to_bool(&get_property(item, "AllDayEvent")?).unwrap_or(false),
+        is_recurring: variant_to_bool(&get_property(item, "IsRecurring")?).unwrap_or(false),
+        is_meeting: meeting_status != c::OL_NONMEETING,
+    })
 }
 
 /// `client.py::_email_summary`.
@@ -487,38 +532,174 @@ impl OutlookClient for WindowsOutlookClient {
 
     fn list_events(
         &self,
-        _start_date: Option<String>,
-        _end_date: Option<String>,
+        start_date: Option<String>,
+        end_date: Option<String>,
     ) -> Result<Vec<EventSummary>, ToolError> {
-        todo!("implemented in Task 13")
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let start = match &start_date {
+                Some(s) => parse_dt(s, "start_date")?,
+                None => chrono::Local::now()
+                    .date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            };
+            let mut end = match &end_date {
+                Some(s) => parse_dt(s, "end_date")?,
+                None => start + chrono::Duration::days(7),
+            };
+            // If only a bare date was given for the end, treat it as the whole
+            // end day (Python: `end.time() == time.min and "T" not in end_date`).
+            if let Some(ed) = &end_date {
+                if end.time() == chrono::NaiveTime::MIN && !ed.contains('T') {
+                    end = end.date().and_hms_micro_opt(23, 59, 59, 999_999).unwrap();
+                }
+            }
+            let calendar = to_disp(call_method(
+                &ns,
+                "GetDefaultFolder",
+                &mut [variant_from_i32(c::OL_FOLDER_CALENDAR)],
+            )?)?;
+            let items = to_disp(get_property(&calendar, "Items")?)?;
+            // Must precede Sort/Restrict — setting it afterwards has no effect.
+            put_property(&items, "IncludeRecurrences", variant_from_bool(true))?;
+            call_method(&items, "Sort", &mut [variant_from_str("[Start]")])?;
+            let flt = format!(
+                "[Start] >= '{}' AND [Start] <= '{}'",
+                jet_datetime(&start),
+                jet_datetime(&end)
+            );
+            let restricted =
+                to_disp(call_method(&items, "Restrict", &mut [variant_from_str(&flt)])?)?;
+            // Enumerate with GetFirst/GetNext (not Count/Item): under
+            // IncludeRecurrences the collection can expand without bound, so we
+            // must stream it and stop at MAX_CALENDAR_ITEMS.
+            let mut results = Vec::new();
+            let mut current = call_method(&restricted, "GetFirst", &mut [])?;
+            while let Ok(item) = IDispatch::try_from(&current) {
+                results.push(event_summary(&item)?);
+                if results.len() >= MAX_CALENDAR_ITEMS {
+                    break;
+                }
+                current = call_method(&restricted, "GetNext", &mut [])?;
+            }
+            Ok(results)
+        })
     }
 
-    fn get_event(&self, _event_id: String) -> Result<EventDetail, ToolError> {
-        todo!("implemented in Task 13")
+    fn get_event(&self, event_id: String) -> Result<EventDetail, ToolError> {
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let item = get_item(&ns, &event_id)?;
+            let summary = event_summary(&item)?;
+            Ok(EventDetail {
+                summary,
+                body: truncate(&variant_to_string(&get_property(&item, "Body")?)),
+                required_attendees: variant_to_string(&get_property(&item, "RequiredAttendees")?),
+                optional_attendees: variant_to_string(&get_property(&item, "OptionalAttendees")?),
+                response_status: variant_to_i32(&get_property(&item, "ResponseStatus")?),
+            })
+        })
     }
 
     fn create_event(
         &self,
-        _subject: String,
-        _start: String,
-        _end: String,
-        _body: Option<String>,
-        _location: Option<String>,
-        _attendees: Option<Vec<String>>,
-        _all_day: bool,
-        _reminder_minutes: Option<i32>,
+        subject: String,
+        start: String,
+        end: String,
+        body: Option<String>,
+        location: Option<String>,
+        attendees: Option<Vec<String>>,
+        all_day: bool,
+        reminder_minutes: Option<i32>,
     ) -> Result<Value, ToolError> {
-        todo!("implemented in Task 13")
+        self.with_com(|| {
+            let (app, _ns) = mapi()?;
+            let appt = to_disp(call_method(
+                &app,
+                "CreateItem",
+                &mut [variant_from_i32(c::OL_APPOINTMENT_ITEM)],
+            )?)?;
+            put_property(&appt, "Subject", variant_from_str(&subject))?;
+            put_property(&appt, "Start", variant_from_datetime(&parse_dt(&start, "start")?)?)?;
+            put_property(&appt, "End", variant_from_datetime(&parse_dt(&end, "end")?)?)?;
+            if all_day {
+                put_property(&appt, "AllDayEvent", variant_from_bool(true))?;
+            }
+            if let Some(body) = body.as_deref().filter(|b| !b.is_empty()) {
+                put_property(&appt, "Body", variant_from_str(body))?;
+            }
+            if let Some(location) = location.as_deref().filter(|l| !l.is_empty()) {
+                put_property(&appt, "Location", variant_from_str(location))?;
+            }
+            if let Some(minutes) = reminder_minutes {
+                put_property(&appt, "ReminderSet", variant_from_bool(true))?;
+                put_property(&appt, "ReminderMinutesBeforeStart", variant_from_i32(minutes))?;
+            }
+            let status = match attendees {
+                Some(addresses) if !addresses.is_empty() => {
+                    put_property(&appt, "MeetingStatus", variant_from_i32(c::OL_MEETING))?;
+                    let recipients = to_disp(get_property(&appt, "Recipients")?)?;
+                    for address in &addresses {
+                        call_method(&recipients, "Add", &mut [variant_from_str(address)])?;
+                    }
+                    call_method(&recipients, "ResolveAll", &mut [])?;
+                    call_method(&appt, "Send", &mut [])?;
+                    "meeting_sent"
+                }
+                _ => {
+                    call_method(&appt, "Save", &mut [])?;
+                    "saved"
+                }
+            };
+            Ok(json!({"status": status, "id": make_id(&appt)?, "subject": subject}))
+        })
     }
 
     fn respond_to_meeting(
         &self,
-        _event_id: String,
-        _response: String,
-        _comment: Option<String>,
-        _send: bool,
+        event_id: String,
+        response: String,
+        comment: Option<String>,
+        send: bool,
     ) -> Result<Value, ToolError> {
-        todo!("implemented in Task 13")
+        let response_key = response.trim().to_lowercase();
+        let response_id = c::meeting_response_to_id(&response_key).ok_or_else(|| {
+            ToolError::new(format!(
+                "Invalid response {response:?}: use 'accept', 'decline' or 'tentative'."
+            ))
+        })?;
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let mut item = get_item(&ns, &event_id)?;
+            // A meeting request from the inbox resolves to a MeetingItem; get
+            // its appointment. Calendar ids resolve straight to appointments.
+            if has_member(&item, "GetAssociatedAppointment") {
+                item = to_disp(call_method(
+                    &item,
+                    "GetAssociatedAppointment",
+                    &mut [variant_from_bool(true)],
+                )?)?;
+            }
+            let resp = call_method(
+                &item,
+                "Respond",
+                &mut [variant_from_i32(response_id), variant_from_bool(true)],
+            )?;
+            if let Ok(resp) = IDispatch::try_from(&resp) {
+                if let Some(comment) = comment.as_deref().filter(|c| !c.is_empty()) {
+                    put_property(&resp, "Body", variant_from_str(comment))?;
+                }
+                if send {
+                    call_method(&resp, "Send", &mut [])?;
+                } else {
+                    call_method(&resp, "Save", &mut [])?;
+                }
+            }
+            let subject = variant_to_string(&get_property(&item, "Subject")?);
+            let status = format!("{response_key}{}", if send { "_sent" } else { "_saved" });
+            Ok(json!({"status": status, "subject": subject}))
+        })
     }
 
     // ---- Attachments (Task 14) -----------------------------------------
