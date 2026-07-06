@@ -224,6 +224,21 @@ fn event_summary(item: &IDispatch) -> Result<EventSummary, ToolError> {
     })
 }
 
+/// `client.py::_task_summary`. `status` and `importance` are the raw numeric
+/// COM properties (not name lookups); a missing value falls back to Outlook's
+/// defaults exactly like the Python `getattr(..., default)`.
+fn task_summary(item: &IDispatch) -> Result<TaskSummary, ToolError> {
+    Ok(TaskSummary {
+        id: make_id(item)?,
+        subject: variant_to_string(&get_property(item, "Subject")?),
+        due_date: variant_to_iso_string(&get_property(item, "DueDate")?),
+        complete: variant_to_bool(&get_property(item, "Complete")?).unwrap_or(false),
+        status: variant_to_i32(&get_property(item, "Status")?).unwrap_or(c::OL_TASK_NOT_STARTED),
+        importance: variant_to_i32(&get_property(item, "Importance")?)
+            .unwrap_or(c::OL_IMPORTANCE_NORMAL),
+    })
+}
+
 /// `client.py::_email_summary`.
 fn email_summary(item: &IDispatch) -> Result<EmailSummary, ToolError> {
     let att_count = {
@@ -814,22 +829,77 @@ impl OutlookClient for WindowsOutlookClient {
 
     // ---- Tasks (Task 15) -----------------------------------------------
 
-    fn list_tasks(&self, _include_completed: bool) -> Result<Vec<TaskSummary>, ToolError> {
-        todo!("implemented in Task 15")
+    fn list_tasks(&self, include_completed: bool) -> Result<Vec<TaskSummary>, ToolError> {
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let tasks = to_disp(call_method(
+                &ns,
+                "GetDefaultFolder",
+                &mut [variant_from_i32(c::OL_FOLDER_TASKS)],
+            )?)?;
+            let mut items = to_disp(get_property(&tasks, "Items")?)?;
+            if !include_completed {
+                items = to_disp(call_method(
+                    &items,
+                    "Restrict",
+                    &mut [variant_from_str("[Complete] = False")],
+                )?)?;
+            }
+            let count = variant_to_i32(&get_property(&items, "Count")?).unwrap_or(0);
+            let mut results = Vec::new();
+            for i in 1..=count {
+                let item = to_disp(call_method(&items, "Item", &mut [variant_from_i32(i)])?)?;
+                results.push(task_summary(&item)?);
+            }
+            Ok(results)
+        })
     }
 
     fn create_task(
         &self,
-        _subject: String,
-        _body: Option<String>,
-        _due_date: Option<String>,
-        _importance: String,
+        subject: String,
+        body: Option<String>,
+        due_date: Option<String>,
+        importance: String,
     ) -> Result<Value, ToolError> {
-        todo!("implemented in Task 15")
+        let importance_key = importance.trim().to_lowercase();
+        let importance_id = c::importance_name_to_id(&importance_key).ok_or_else(|| {
+            ToolError::new(format!(
+                "Invalid importance {importance:?}: use 'low', 'normal' or 'high'."
+            ))
+        })?;
+        self.with_com(|| {
+            let (app, _ns) = mapi()?;
+            let task = to_disp(call_method(
+                &app,
+                "CreateItem",
+                &mut [variant_from_i32(c::OL_TASK_ITEM)],
+            )?)?;
+            put_property(&task, "Subject", variant_from_str(&subject))?;
+            if let Some(body) = body.as_deref().filter(|b| !b.is_empty()) {
+                put_property(&task, "Body", variant_from_str(body))?;
+            }
+            if let Some(due) = due_date.as_deref().filter(|d| !d.is_empty()) {
+                put_property(
+                    &task,
+                    "DueDate",
+                    variant_from_datetime(&parse_dt(due, "due_date")?)?,
+                )?;
+            }
+            put_property(&task, "Importance", variant_from_i32(importance_id))?;
+            call_method(&task, "Save", &mut [])?;
+            Ok(json!({"status": "created", "id": make_id(&task)?, "subject": subject}))
+        })
     }
 
-    fn complete_task(&self, _task_id: String) -> Result<Value, ToolError> {
-        todo!("implemented in Task 15")
+    fn complete_task(&self, task_id: String) -> Result<Value, ToolError> {
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let task = get_item(&ns, &task_id)?;
+            call_method(&task, "MarkComplete", &mut [])?;
+            let subject = variant_to_string(&get_property(&task, "Subject")?);
+            Ok(json!({"status": "completed", "subject": subject}))
+        })
     }
 
     // ---- Notes (Task 16) -----------------------------------------------
