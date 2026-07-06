@@ -5,10 +5,8 @@
 //! which initializes COM on the current thread (mirroring the Python
 //! `@_com` decorator) and maps `windows::core::Error` into [`ToolError`].
 //!
-//! Only the 9 email methods are real in this task (Task 12). The remaining
-//! 12 trait methods (calendar/attachments/tasks/notes) are `todo!()` stubs
-//! that name the task that will implement them (Tasks 13-16); Rust requires
-//! the whole trait to be implemented for the `impl` block to compile.
+//! All 21 `OutlookClient` trait methods are implemented (email, calendar,
+//! attachments, tasks, and notes; Tasks 12-16) — no `todo!()` stubs remain.
 
 use serde_json::{json, Value};
 use windows::Win32::System::Com::IDispatch;
@@ -236,6 +234,26 @@ fn task_summary(item: &IDispatch) -> Result<TaskSummary, ToolError> {
         status: variant_to_i32(&get_property(item, "Status")?).unwrap_or(c::OL_TASK_NOT_STARTED),
         importance: variant_to_i32(&get_property(item, "Importance")?)
             .unwrap_or(c::OL_IMPORTANCE_NORMAL),
+    })
+}
+
+/// `client.py::_note_summary`. Notes have no native `Subject` property, so the
+/// subject is derived from the first non-empty line of the `Body`: strip the
+/// body, take the first line if anything remains (else an empty string), then
+/// truncate to 120 *characters* (`first_line[:120]`). `str::lines()` splits on
+/// `\n`/`\r\n`, mirroring Python's `splitlines()[0]` for note bodies.
+fn note_summary(item: &IDispatch) -> Result<NoteSummary, ToolError> {
+    let body = variant_to_string(&get_property(item, "Body")?);
+    let trimmed = body.trim();
+    let first_line = if trimmed.is_empty() {
+        ""
+    } else {
+        trimmed.lines().next().unwrap_or("")
+    };
+    Ok(NoteSummary {
+        id: make_id(item)?,
+        subject: first_line.chars().take(120).collect(),
+        created: variant_to_iso_string(&get_property(item, "CreationTime")?),
     })
 }
 
@@ -905,14 +923,51 @@ impl OutlookClient for WindowsOutlookClient {
     // ---- Notes (Task 16) -----------------------------------------------
 
     fn list_notes(&self) -> Result<Vec<NoteSummary>, ToolError> {
-        todo!("implemented in Task 16")
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let notes = to_disp(call_method(
+                &ns,
+                "GetDefaultFolder",
+                &mut [variant_from_i32(c::OL_FOLDER_NOTES)],
+            )?)?;
+            let items = to_disp(get_property(&notes, "Items")?)?;
+            let count = variant_to_i32(&get_property(&items, "Count")?).unwrap_or(0);
+            let mut results = Vec::new();
+            for i in 1..=count {
+                let item = to_disp(call_method(&items, "Item", &mut [variant_from_i32(i)])?)?;
+                results.push(note_summary(&item)?);
+            }
+            Ok(results)
+        })
     }
 
-    fn get_note(&self, _note_id: String) -> Result<NoteDetail, ToolError> {
-        todo!("implemented in Task 16")
+    fn get_note(&self, note_id: String) -> Result<NoteDetail, ToolError> {
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let note = get_item(&ns, &note_id)?;
+            let summary = note_summary(&note)?;
+            Ok(NoteDetail {
+                summary,
+                body: truncate(&variant_to_string(&get_property(&note, "Body")?)),
+            })
+        })
     }
 
-    fn create_note(&self, _body: String) -> Result<Value, ToolError> {
-        todo!("implemented in Task 16")
+    fn create_note(&self, body: String) -> Result<Value, ToolError> {
+        // Validate before touching COM (fail-fast, like `create_task`).
+        if body.is_empty() {
+            return Err(ToolError::new("create_note requires a non-empty body."));
+        }
+        self.with_com(|| {
+            let (app, _ns) = mapi()?;
+            let note = to_disp(call_method(
+                &app,
+                "CreateItem",
+                &mut [variant_from_i32(c::OL_NOTE_ITEM)],
+            )?)?;
+            put_property(&note, "Body", variant_from_str(&body))?;
+            call_method(&note, "Save", &mut [])?;
+            Ok(json!({"status": "created", "id": make_id(&note)?}))
+        })
     }
 }
