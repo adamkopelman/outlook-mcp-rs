@@ -3,8 +3,9 @@ use std::sync::Arc;
 use outlook_mcp_rs::outlook::fake::{FakeOutlookClient, EMAIL_ID};
 use outlook_mcp_rs::server::{
     CreateDraftParams, CreateEventParams, DeleteEmailParams, GetEmailParams, GetEventParams,
-    ListEmailsParams, ListEventsParams, MoveEmailParams, OutlookMcpServer, ReplyEmailParams,
-    RespondToMeetingParams, SearchEmailsParams, SendEmailParams,
+    ListAttachmentsParams, ListEmailsParams, ListEventsParams, MoveEmailParams, OutlookMcpServer,
+    ReplyEmailParams, RespondToMeetingParams, SaveAttachmentsParams, SearchEmailsParams,
+    SendEmailParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -252,4 +253,32 @@ async fn respond_to_meeting_defaults_send_true() {
     let (_, args) = &fake.calls()[0];
     assert_eq!(args["response"], "accept");
     assert_eq!(args["send"], true);
+}
+
+#[tokio::test]
+async fn list_attachments_returns_filename() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let result = server
+        .list_attachments(Parameters(ListAttachmentsParams { email_id: EMAIL_ID.to_string() }))
+        .await
+        .unwrap();
+    assert_eq!(result_json(&result)[0]["filename"], "report.pdf");
+}
+
+#[tokio::test]
+async fn save_attachments_passes_dir_and_names() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    server
+        .save_attachments(Parameters(SaveAttachmentsParams {
+            email_id: EMAIL_ID.to_string(),
+            save_dir: "/tmp/x".to_string(),
+            attachment_names: Some(vec!["report.pdf".to_string()]),
+        }))
+        .await
+        .unwrap();
+    let (_, args) = &fake.calls()[0];
+    assert_eq!(args["save_dir"], "/tmp/x");
+    assert_eq!(args["attachment_names"], json!(["report.pdf"]));
 }

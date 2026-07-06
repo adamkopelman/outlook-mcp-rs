@@ -161,6 +161,21 @@ pub struct RespondToMeetingParams {
     pub send: bool,
 }
 
+// ---- Attachments ----
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListAttachmentsParams {
+    pub email_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SaveAttachmentsParams {
+    pub email_id: String,
+    pub save_dir: String,
+    #[serde(default)]
+    pub attachment_names: Option<Vec<String>>,
+}
+
 #[tool_router]
 impl OutlookMcpServer {
     #[tool(description = "List Outlook mail folders (name, path, item counts).")]
@@ -293,6 +308,28 @@ impl OutlookMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
         let result = run_blocking(move || client.respond_to_meeting(event_id, response, comment, send)).await?;
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    // ---- Attachments ----
+
+    #[tool(description = "List an email's attachments (filename and size).")]
+    pub async fn list_attachments(
+        &self,
+        Parameters(ListAttachmentsParams { email_id }): Parameters<ListAttachmentsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.clone();
+        let result = run_blocking(move || client.list_attachments(email_id)).await?;
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    #[tool(description = "Save an email's attachments to a local directory.")]
+    pub async fn save_attachments(
+        &self,
+        Parameters(SaveAttachmentsParams { email_id, save_dir, attachment_names }): Parameters<SaveAttachmentsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.clone();
+        let result = run_blocking(move || client.save_attachments(email_id, save_dir, attachment_names)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 }
