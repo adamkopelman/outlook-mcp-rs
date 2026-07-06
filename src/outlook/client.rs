@@ -207,17 +207,19 @@ fn parse_dt(value: &str, field: &str) -> Result<chrono::NaiveDateTime, ToolError
 
 /// `client.py::_event_summary`.
 fn event_summary(item: &IDispatch) -> Result<EventSummary, ToolError> {
-    let meeting_status =
-        variant_to_i32(&get_property(item, "MeetingStatus")?).unwrap_or(c::OL_NONMEETING);
+    let meeting_status = variant_to_i32(&get_property(item, "MeetingStatus").unwrap_or_default())
+        .unwrap_or(c::OL_NONMEETING);
     Ok(EventSummary {
         id: make_id(item)?,
-        subject: variant_to_string(&get_property(item, "Subject")?),
-        start: variant_to_iso_string(&get_property(item, "Start")?),
-        end: variant_to_iso_string(&get_property(item, "End")?),
-        location: variant_to_string(&get_property(item, "Location")?),
-        organizer: variant_to_string(&get_property(item, "Organizer")?),
-        all_day: variant_to_bool(&get_property(item, "AllDayEvent")?).unwrap_or(false),
-        is_recurring: variant_to_bool(&get_property(item, "IsRecurring")?).unwrap_or(false),
+        subject: variant_to_string(&get_property(item, "Subject").unwrap_or_default()),
+        start: variant_to_iso_string(&get_property(item, "Start").unwrap_or_default()),
+        end: variant_to_iso_string(&get_property(item, "End").unwrap_or_default()),
+        location: variant_to_string(&get_property(item, "Location").unwrap_or_default()),
+        organizer: variant_to_string(&get_property(item, "Organizer").unwrap_or_default()),
+        all_day: variant_to_bool(&get_property(item, "AllDayEvent").unwrap_or_default())
+            .unwrap_or(false),
+        is_recurring: variant_to_bool(&get_property(item, "IsRecurring").unwrap_or_default())
+            .unwrap_or(false),
         is_meeting: meeting_status != c::OL_NONMEETING,
     })
 }
@@ -228,11 +230,13 @@ fn event_summary(item: &IDispatch) -> Result<EventSummary, ToolError> {
 fn task_summary(item: &IDispatch) -> Result<TaskSummary, ToolError> {
     Ok(TaskSummary {
         id: make_id(item)?,
-        subject: variant_to_string(&get_property(item, "Subject")?),
-        due_date: variant_to_iso_string(&get_property(item, "DueDate")?),
-        complete: variant_to_bool(&get_property(item, "Complete")?).unwrap_or(false),
-        status: variant_to_i32(&get_property(item, "Status")?).unwrap_or(c::OL_TASK_NOT_STARTED),
-        importance: variant_to_i32(&get_property(item, "Importance")?)
+        subject: variant_to_string(&get_property(item, "Subject").unwrap_or_default()),
+        due_date: variant_to_iso_string(&get_property(item, "DueDate").unwrap_or_default()),
+        complete: variant_to_bool(&get_property(item, "Complete").unwrap_or_default())
+            .unwrap_or(false),
+        status: variant_to_i32(&get_property(item, "Status").unwrap_or_default())
+            .unwrap_or(c::OL_TASK_NOT_STARTED),
+        importance: variant_to_i32(&get_property(item, "Importance").unwrap_or_default())
             .unwrap_or(c::OL_IMPORTANCE_NORMAL),
     })
 }
@@ -243,7 +247,7 @@ fn task_summary(item: &IDispatch) -> Result<TaskSummary, ToolError> {
 /// truncate to 120 *characters* (`first_line[:120]`). `str::lines()` splits on
 /// `\n`/`\r\n`, mirroring Python's `splitlines()[0]` for note bodies.
 fn note_summary(item: &IDispatch) -> Result<NoteSummary, ToolError> {
-    let body = variant_to_string(&get_property(item, "Body")?);
+    let body = variant_to_string(&get_property(item, "Body").unwrap_or_default());
     let trimmed = body.trim();
     let first_line = if trimmed.is_empty() {
         ""
@@ -253,24 +257,28 @@ fn note_summary(item: &IDispatch) -> Result<NoteSummary, ToolError> {
     Ok(NoteSummary {
         id: make_id(item)?,
         subject: first_line.chars().take(120).collect(),
-        created: variant_to_iso_string(&get_property(item, "CreationTime")?),
+        created: variant_to_iso_string(&get_property(item, "CreationTime").unwrap_or_default()),
     })
 }
 
 /// `client.py::_email_summary`.
 fn email_summary(item: &IDispatch) -> Result<EmailSummary, ToolError> {
-    let att_count = {
+    // `getattr(item, "Attachments", None)` then `attachments and attachments.Count > 0`:
+    // a non-mail item may lack an `Attachments` collection entirely, so tolerate a
+    // missing property (fall back to 0) rather than propagating the COM error.
+    let att_count = (|| -> Result<i32, ToolError> {
         let attachments = to_disp(get_property(item, "Attachments")?)?;
-        variant_to_i32(&get_property(&attachments, "Count")?).unwrap_or(0)
-    };
+        Ok(variant_to_i32(&get_property(&attachments, "Count")?).unwrap_or(0))
+    })()
+    .unwrap_or(0);
     Ok(EmailSummary {
         id: make_id(item)?,
-        subject: variant_to_string(&get_property(item, "Subject")?),
-        sender: variant_to_string(&get_property(item, "SenderName")?),
-        sender_email: variant_to_string(&get_property(item, "SenderEmailAddress")?),
-        to: variant_to_string(&get_property(item, "To")?),
-        received: variant_to_iso_string(&get_property(item, "ReceivedTime")?),
-        unread: variant_to_bool(&get_property(item, "UnRead")?).unwrap_or(false),
+        subject: variant_to_string(&get_property(item, "Subject").unwrap_or_default()),
+        sender: variant_to_string(&get_property(item, "SenderName").unwrap_or_default()),
+        sender_email: variant_to_string(&get_property(item, "SenderEmailAddress").unwrap_or_default()),
+        to: variant_to_string(&get_property(item, "To").unwrap_or_default()),
+        received: variant_to_iso_string(&get_property(item, "ReceivedTime").unwrap_or_default()),
+        unread: variant_to_bool(&get_property(item, "UnRead").unwrap_or_default()).unwrap_or(false),
         has_attachments: att_count > 0,
     })
 }
