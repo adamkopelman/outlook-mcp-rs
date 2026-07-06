@@ -35,3 +35,9 @@ mod tests {
         assert_eq!(b.to_string(), "owned");
     }
 }
+
+impl From<ToolError> for rmcp::ErrorData {
+    fn from(err: ToolError) -> Self {
+        rmcp::ErrorData::internal_error(err.0, None)
+    }
+}
