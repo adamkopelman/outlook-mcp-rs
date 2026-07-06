@@ -176,6 +176,31 @@ pub struct SaveAttachmentsParams {
     pub attachment_names: Option<Vec<String>>,
 }
 
+// ---- Tasks ----
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListTasksParams {
+    #[serde(default)]
+    pub include_completed: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateTaskParams {
+    pub subject: String,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub due_date: Option<String>,
+    #[serde(default = "default_importance")]
+    pub importance: String,
+}
+fn default_importance() -> String { "normal".to_string() }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CompleteTaskParams {
+    pub task_id: String,
+}
+
 #[tool_router]
 impl OutlookMcpServer {
     #[tool(description = "List Outlook mail folders (name, path, item counts).")]
@@ -330,6 +355,38 @@ impl OutlookMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
         let result = run_blocking(move || client.save_attachments(email_id, save_dir, attachment_names)).await?;
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    // ---- Tasks ----
+
+    #[tool(description = "List Outlook tasks (default: not-yet-completed only).")]
+    pub async fn list_tasks(
+        &self,
+        Parameters(ListTasksParams { include_completed }): Parameters<ListTasksParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.clone();
+        let result = run_blocking(move || client.list_tasks(include_completed)).await?;
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    #[tool(description = "Create a new task.")]
+    pub async fn create_task(
+        &self,
+        Parameters(CreateTaskParams { subject, body, due_date, importance }): Parameters<CreateTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.clone();
+        let result = run_blocking(move || client.create_task(subject, body, due_date, importance)).await?;
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    #[tool(description = "Mark a task complete.")]
+    pub async fn complete_task(
+        &self,
+        Parameters(CompleteTaskParams { task_id }): Parameters<CompleteTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.clone();
+        let result = run_blocking(move || client.complete_task(task_id)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 }

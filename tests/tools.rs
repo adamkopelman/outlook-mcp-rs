@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use outlook_mcp_rs::outlook::fake::{FakeOutlookClient, EMAIL_ID};
 use outlook_mcp_rs::server::{
-    CreateDraftParams, CreateEventParams, DeleteEmailParams, GetEmailParams, GetEventParams,
-    ListAttachmentsParams, ListEmailsParams, ListEventsParams, MoveEmailParams, OutlookMcpServer,
-    ReplyEmailParams, RespondToMeetingParams, SaveAttachmentsParams, SearchEmailsParams,
-    SendEmailParams,
+    CompleteTaskParams, CreateDraftParams, CreateEventParams, CreateTaskParams, DeleteEmailParams,
+    GetEmailParams, GetEventParams, ListAttachmentsParams, ListEmailsParams, ListEventsParams,
+    ListTasksParams, MoveEmailParams, OutlookMcpServer, ReplyEmailParams, RespondToMeetingParams,
+    SaveAttachmentsParams, SearchEmailsParams, SendEmailParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -281,4 +281,45 @@ async fn save_attachments_passes_dir_and_names() {
     let (_, args) = &fake.calls()[0];
     assert_eq!(args["save_dir"], "/tmp/x");
     assert_eq!(args["attachment_names"], json!(["report.pdf"]));
+}
+
+// ---- Tasks ----
+
+#[tokio::test]
+async fn list_tasks_passes_include_completed() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    server
+        .list_tasks(Parameters(ListTasksParams { include_completed: true }))
+        .await
+        .unwrap();
+    assert_eq!(fake.calls(), vec![
+        ("list_tasks".to_string(), json!({"include_completed": true})),
+    ]);
+}
+
+#[tokio::test]
+async fn create_task_passes_importance() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let params: CreateTaskParams = serde_json::from_value(json!({
+        "subject": "Buy milk", "due_date": "2026-06-15", "importance": "high"
+    })).unwrap();
+    server.create_task(Parameters(params)).await.unwrap();
+    let (_, args) = &fake.calls()[0];
+    assert_eq!(args["importance"], "high");
+}
+
+#[tokio::test]
+async fn complete_task_records_call() {
+    use outlook_mcp_rs::outlook::fake::TASK_ID;
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    server
+        .complete_task(Parameters(CompleteTaskParams { task_id: TASK_ID.to_string() }))
+        .await
+        .unwrap();
+    assert_eq!(fake.calls(), vec![
+        ("complete_task".to_string(), json!({"task_id": TASK_ID})),
+    ]);
 }
