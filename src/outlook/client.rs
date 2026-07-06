@@ -18,9 +18,9 @@ use crate::constants as c;
 use crate::error::ToolError;
 use crate::outlook::com::{
     call_method, create_com_object, format_com_error, get_property, has_member, jet_datetime,
-    make_item_id, parse_item_id, put_property, variant_from_bool, variant_from_datetime,
-    variant_from_i32, variant_from_str, variant_to_bool, variant_to_i32, variant_to_iso_string,
-    variant_to_string, ComGuard,
+    make_item_id, parse_item_id, put_property, safe_filename, variant_from_bool,
+    variant_from_datetime, variant_from_i32, variant_from_str, variant_to_bool, variant_to_i32,
+    variant_to_iso_string, variant_to_string, ComGuard,
 };
 use crate::outlook::types::*;
 use crate::outlook::OutlookClient;
@@ -148,6 +148,29 @@ fn resolve_folder(ns: &IDispatch, folder: Option<&str>) -> Result<IDispatch, Too
         };
     }
     Ok(current)
+}
+
+/// `os.path.abspath(os.path.expanduser(save_dir))`: expand a leading `~` to the
+/// user's home directory, then make the path absolute. Mirrors the Python
+/// `save_attachments` directory normalization so the returned `saved_to` paths
+/// are absolute. Falls back to the un-absolutized path if `absolute` fails
+/// (it does not touch the filesystem, so this only guards against odd inputs).
+fn resolve_save_dir(save_dir: &str) -> std::path::PathBuf {
+    let expanded = if save_dir == "~"
+        || save_dir.starts_with("~/")
+        || save_dir.starts_with("~\\")
+    {
+        match std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+            Some(home) => {
+                let rest = save_dir[1..].trim_start_matches(['/', '\\']);
+                std::path::Path::new(&home).join(rest)
+            }
+            None => std::path::PathBuf::from(save_dir),
+        }
+    } else {
+        std::path::PathBuf::from(save_dir)
+    };
+    std::path::absolute(&expanded).unwrap_or(expanded)
 }
 
 /// `client.py::_truncate`: cap long bodies at `MAX_BODY_CHARS` *characters*
@@ -704,17 +727,89 @@ impl OutlookClient for WindowsOutlookClient {
 
     // ---- Attachments (Task 14) -----------------------------------------
 
-    fn list_attachments(&self, _email_id: String) -> Result<Vec<AttachmentInfo>, ToolError> {
-        todo!("implemented in Task 14")
+    fn list_attachments(&self, email_id: String) -> Result<Vec<AttachmentInfo>, ToolError> {
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let item = get_item(&ns, &email_id)?;
+            let attachments = to_disp(get_property(&item, "Attachments")?)?;
+            let count = variant_to_i32(&get_property(&attachments, "Count")?).unwrap_or(0);
+            let mut results = Vec::new();
+            for i in 1..=count {
+                // COM collections are 1-based.
+                let att = to_disp(call_method(&attachments, "Item", &mut [variant_from_i32(i)])?)?;
+                results.push(AttachmentInfo {
+                    index: i,
+                    filename: variant_to_string(&get_property(&att, "FileName")?),
+                    size: variant_to_i32(&get_property(&att, "Size")?).unwrap_or(0),
+                });
+            }
+            Ok(results)
+        })
     }
 
     fn save_attachments(
         &self,
-        _email_id: String,
-        _save_dir: String,
-        _attachment_names: Option<Vec<String>>,
+        email_id: String,
+        save_dir: String,
+        attachment_names: Option<Vec<String>>,
     ) -> Result<Vec<Value>, ToolError> {
-        todo!("implemented in Task 14")
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let item = get_item(&ns, &email_id)?;
+            let attachments = to_disp(get_property(&item, "Attachments")?)?;
+            let count = variant_to_i32(&get_property(&attachments, "Count")?).unwrap_or(0);
+            if count == 0 {
+                return Err(ToolError::new("This email has no attachments."));
+            }
+            let dir = resolve_save_dir(&save_dir);
+            std::fs::create_dir_all(&dir).map_err(|e| {
+                ToolError::new(format!(
+                    "Could not create save directory {:?}: {e}",
+                    dir.display()
+                ))
+            })?;
+            // `{n.lower() for n in attachment_names}`: case-insensitive set membership.
+            let wanted: Option<std::collections::HashSet<String>> = attachment_names
+                .map(|names| names.iter().map(|n| n.to_lowercase()).collect());
+            let mut results = Vec::new();
+            for i in 1..=count {
+                let att = to_disp(call_method(&attachments, "Item", &mut [variant_from_i32(i)])?)?;
+                let raw = variant_to_string(&get_property(&att, "FileName")?);
+                let filename = if raw.is_empty() {
+                    format!("attachment-{i}")
+                } else {
+                    raw
+                };
+                if let Some(wanted) = &wanted {
+                    if !wanted.contains(&filename.to_lowercase()) {
+                        continue;
+                    }
+                }
+                let target = dir.join(safe_filename(&filename));
+                let target_str = target.to_string_lossy().into_owned();
+                // A COM failure saving one file is collected per-file and does
+                // NOT abort the batch (mirrors the per-file try/except in Python).
+                match call_method(&att, "SaveAsFile", &mut [variant_from_str(&target_str)]) {
+                    Ok(_) => results.push(json!({
+                        "filename": filename,
+                        "saved_to": target_str,
+                        "status": "saved",
+                    })),
+                    Err(e) => results.push(json!({
+                        "filename": filename,
+                        "status": "failed",
+                        "error": format_com_error(&e),
+                    })),
+                }
+            }
+            if results.is_empty() {
+                return Err(ToolError::new(
+                    "No attachments matched attachment_names; use list_attachments \
+                     to see the exact file names.",
+                ));
+            }
+            Ok(results)
+        })
     }
 
     // ---- Tasks (Task 15) -----------------------------------------------
