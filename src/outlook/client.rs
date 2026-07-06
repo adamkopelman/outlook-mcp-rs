@@ -461,22 +461,36 @@ impl OutlookClient for WindowsOutlookClient {
             let (_app, ns) = mapi()?;
             let item = get_item(&ns, &email_id)?;
             let summary = email_summary(&item)?;
-            let cc = variant_to_string(&get_property(&item, "CC")?);
-            let bcc = variant_to_string(&get_property(&item, "BCC")?);
-            let body = truncate(&variant_to_string(&get_property(&item, "Body")?));
+            // Python's `get_email` reads these via `getattr(item, "X", "") or ""`
+            // so a non-mail item (MeetingItem, ReportItem, …) that lacks CC/BCC/
+            // Body/HTMLBody yields graceful partial detail rather than a COM error.
+            let cc = variant_to_string(&get_property(&item, "CC").unwrap_or_default());
+            let bcc = variant_to_string(&get_property(&item, "BCC").unwrap_or_default());
+            let body = truncate(&variant_to_string(&get_property(&item, "Body").unwrap_or_default()));
             let html_body = if prefer_html {
-                Some(truncate(&variant_to_string(&get_property(&item, "HTMLBody")?)))
+                Some(truncate(&variant_to_string(
+                    &get_property(&item, "HTMLBody").unwrap_or_default(),
+                )))
             } else {
                 None
             };
-            let attachments_obj = to_disp(get_property(&item, "Attachments")?)?;
-            let att_count = variant_to_i32(&get_property(&attachments_obj, "Count")?).unwrap_or(0);
-            let mut attachments = Vec::new();
-            for i in 1..=att_count {
-                let att =
-                    to_disp(call_method(&attachments_obj, "Item", &mut [variant_from_i32(i)])?)?;
-                attachments.push(variant_to_string(&get_property(&att, "FileName")?));
-            }
+            // `getattr(item, "Attachments", None)` then `attachments and attachments.Count`:
+            // tolerate an item that has no `Attachments` collection at all (falls back
+            // to an empty list) rather than propagating the COM error, mirroring
+            // `email_summary`'s already-fixed handling.
+            let attachments = (|| -> Result<Vec<String>, ToolError> {
+                let attachments_obj = to_disp(get_property(&item, "Attachments")?)?;
+                let att_count =
+                    variant_to_i32(&get_property(&attachments_obj, "Count")?).unwrap_or(0);
+                let mut names = Vec::new();
+                for i in 1..=att_count {
+                    let att =
+                        to_disp(call_method(&attachments_obj, "Item", &mut [variant_from_i32(i)])?)?;
+                    names.push(variant_to_string(&get_property(&att, "FileName")?));
+                }
+                Ok(names)
+            })()
+            .unwrap_or_default();
             Ok(EmailDetail {
                 summary,
                 cc,
@@ -656,12 +670,22 @@ impl OutlookClient for WindowsOutlookClient {
             let (_app, ns) = mapi()?;
             let item = get_item(&ns, &event_id)?;
             let summary = event_summary(&item)?;
+            // Python's `get_event` reads all four via `getattr(..., default)`, so an
+            // item lacking these appointment-only properties yields partial detail
+            // instead of a COM error. An empty VARIANT for ResponseStatus decodes to
+            // None, matching Python's `getattr(item, "ResponseStatus", None)` default.
             Ok(EventDetail {
                 summary,
-                body: truncate(&variant_to_string(&get_property(&item, "Body")?)),
-                required_attendees: variant_to_string(&get_property(&item, "RequiredAttendees")?),
-                optional_attendees: variant_to_string(&get_property(&item, "OptionalAttendees")?),
-                response_status: variant_to_i32(&get_property(&item, "ResponseStatus")?),
+                body: truncate(&variant_to_string(&get_property(&item, "Body").unwrap_or_default())),
+                required_attendees: variant_to_string(
+                    &get_property(&item, "RequiredAttendees").unwrap_or_default(),
+                ),
+                optional_attendees: variant_to_string(
+                    &get_property(&item, "OptionalAttendees").unwrap_or_default(),
+                ),
+                response_status: variant_to_i32(
+                    &get_property(&item, "ResponseStatus").unwrap_or_default(),
+                ),
             })
         })
     }
@@ -772,7 +796,12 @@ impl OutlookClient for WindowsOutlookClient {
         self.with_com(|| {
             let (_app, ns) = mapi()?;
             let item = get_item(&ns, &email_id)?;
-            let attachments = to_disp(get_property(&item, "Attachments")?)?;
+            // `getattr(item, "Attachments", None)` then `if attachments:` — an item
+            // with no `Attachments` collection yields an empty list, not a COM error.
+            let attachments = match get_property(&item, "Attachments").ok().map(to_disp) {
+                Some(Ok(a)) => a,
+                _ => return Ok(Vec::new()),
+            };
             let count = variant_to_i32(&get_property(&attachments, "Count")?).unwrap_or(0);
             let mut results = Vec::new();
             for i in 1..=count {
@@ -797,7 +826,13 @@ impl OutlookClient for WindowsOutlookClient {
         self.with_com(|| {
             let (_app, ns) = mapi()?;
             let item = get_item(&ns, &email_id)?;
-            let attachments = to_disp(get_property(&item, "Attachments")?)?;
+            // Python: `if not attachments or attachments.Count == 0`. Tolerate an item
+            // that has no `Attachments` collection at all (missing property) the same
+            // way as a present-but-empty collection: the clear "no attachments" error.
+            let attachments = match get_property(&item, "Attachments").ok().map(to_disp) {
+                Some(Ok(a)) => a,
+                _ => return Err(ToolError::new("This email has no attachments.")),
+            };
             let count = variant_to_i32(&get_property(&attachments, "Count")?).unwrap_or(0);
             if count == 0 {
                 return Err(ToolError::new("This email has no attachments."));
