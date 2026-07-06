@@ -119,6 +119,48 @@ pub struct DeleteEmailParams {
     pub email_id: String,
 }
 
+// ---- Calendar ----
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListEventsParams {
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetEventParams {
+    pub event_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateEventParams {
+    pub subject: String,
+    pub start: String,
+    pub end: String,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+    #[serde(default)]
+    pub attendees: Option<Vec<String>>,
+    #[serde(default)]
+    pub all_day: bool,
+    #[serde(default)]
+    pub reminder_minutes: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RespondToMeetingParams {
+    pub event_id: String,
+    pub response: String,
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default = "default_true")]
+    pub send: bool,
+}
+
 #[tool_router]
 impl OutlookMcpServer {
     #[tool(description = "List Outlook mail folders (name, path, item counts).")]
@@ -205,6 +247,52 @@ impl OutlookMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
         let result = run_blocking(move || client.delete_email(email_id)).await?;
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    // ---- Calendar ----
+
+    #[tool(description = "List calendar events in a date range (default: next 7 days).")]
+    pub async fn list_events(
+        &self,
+        Parameters(ListEventsParams { start_date, end_date }): Parameters<ListEventsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.clone();
+        let result = run_blocking(move || client.list_events(start_date, end_date)).await?;
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    #[tool(description = "Get the full details of one calendar event by id.")]
+    pub async fn get_event(
+        &self,
+        Parameters(GetEventParams { event_id }): Parameters<GetEventParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.clone();
+        let result = run_blocking(move || client.get_event(event_id)).await?;
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    #[tool(description = "Create a calendar event, optionally sending meeting invites to attendees.")]
+    pub async fn create_event(
+        &self,
+        Parameters(CreateEventParams {
+            subject, start, end, body, location, attendees, all_day, reminder_minutes,
+        }): Parameters<CreateEventParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.clone();
+        let result = run_blocking(move || {
+            client.create_event(subject, start, end, body, location, attendees, all_day, reminder_minutes)
+        }).await?;
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    #[tool(description = "Respond to a meeting invite: accept, decline, or tentative.")]
+    pub async fn respond_to_meeting(
+        &self,
+        Parameters(RespondToMeetingParams { event_id, response, comment, send }): Parameters<RespondToMeetingParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.clone();
+        let result = run_blocking(move || client.respond_to_meeting(event_id, response, comment, send)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 }

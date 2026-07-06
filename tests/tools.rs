@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use outlook_mcp_rs::outlook::fake::{FakeOutlookClient, EMAIL_ID};
 use outlook_mcp_rs::server::{
-    DeleteEmailParams, GetEmailParams, ListEmailsParams, MoveEmailParams, OutlookMcpServer,
-    ReplyEmailParams, SearchEmailsParams, SendEmailParams, CreateDraftParams,
+    CreateDraftParams, CreateEventParams, DeleteEmailParams, GetEmailParams, GetEventParams,
+    ListEmailsParams, ListEventsParams, MoveEmailParams, OutlookMcpServer, ReplyEmailParams,
+    RespondToMeetingParams, SearchEmailsParams, SendEmailParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -189,4 +190,66 @@ async fn client_error_propagates_as_tool_error() {
         .await
         .unwrap_err();
     assert!(err.message.contains("Outlook exploded"));
+}
+
+#[tokio::test]
+async fn list_events_passes_date_range() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    server
+        .list_events(Parameters(ListEventsParams {
+            start_date: Some("2026-06-10".to_string()),
+            end_date: Some("2026-06-17".to_string()),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(fake.calls(), vec![
+        ("list_events".to_string(), json!({"start_date": "2026-06-10", "end_date": "2026-06-17"})),
+    ]);
+}
+
+#[tokio::test]
+async fn get_event_returns_subject() {
+    use outlook_mcp_rs::outlook::fake::EVENT_ID;
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let result = server
+        .get_event(Parameters(GetEventParams { event_id: EVENT_ID.to_string() }))
+        .await
+        .unwrap();
+    assert_eq!(result_json(&result)["subject"], "Standup");
+}
+
+#[tokio::test]
+async fn create_event_passes_attendees() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    server
+        .create_event(Parameters(CreateEventParams {
+            subject: "Sync".to_string(),
+            start: "2026-06-12T14:00".to_string(),
+            end: "2026-06-12T15:00".to_string(),
+            body: None,
+            location: None,
+            attendees: Some(vec!["a@example.com".to_string()]),
+            all_day: false,
+            reminder_minutes: None,
+        }))
+        .await
+        .unwrap();
+    let (_, args) = &fake.calls()[0];
+    assert_eq!(args["attendees"], json!(["a@example.com"]));
+}
+
+#[tokio::test]
+async fn respond_to_meeting_defaults_send_true() {
+    use outlook_mcp_rs::outlook::fake::EVENT_ID;
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let params: RespondToMeetingParams =
+        serde_json::from_value(json!({"event_id": EVENT_ID, "response": "accept"})).unwrap();
+    server.respond_to_meeting(Parameters(params)).await.unwrap();
+    let (_, args) = &fake.calls()[0];
+    assert_eq!(args["response"], "accept");
+    assert_eq!(args["send"], true);
 }
