@@ -66,6 +66,22 @@ async fn list_emails_uses_defaults() {
 }
 
 #[tokio::test]
+async fn list_emails_returns_categories() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let result = server
+        .list_emails(Parameters(ListEmailsParams {
+            folder: "inbox".to_string(),
+            count: 10,
+            unread_only: false,
+        }))
+        .await
+        .unwrap();
+    let json = result_json(&result);
+    assert_eq!(json[0]["categories"], serde_json::json!(["Work"]));
+}
+
+#[tokio::test]
 async fn search_emails_passes_query_and_since_days() {
     let fake = Arc::new(FakeOutlookClient::new());
     let server = OutlookMcpServer::new(fake.clone());

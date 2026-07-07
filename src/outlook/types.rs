@@ -18,6 +18,7 @@ pub struct EmailSummary {
     pub received: Option<String>,
     pub unread: bool,
     pub has_attachments: bool,
+    pub categories: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -43,6 +44,7 @@ pub struct EventSummary {
     pub all_day: bool,
     pub is_recurring: bool,
     pub is_meeting: bool,
+    pub categories: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +65,7 @@ pub struct TaskSummary {
     pub complete: bool,
     pub status: i32,
     pub importance: i32,
+    pub categories: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,6 +73,7 @@ pub struct NoteSummary {
     pub id: String,
     pub subject: String,
     pub created: Option<String>,
+    pub categories: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,7 +101,7 @@ mod tests {
                 id: "e1|s1".into(), subject: "Hi".into(), sender: "Ada".into(),
                 sender_email: "ada@example.com".into(), to: "bob@example.com".into(),
                 received: Some("2026-06-10T12:00:00".into()), unread: true,
-                has_attachments: false,
+                has_attachments: false, categories: vec![],
             },
             cc: "".into(), bcc: "".into(), body: "Hello".into(),
             html_body: None, attachments: vec![],

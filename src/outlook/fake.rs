@@ -60,6 +60,7 @@ impl OutlookClient for FakeOutlookClient {
             id: EMAIL_ID.into(), subject: "Hello".into(), sender: "Ada".into(),
             sender_email: "".into(), to: "".into(), received: None,
             unread: true, has_attachments: false,
+            categories: vec!["Work".to_string()],
         }])
     }
 
@@ -70,7 +71,7 @@ impl OutlookClient for FakeOutlookClient {
         Ok(vec![EmailSummary {
             id: EMAIL_ID.into(), subject: "Hello".into(), sender: "".into(),
             sender_email: "".into(), to: "".into(), received: None,
-            unread: false, has_attachments: false,
+            unread: false, has_attachments: false, categories: vec![],
         }])
     }
 
@@ -81,7 +82,7 @@ impl OutlookClient for FakeOutlookClient {
             summary: EmailSummary {
                 id: email_id, subject: "Hello".into(), sender: "".into(),
                 sender_email: "".into(), to: "".into(), received: None,
-                unread: false, has_attachments: false,
+                unread: false, has_attachments: false, categories: vec![],
             },
             cc: "".into(), bcc: "".into(), body: "Hi there".into(),
             html_body: None, attachments: vec![],
@@ -128,7 +129,7 @@ impl OutlookClient for FakeOutlookClient {
         Ok(vec![EventSummary {
             id: EVENT_ID.into(), subject: "Standup".into(), start: None, end: None,
             location: "".into(), organizer: "".into(), all_day: false,
-            is_recurring: false, is_meeting: false,
+            is_recurring: false, is_meeting: false, categories: vec![],
         }])
     }
 
@@ -138,7 +139,7 @@ impl OutlookClient for FakeOutlookClient {
             summary: EventSummary {
                 id: event_id, subject: "Standup".into(), start: None, end: None,
                 location: "".into(), organizer: "".into(), all_day: false,
-                is_recurring: false, is_meeting: false,
+                is_recurring: false, is_meeting: false, categories: vec![],
             },
             body: "".into(), required_attendees: "".into(),
             optional_attendees: "".into(), response_status: None,
@@ -181,7 +182,7 @@ impl OutlookClient for FakeOutlookClient {
         self.record("list_tasks", json!({"include_completed": include_completed}))?;
         Ok(vec![TaskSummary {
             id: TASK_ID.into(), subject: "Buy milk".into(), due_date: None,
-            complete: false, status: 0, importance: 1,
+            complete: false, status: 0, importance: 1, categories: vec![],
         }])
     }
 
@@ -199,13 +200,13 @@ impl OutlookClient for FakeOutlookClient {
 
     fn list_notes(&self) -> Result<Vec<NoteSummary>, ToolError> {
         self.record("list_notes", json!({}))?;
-        Ok(vec![NoteSummary { id: NOTE_ID.into(), subject: "Ideas".into(), created: None }])
+        Ok(vec![NoteSummary { id: NOTE_ID.into(), subject: "Ideas".into(), created: None, categories: vec![] }])
     }
 
     fn get_note(&self, note_id: String) -> Result<NoteDetail, ToolError> {
         self.record("get_note", json!({"note_id": note_id}))?;
         Ok(NoteDetail {
-            summary: NoteSummary { id: note_id, subject: "Ideas".into(), created: None },
+            summary: NoteSummary { id: note_id, subject: "Ideas".into(), created: None, categories: vec![] },
             body: "Ideas\n- one".into(),
         })
     }

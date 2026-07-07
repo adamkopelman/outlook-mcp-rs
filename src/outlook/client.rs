@@ -15,10 +15,10 @@ use windows::Win32::System::Variant::VARIANT;
 use crate::constants as c;
 use crate::error::ToolError;
 use crate::outlook::com::{
-    call_method, create_com_object, format_com_error, get_property, has_member, jet_datetime,
-    make_item_id, parse_item_id, put_property, safe_filename, variant_from_bool,
-    variant_from_datetime, variant_from_i32, variant_from_str, variant_to_bool, variant_to_i32,
-    variant_to_iso_string, variant_to_string, ComGuard,
+    call_method, create_com_object, format_com_error, get_item_categories, get_property,
+    has_member, jet_datetime, make_item_id, parse_item_id, put_property, safe_filename,
+    variant_from_bool, variant_from_datetime, variant_from_i32, variant_from_str,
+    variant_to_bool, variant_to_i32, variant_to_iso_string, variant_to_string, ComGuard,
 };
 use crate::outlook::types::*;
 use crate::outlook::OutlookClient;
@@ -221,6 +221,7 @@ fn event_summary(item: &IDispatch) -> Result<EventSummary, ToolError> {
         is_recurring: variant_to_bool(&get_property(item, "IsRecurring").unwrap_or_default())
             .unwrap_or(false),
         is_meeting: meeting_status != c::OL_NONMEETING,
+        categories: get_item_categories(item),
     })
 }
 
@@ -238,6 +239,7 @@ fn task_summary(item: &IDispatch) -> Result<TaskSummary, ToolError> {
             .unwrap_or(c::OL_TASK_NOT_STARTED),
         importance: variant_to_i32(&get_property(item, "Importance").unwrap_or_default())
             .unwrap_or(c::OL_IMPORTANCE_NORMAL),
+        categories: get_item_categories(item),
     })
 }
 
@@ -258,6 +260,7 @@ fn note_summary(item: &IDispatch) -> Result<NoteSummary, ToolError> {
         id: make_id(item)?,
         subject: first_line.chars().take(120).collect(),
         created: variant_to_iso_string(&get_property(item, "CreationTime").unwrap_or_default()),
+        categories: get_item_categories(item),
     })
 }
 
@@ -280,6 +283,7 @@ fn email_summary(item: &IDispatch) -> Result<EmailSummary, ToolError> {
         received: variant_to_iso_string(&get_property(item, "ReceivedTime").unwrap_or_default()),
         unread: variant_to_bool(&get_property(item, "UnRead").unwrap_or_default()).unwrap_or(false),
         has_attachments: att_count > 0,
+        categories: get_item_categories(item),
     })
 }
 
