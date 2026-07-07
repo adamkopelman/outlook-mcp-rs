@@ -225,9 +225,11 @@ fn event_summary(item: &IDispatch) -> Result<EventSummary, ToolError> {
     })
 }
 
-/// `client.py::_task_summary`. `status` and `importance` are the raw numeric
-/// COM properties (not name lookups); a missing value falls back to Outlook's
-/// defaults exactly like the Python `getattr(..., default)`.
+/// `client.py::_task_summary`. `status` and `importance` are read as raw
+/// numeric COM properties (not name lookups), with a missing value falling
+/// back to Outlook's defaults exactly like the Python `getattr(..., default)`,
+/// then converted to the friendly words the MCP API exposes via
+/// `friendly::task_status_word`/`friendly::importance_word`.
 fn task_summary(item: &IDispatch) -> Result<TaskSummary, ToolError> {
     Ok(TaskSummary {
         id: make_id(item)?,
@@ -235,10 +237,16 @@ fn task_summary(item: &IDispatch) -> Result<TaskSummary, ToolError> {
         due_date: variant_to_iso_string(&get_property(item, "DueDate").unwrap_or_default()),
         complete: variant_to_bool(&get_property(item, "Complete").unwrap_or_default())
             .unwrap_or(false),
-        status: variant_to_i32(&get_property(item, "Status").unwrap_or_default())
-            .unwrap_or(c::OL_TASK_NOT_STARTED),
-        importance: variant_to_i32(&get_property(item, "Importance").unwrap_or_default())
-            .unwrap_or(c::OL_IMPORTANCE_NORMAL),
+        status: crate::friendly::task_status_word(
+            variant_to_i32(&get_property(item, "Status").unwrap_or_default())
+                .unwrap_or(c::OL_TASK_NOT_STARTED),
+        )
+        .to_string(),
+        importance: crate::friendly::importance_word(
+            variant_to_i32(&get_property(item, "Importance").unwrap_or_default())
+                .unwrap_or(c::OL_IMPORTANCE_NORMAL),
+        )
+        .to_string(),
         categories: get_item_categories(item),
     })
 }
@@ -677,7 +685,7 @@ impl OutlookClient for WindowsOutlookClient {
             // Python's `get_event` reads all four via `getattr(..., default)`, so an
             // item lacking these appointment-only properties yields partial detail
             // instead of a COM error. An empty VARIANT for ResponseStatus decodes to
-            // None, matching Python's `getattr(item, "ResponseStatus", None)` default.
+            // `OL_RESPONSE_NONE`, which `friendly::response_word` renders as "none".
             Ok(EventDetail {
                 summary,
                 body: truncate(&variant_to_string(&get_property(&item, "Body").unwrap_or_default())),
@@ -687,9 +695,11 @@ impl OutlookClient for WindowsOutlookClient {
                 optional_attendees: variant_to_string(
                     &get_property(&item, "OptionalAttendees").unwrap_or_default(),
                 ),
-                response_status: variant_to_i32(
-                    &get_property(&item, "ResponseStatus").unwrap_or_default(),
-                ),
+                response: crate::friendly::response_word(
+                    variant_to_i32(&get_property(&item, "ResponseStatus").unwrap_or_default())
+                        .unwrap_or(c::OL_RESPONSE_NONE),
+                )
+                .to_string(),
             })
         })
     }

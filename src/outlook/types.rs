@@ -54,7 +54,7 @@ pub struct EventDetail {
     pub body: String,
     pub required_attendees: String,
     pub optional_attendees: String,
-    pub response_status: Option<i32>,
+    pub response: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,8 +63,8 @@ pub struct TaskSummary {
     pub subject: String,
     pub due_date: Option<String>,
     pub complete: bool,
-    pub status: i32,
-    pub importance: i32,
+    pub status: String,
+    pub importance: String,
     pub categories: Vec<String>,
 }
 

@@ -142,7 +142,7 @@ impl OutlookClient for FakeOutlookClient {
                 is_recurring: false, is_meeting: false, categories: vec![],
             },
             body: "".into(), required_attendees: "".into(),
-            optional_attendees: "".into(), response_status: None,
+            optional_attendees: "".into(), response: "accepted".to_string(),
         })
     }
 
@@ -182,7 +182,7 @@ impl OutlookClient for FakeOutlookClient {
         self.record("list_tasks", json!({"include_completed": include_completed}))?;
         Ok(vec![TaskSummary {
             id: TASK_ID.into(), subject: "Buy milk".into(), due_date: None,
-            complete: false, status: 0, importance: 1, categories: vec![],
+            complete: false, status: "not_started".to_string(), importance: "normal".to_string(), categories: vec![],
         }])
     }
 
