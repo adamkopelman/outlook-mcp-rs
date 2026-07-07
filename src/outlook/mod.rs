@@ -7,12 +7,27 @@ use crate::error::ToolError;
 use serde_json::Value;
 use types::*;
 
+/// All filters for `list_emails`. All optional except `folder`/`count`
+/// (which the server fills with defaults). Supplying several ANDs them.
+#[derive(Debug, Clone)]
+pub struct EmailQuery {
+    pub query: Option<String>,
+    pub folder: String,
+    pub count: i32,
+    pub unread_only: bool,
+    pub from: Option<String>,
+    pub category: Option<String>,
+    pub received_after: Option<String>,
+    pub received_before: Option<String>,
+    pub since_days: Option<i32>,
+    pub has_attachments: Option<bool>,
+    pub flagged: bool,
+    pub high_importance: bool,
+}
+
 pub trait OutlookClient: Send + Sync {
     fn list_folders(&self) -> Result<Vec<FolderInfo>, ToolError>;
-    fn list_emails(&self, folder: String, count: i32, unread_only: bool)
-        -> Result<Vec<EmailSummary>, ToolError>;
-    fn search_emails(&self, query: String, folder: String, count: i32,
-        since_days: Option<i32>) -> Result<Vec<EmailSummary>, ToolError>;
+    fn list_emails(&self, q: EmailQuery) -> Result<Vec<EmailSummary>, ToolError>;
     fn get_email(&self, email_id: String, prefer_html: bool)
         -> Result<EmailDetail, ToolError>;
     fn send_email(&self, to: Vec<String>, subject: String, body: String,

@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use crate::error::ToolError;
 use super::types::*;
-use super::OutlookClient;
+use super::{EmailQuery, OutlookClient};
 
 pub const EMAIL_ID: &str = "entry-1|store-1";
 pub const EVENT_ID: &str = "entry-2|store-1";
@@ -52,26 +52,19 @@ impl OutlookClient for FakeOutlookClient {
         }])
     }
 
-    fn list_emails(&self, folder: String, count: i32, unread_only: bool)
-        -> Result<Vec<EmailSummary>, ToolError> {
-        self.record("list_emails",
-            json!({"folder": folder, "count": count, "unread_only": unread_only}))?;
+    fn list_emails(&self, q: EmailQuery) -> Result<Vec<EmailSummary>, ToolError> {
+        self.record("list_emails", json!({
+            "query": q.query, "folder": q.folder, "count": q.count,
+            "unread_only": q.unread_only, "from": q.from, "category": q.category,
+            "received_after": q.received_after, "received_before": q.received_before,
+            "since_days": q.since_days, "has_attachments": q.has_attachments,
+            "flagged": q.flagged, "high_importance": q.high_importance,
+        }))?;
         Ok(vec![EmailSummary {
             id: EMAIL_ID.into(), subject: "Hello".into(), sender: "Ada".into(),
             sender_email: "".into(), to: "".into(), received: None,
             unread: true, has_attachments: false,
             categories: vec!["Work".to_string()],
-        }])
-    }
-
-    fn search_emails(&self, query: String, folder: String, count: i32,
-        since_days: Option<i32>) -> Result<Vec<EmailSummary>, ToolError> {
-        self.record("search_emails",
-            json!({"query": query, "folder": folder, "count": count, "since_days": since_days}))?;
-        Ok(vec![EmailSummary {
-            id: EMAIL_ID.into(), subject: "Hello".into(), sender: "".into(),
-            sender_email: "".into(), to: "".into(), received: None,
-            unread: false, has_attachments: false, categories: vec![],
         }])
     }
 
@@ -221,15 +214,27 @@ impl OutlookClient for FakeOutlookClient {
 mod tests {
     use super::*;
 
+    fn basic_query() -> EmailQuery {
+        EmailQuery {
+            query: None, folder: "inbox".into(), count: 10, unread_only: false,
+            from: None, category: None, received_after: None, received_before: None,
+            since_days: None, has_attachments: None, flagged: false, high_importance: false,
+        }
+    }
+
     #[test]
     fn records_calls_in_order() {
         let fake = FakeOutlookClient::new();
         fake.list_folders().unwrap();
-        fake.list_emails("inbox".into(), 10, false).unwrap();
+        fake.list_emails(basic_query()).unwrap();
         assert_eq!(fake.calls(), vec![
             ("list_folders".to_string(), json!({})),
-            ("list_emails".to_string(),
-             json!({"folder": "inbox", "count": 10, "unread_only": false})),
+            ("list_emails".to_string(), json!({
+                "query": null, "folder": "inbox", "count": 10, "unread_only": false,
+                "from": null, "category": null, "received_after": null,
+                "received_before": null, "since_days": null, "has_attachments": null,
+                "flagged": false, "high_importance": false,
+            })),
         ]);
     }
 
@@ -237,7 +242,7 @@ mod tests {
     fn fail_with_makes_every_call_error_before_recording() {
         let fake = FakeOutlookClient::new();
         fake.set_fail_with("Outlook exploded");
-        let err = fake.list_emails("inbox".into(), 10, false).unwrap_err();
+        let err = fake.list_emails(basic_query()).unwrap_err();
         assert_eq!(err.to_string(), "Outlook exploded");
         assert!(fake.calls().is_empty());
     }

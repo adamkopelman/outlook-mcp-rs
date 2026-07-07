@@ -5,7 +5,7 @@ use outlook_mcp_rs::server::{
     CompleteTaskParams, CreateDraftParams, CreateEventParams, CreateNoteParams, CreateTaskParams,
     DeleteEmailParams, GetEmailParams, GetEventParams, GetNoteParams, ListAttachmentsParams,
     ListEmailsParams, ListEventsParams, ListTasksParams, MoveEmailParams, OutlookMcpServer,
-    ReplyEmailParams, RespondToMeetingParams, SaveAttachmentsParams, SearchEmailsParams,
+    ReplyEmailParams, RespondToMeetingParams, SaveAttachmentsParams,
     SendEmailParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
@@ -33,21 +33,16 @@ async fn list_folders_records_call() {
 async fn list_emails_passes_arguments() {
     let fake = Arc::new(FakeOutlookClient::new());
     let server = OutlookMcpServer::new(fake.clone());
-    server
-        .list_emails(Parameters(ListEmailsParams {
-            folder: "sent".to_string(),
-            count: 5,
-            unread_only: true,
-        }))
-        .await
-        .unwrap();
-    assert_eq!(
-        fake.calls(),
-        vec![(
-            "list_emails".to_string(),
-            json!({"folder": "sent", "count": 5, "unread_only": true})
-        )]
-    );
+    let params: ListEmailsParams = serde_json::from_value(json!({
+        "folder": "sent", "count": 5, "unread_only": true
+    }))
+    .unwrap();
+    server.list_emails(Parameters(params)).await.unwrap();
+    let (name, args) = &fake.calls()[0];
+    assert_eq!(name, "list_emails");
+    assert_eq!(args["folder"], "sent");
+    assert_eq!(args["count"], 5);
+    assert_eq!(args["unread_only"], true);
 }
 
 #[tokio::test]
@@ -56,42 +51,41 @@ async fn list_emails_uses_defaults() {
     let server = OutlookMcpServer::new(fake.clone());
     let params: ListEmailsParams = serde_json::from_value(json!({})).unwrap();
     server.list_emails(Parameters(params)).await.unwrap();
-    assert_eq!(
-        fake.calls(),
-        vec![(
-            "list_emails".to_string(),
-            json!({"folder": "inbox", "count": 10, "unread_only": false})
-        )]
-    );
+    let (name, args) = &fake.calls()[0];
+    assert_eq!(name, "list_emails");
+    assert_eq!(args["folder"], "inbox");
+    assert_eq!(args["count"], 10);
+    assert_eq!(args["unread_only"], false);
+}
+
+#[tokio::test]
+async fn list_emails_forwards_query_and_filters() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let params: ListEmailsParams = serde_json::from_value(json!({
+        "query": "invoice", "from": "ada@x.com", "category": "Work",
+        "since_days": 30, "has_attachments": true, "flagged": true, "high_importance": true
+    }))
+    .unwrap();
+    server.list_emails(Parameters(params)).await.unwrap();
+    let (_, args) = &fake.calls()[0];
+    assert_eq!(args["query"], "invoice");
+    assert_eq!(args["from"], "ada@x.com");
+    assert_eq!(args["category"], "Work");
+    assert_eq!(args["since_days"], 30);
+    assert_eq!(args["has_attachments"], true);
+    assert_eq!(args["flagged"], true);
+    assert_eq!(args["high_importance"], true);
 }
 
 #[tokio::test]
 async fn list_emails_returns_categories() {
     let fake = Arc::new(FakeOutlookClient::new());
     let server = OutlookMcpServer::new(fake.clone());
-    let result = server
-        .list_emails(Parameters(ListEmailsParams {
-            folder: "inbox".to_string(),
-            count: 10,
-            unread_only: false,
-        }))
-        .await
-        .unwrap();
+    let params: ListEmailsParams = serde_json::from_value(json!({})).unwrap();
+    let result = server.list_emails(Parameters(params)).await.unwrap();
     let json = result_json(&result);
     assert_eq!(json[0]["categories"], serde_json::json!(["Work"]));
-}
-
-#[tokio::test]
-async fn search_emails_passes_query_and_since_days() {
-    let fake = Arc::new(FakeOutlookClient::new());
-    let server = OutlookMcpServer::new(fake.clone());
-    let params: SearchEmailsParams =
-        serde_json::from_value(json!({"query": "invoice", "since_days": 30})).unwrap();
-    server.search_emails(Parameters(params)).await.unwrap();
-    let (name, args) = &fake.calls()[0];
-    assert_eq!(name, "search_emails");
-    assert_eq!(args["query"], "invoice");
-    assert_eq!(args["since_days"], 30);
 }
 
 #[tokio::test]
@@ -199,14 +193,8 @@ async fn client_error_propagates_as_tool_error() {
     let fake = Arc::new(FakeOutlookClient::new());
     fake.set_fail_with("Outlook exploded");
     let server = OutlookMcpServer::new(fake.clone());
-    let err = server
-        .list_emails(Parameters(ListEmailsParams {
-            folder: "inbox".to_string(),
-            count: 10,
-            unread_only: false,
-        }))
-        .await
-        .unwrap_err();
+    let params: ListEmailsParams = serde_json::from_value(json!({})).unwrap();
+    let err = server.list_emails(Parameters(params)).await.unwrap_err();
     assert!(err.message.contains("Outlook exploded"));
 }
 

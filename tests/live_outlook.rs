@@ -9,7 +9,7 @@
 //! can't be undone — see TESTING.md for how to test those by hand.
 
 use outlook_mcp_rs::outlook::client::WindowsOutlookClient;
-use outlook_mcp_rs::outlook::OutlookClient;
+use outlook_mcp_rs::outlook::{EmailQuery, OutlookClient};
 
 fn client() -> WindowsOutlookClient {
     WindowsOutlookClient::new()
@@ -25,8 +25,11 @@ fn list_folders_returns_at_least_inbox() {
 #[test]
 #[ignore]
 fn list_emails_returns_inbox_items() {
-    let emails = client().list_emails("inbox".into(), 5, false)
-        .expect("list_emails should succeed against a live Outlook");
+    let emails = client().list_emails(EmailQuery {
+        query: None, folder: "inbox".into(), count: 5, unread_only: false,
+        from: None, category: None, received_after: None, received_before: None,
+        since_days: None, has_attachments: None, flagged: false, high_importance: false,
+    }).expect("list_emails should succeed against a live Outlook");
     // Not asserting a specific count/content since the real mailbox varies —
     // just confirm the call succeeds and returns well-formed summaries.
     for email in &emails {

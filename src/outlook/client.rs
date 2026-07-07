@@ -5,7 +5,7 @@
 //! which initializes COM on the current thread (mirroring the Python
 //! `@_com` decorator) and maps `windows::core::Error` into [`ToolError`].
 //!
-//! All 21 `OutlookClient` trait methods are implemented (email, calendar,
+//! All 20 `OutlookClient` trait methods are implemented (email, calendar,
 //! attachments, tasks, and notes; Tasks 12-16) — no `todo!()` stubs remain.
 
 use serde_json::{json, Value};
@@ -21,7 +21,7 @@ use crate::outlook::com::{
     variant_to_bool, variant_to_i32, variant_to_iso_string, variant_to_string, ComGuard,
 };
 use crate::outlook::types::*;
-use crate::outlook::OutlookClient;
+use crate::outlook::{EmailQuery, OutlookClient};
 
 /// Matches `MAX_EMAIL_COUNT` in `client.py`.
 const MAX_EMAIL_COUNT: i32 = 50;
@@ -295,7 +295,7 @@ fn email_summary(item: &IDispatch) -> Result<EmailSummary, ToolError> {
     })
 }
 
-/// Shared tail of `list_emails`/`search_emails`: iterate a (sorted, possibly
+/// Shared tail of `list_emails`: iterate a (sorted, possibly
 /// restricted) `Items` collection by 1-based index, building summaries until
 /// `count` is reached. Item order reflects the prior `Sort` call.
 fn collect_summaries(items: &IDispatch, count: i32) -> Result<Vec<EmailSummary>, ToolError> {
@@ -404,60 +404,22 @@ impl OutlookClient for WindowsOutlookClient {
         })
     }
 
-    fn list_emails(
-        &self,
-        folder: String,
-        count: i32,
-        unread_only: bool,
-    ) -> Result<Vec<EmailSummary>, ToolError> {
+    // NOTE: today this only honors folder/count/unread_only, matching the
+    // pre-EmailQuery behavior. The remaining EmailQuery filters (query, from,
+    // category, received_after/before, since_days, has_attachments, flagged,
+    // high_importance) are wired up for real COM filtering in Task 2.
+    fn list_emails(&self, q: EmailQuery) -> Result<Vec<EmailSummary>, ToolError> {
         self.with_com(|| {
             let (_app, ns) = mapi()?;
-            let count = count.clamp(1, MAX_EMAIL_COUNT);
-            let folder_obj = resolve_folder(&ns, Some(&folder))?;
+            let count = q.count.clamp(1, MAX_EMAIL_COUNT);
+            let folder_obj = resolve_folder(&ns, Some(&q.folder))?;
             let mut items = to_disp(get_property(&folder_obj, "Items")?)?;
-            if unread_only {
+            if q.unread_only {
                 items = to_disp(call_method(
                     &items,
                     "Restrict",
                     &mut [variant_from_str("[UnRead] = True")],
                 )?)?;
-            }
-            call_method(
-                &items,
-                "Sort",
-                &mut [variant_from_str("[ReceivedTime]"), variant_from_bool(true)],
-            )?;
-            collect_summaries(&items, count)
-        })
-    }
-
-    fn search_emails(
-        &self,
-        query: String,
-        folder: String,
-        count: i32,
-        since_days: Option<i32>,
-    ) -> Result<Vec<EmailSummary>, ToolError> {
-        self.with_com(|| {
-            let (_app, ns) = mapi()?;
-            let count = count.clamp(1, MAX_EMAIL_COUNT);
-            // Escape single quotes by doubling them, exactly like the Python
-            // `query.replace("'", "''")` before interpolating into the DASL.
-            let q = query.replace('\'', "''");
-            let dasl = format!(
-                "@SQL=(\"urn:schemas:httpmail:subject\" LIKE '%{q}%' \
-                 OR \"urn:schemas:httpmail:fromname\" LIKE '%{q}%' \
-                 OR \"urn:schemas:httpmail:textdescription\" LIKE '%{q}%')"
-            );
-            let folder_obj = resolve_folder(&ns, Some(&folder))?;
-            let base_items = to_disp(get_property(&folder_obj, "Items")?)?;
-            let mut items =
-                to_disp(call_method(&base_items, "Restrict", &mut [variant_from_str(&dasl)])?)?;
-            if since_days.is_some_and(|d| d != 0) {
-                let days = since_days.unwrap();
-                let cutoff = chrono::Local::now().naive_local() - chrono::Duration::days(days as i64);
-                let filter = format!("[ReceivedTime] >= '{}'", jet_datetime(&cutoff));
-                items = to_disp(call_method(&items, "Restrict", &mut [variant_from_str(&filter)])?)?;
             }
             call_method(
                 &items,

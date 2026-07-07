@@ -19,12 +19,11 @@ your MCP client at it directly — no install step.
 
 ## Available tools
 
-21 MCP tools, grouped by category:
+20 MCP tools, grouped by category:
 
 **Email**
 - `list_folders` — list mail folders (name, path, item counts)
-- `list_emails` — list recent emails in a folder (default: inbox)
-- `search_emails` — search emails by subject/sender/body text in a folder
+- `list_emails` — find emails in a folder with an optional text query and filters (sender, category, date range, attachments, flagged, importance)
 - `get_email` — get the full body and attachment list of one email by id
 - `send_email` — send a new email immediately
 - `create_draft` — create a draft email without sending it

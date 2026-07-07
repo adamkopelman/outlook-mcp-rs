@@ -9,7 +9,7 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::error::ToolError;
-use crate::outlook::OutlookClient;
+use crate::outlook::{EmailQuery, OutlookClient};
 
 /// Runs a blocking `OutlookClient` call on a dedicated blocking thread so the
 /// tokio scheduler never migrates it mid-call (COM apartment-threading
@@ -41,26 +41,33 @@ impl OutlookMcpServer {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListEmailsParams {
+    #[serde(default)]
+    pub query: Option<String>,
     #[serde(default = "default_folder")]
     pub folder: String,
     #[serde(default = "default_count")]
     pub count: i32,
     #[serde(default)]
     pub unread_only: bool,
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub received_after: Option<String>,
+    #[serde(default)]
+    pub received_before: Option<String>,
+    #[serde(default)]
+    pub since_days: Option<i32>,
+    #[serde(default)]
+    pub has_attachments: Option<bool>,
+    #[serde(default)]
+    pub flagged: bool,
+    #[serde(default)]
+    pub high_importance: bool,
 }
 fn default_folder() -> String { "inbox".to_string() }
 fn default_count() -> i32 { 10 }
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SearchEmailsParams {
-    pub query: String,
-    #[serde(default = "default_folder")]
-    pub folder: String,
-    #[serde(default = "default_count")]
-    pub count: i32,
-    #[serde(default)]
-    pub since_days: Option<i32>,
-}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetEmailParams {
@@ -222,23 +229,20 @@ impl OutlookMcpServer {
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
-    #[tool(description = "List recent emails in a folder (default: inbox).")]
+    #[tool(description = "Find emails in a folder with optional text query and filters (sender, category, date range, attachments, flagged, importance).")]
     pub async fn list_emails(
         &self,
-        Parameters(ListEmailsParams { folder, count, unread_only }): Parameters<ListEmailsParams>,
+        Parameters(p): Parameters<ListEmailsParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let result = run_blocking(move || client.list_emails(folder, count, unread_only)).await?;
-        Ok(CallToolResult::success(vec![json_content(&result)?]))
-    }
-
-    #[tool(description = "Search emails by subject/sender/body text in a folder.")]
-    pub async fn search_emails(
-        &self,
-        Parameters(SearchEmailsParams { query, folder, count, since_days }): Parameters<SearchEmailsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let client = self.client.clone();
-        let result = run_blocking(move || client.search_emails(query, folder, count, since_days)).await?;
+        let q = EmailQuery {
+            query: p.query, folder: p.folder, count: p.count, unread_only: p.unread_only,
+            from: p.from, category: p.category, received_after: p.received_after,
+            received_before: p.received_before, since_days: p.since_days,
+            has_attachments: p.has_attachments, flagged: p.flagged,
+            high_importance: p.high_importance,
+        };
+        let result = run_blocking(move || client.list_emails(q)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
