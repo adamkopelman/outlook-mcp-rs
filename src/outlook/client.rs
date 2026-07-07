@@ -540,6 +540,29 @@ impl OutlookClient for WindowsOutlookClient {
                 Ok(names)
             })()
             .unwrap_or_default();
+            let message_class = variant_to_string(&get_property(&item, "MessageClass").unwrap_or_default());
+            let item_type = crate::friendly::item_type_from_class(&message_class).to_string();
+
+            // A MeetingItem exposes GetAssociatedAppointment; a plain MailItem
+            // does not. Build the meeting block from the associated appointment.
+            let (is_meeting, meeting) = if has_member(&item, "GetAssociatedAppointment") {
+                let appt = to_disp(call_method(
+                    &item, "GetAssociatedAppointment", &mut [variant_from_bool(false)],
+                )?)?;
+                let info = MeetingInfo {
+                    meeting_type: crate::friendly::meeting_type_from_class(&message_class).to_string(),
+                    start: variant_to_iso_string(&get_property(&appt, "Start").unwrap_or_default()),
+                    end: variant_to_iso_string(&get_property(&appt, "End").unwrap_or_default()),
+                    location: variant_to_string(&get_property(&appt, "Location").unwrap_or_default()),
+                    organizer: variant_to_string(&get_property(&appt, "Organizer").unwrap_or_default()),
+                    required_attendees: variant_to_string(&get_property(&appt, "RequiredAttendees").unwrap_or_default()),
+                    optional_attendees: variant_to_string(&get_property(&appt, "OptionalAttendees").unwrap_or_default()),
+                    is_recurring: variant_to_bool(&get_property(&appt, "IsRecurring").unwrap_or_default()).unwrap_or(false),
+                };
+                (true, Some(info))
+            } else {
+                (false, None)
+            };
             Ok(EmailDetail {
                 summary,
                 cc,
@@ -547,9 +570,9 @@ impl OutlookClient for WindowsOutlookClient {
                 body,
                 html_body,
                 attachments,
-                item_type: "email".to_string(),
-                is_meeting: false,
-                meeting: None,
+                item_type,
+                is_meeting,
+                meeting,
             })
         })
     }
