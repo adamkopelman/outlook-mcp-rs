@@ -79,6 +79,9 @@ impl OutlookClient for FakeOutlookClient {
             },
             cc: "".into(), bcc: "".into(), body: "Hi there".into(),
             html_body: None, attachments: vec![],
+            item_type: "email".to_string(),
+            is_meeting: false,
+            meeting: None,
         })
     }
 

@@ -103,6 +103,21 @@ async fn get_email_returns_body() {
 }
 
 #[tokio::test]
+async fn get_email_includes_item_type() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let result = server
+        .get_email(Parameters(GetEmailParams {
+            email_id: EMAIL_ID.to_string(),
+            prefer_html: false,
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result_json(&result)["item_type"], "email");
+    assert_eq!(result_json(&result)["is_meeting"], false);
+}
+
+#[tokio::test]
 async fn send_email_passes_recipients_and_html_flag() {
     let fake = Arc::new(FakeOutlookClient::new());
     let server = OutlookMcpServer::new(fake.clone());

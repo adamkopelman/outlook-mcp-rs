@@ -547,6 +547,9 @@ impl OutlookClient for WindowsOutlookClient {
                 body,
                 html_body,
                 attachments,
+                item_type: "email".to_string(),
+                is_meeting: false,
+                meeting: None,
             })
         })
     }

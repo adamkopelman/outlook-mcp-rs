@@ -31,6 +31,22 @@ pub struct EmailDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub html_body: Option<String>,
     pub attachments: Vec<String>,
+    pub item_type: String,
+    pub is_meeting: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meeting: Option<MeetingInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MeetingInfo {
+    pub meeting_type: String,
+    pub start: Option<String>,
+    pub end: Option<String>,
+    pub location: String,
+    pub organizer: String,
+    pub required_attendees: String,
+    pub optional_attendees: String,
+    pub is_recurring: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,6 +121,7 @@ mod tests {
             },
             cc: "".into(), bcc: "".into(), body: "Hello".into(),
             html_body: None, attachments: vec![],
+            item_type: "email".into(), is_meeting: false, meeting: None,
         };
         let value = serde_json::to_value(&detail).unwrap();
         // Flattened: "id" and "subject" appear at the top level, not nested

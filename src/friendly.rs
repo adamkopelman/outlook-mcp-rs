@@ -64,6 +64,57 @@ pub fn task_status_to_id(name: &str) -> Option<i32> {
     }
 }
 
+/// Map an Outlook `MessageClass` to a coarse item type.
+pub fn item_type_from_class(class: &str) -> &'static str {
+    let c = class.to_ascii_uppercase();
+    if c.starts_with("IPM.SCHEDULE.MEETING") {
+        "meeting"
+    } else if c.contains("NDR") || c.starts_with("REPORT.") && c.contains("NDR") {
+        "bounce"
+    } else if c.contains("RN") && c.starts_with("REPORT.") {
+        "read_receipt"
+    } else if c.starts_with("IPM.NOTE") {
+        "email"
+    } else {
+        "other"
+    }
+}
+
+/// Map a meeting-item `MessageClass` to a meeting type. Updates are delivered
+/// with the same class as requests, so they map to "request".
+pub fn meeting_type_from_class(class: &str) -> &'static str {
+    let c = class.to_ascii_uppercase();
+    if c.contains("CANCELED") || c.contains("CANCELLED") {
+        "cancellation"
+    } else if c.contains("RESP") {
+        "response"
+    } else {
+        "request"
+    }
+}
+
+#[cfg(test)]
+mod class_tests {
+    use super::*;
+
+    #[test]
+    fn item_type_mapping() {
+        assert_eq!(item_type_from_class("IPM.Note"), "email");
+        assert_eq!(item_type_from_class("IPM.Schedule.Meeting.Request"), "meeting");
+        assert_eq!(item_type_from_class("IPM.Schedule.Meeting.Canceled"), "meeting");
+        assert_eq!(item_type_from_class("REPORT.IPM.Note.NDR"), "bounce");
+        assert_eq!(item_type_from_class("REPORT.IPM.Note.IPNRN"), "read_receipt");
+        assert_eq!(item_type_from_class("IPM.Contact"), "other");
+    }
+
+    #[test]
+    fn meeting_type_mapping() {
+        assert_eq!(meeting_type_from_class("IPM.Schedule.Meeting.Request"), "request");
+        assert_eq!(meeting_type_from_class("IPM.Schedule.Meeting.Canceled"), "cancellation");
+        assert_eq!(meeting_type_from_class("IPM.Schedule.Meeting.Resp.Pos"), "response");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
