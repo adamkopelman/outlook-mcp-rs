@@ -31,11 +31,30 @@ pub const OL_MEETING: i32 = 1;
 
 // OlTaskStatus
 pub const OL_TASK_NOT_STARTED: i32 = 0;
+pub const OL_TASK_IN_PROGRESS: i32 = 1;
+pub const OL_TASK_COMPLETE: i32 = 2;
+pub const OL_TASK_WAITING: i32 = 3;
+pub const OL_TASK_DEFERRED: i32 = 4;
 
 // OlImportance
 pub const OL_IMPORTANCE_LOW: i32 = 0;
 pub const OL_IMPORTANCE_NORMAL: i32 = 1;
 pub const OL_IMPORTANCE_HIGH: i32 = 2;
+
+// OlBusyStatus (AppointmentItem.BusyStatus)
+pub const OL_FREE: i32 = 0;
+pub const OL_TENTATIVE: i32 = 1;
+pub const OL_BUSY: i32 = 2;
+pub const OL_OUT_OF_OFFICE: i32 = 3;
+pub const OL_WORKING_ELSEWHERE: i32 = 4;
+
+// OlResponseStatus (AppointmentItem.ResponseStatus)
+pub const OL_RESPONSE_NONE: i32 = 0;
+pub const OL_RESPONSE_ORGANIZED: i32 = 1;
+pub const OL_RESPONSE_TENTATIVE: i32 = 2;
+pub const OL_RESPONSE_ACCEPTED: i32 = 3;
+pub const OL_RESPONSE_DECLINED: i32 = 4;
+pub const OL_RESPONSE_NOT_RESPONDED: i32 = 5;
 
 pub fn folder_name_to_id(name: &str) -> Option<i32> {
     match name.to_lowercase().as_str() {
