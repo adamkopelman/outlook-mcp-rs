@@ -295,22 +295,6 @@ fn email_summary(item: &IDispatch) -> Result<EmailSummary, ToolError> {
     })
 }
 
-/// Shared tail of `list_emails`: iterate a (sorted, possibly
-/// restricted) `Items` collection by 1-based index, building summaries until
-/// `count` is reached. Item order reflects the prior `Sort` call.
-fn collect_summaries(items: &IDispatch, count: i32) -> Result<Vec<EmailSummary>, ToolError> {
-    let total = variant_to_i32(&get_property(items, "Count")?).unwrap_or(0);
-    let mut results = Vec::new();
-    for i in 1..=total {
-        let item = to_disp(call_method(items, "Item", &mut [variant_from_i32(i)])?)?;
-        results.push(email_summary(&item)?);
-        if results.len() as i32 >= count {
-            break;
-        }
-    }
-    Ok(results)
-}
-
 /// `client.py::_compose`: build a `MailItem`, set recipients/subject/body.
 fn compose(
     app: &IDispatch,
@@ -404,16 +388,34 @@ impl OutlookClient for WindowsOutlookClient {
         })
     }
 
-    // NOTE: today this only honors folder/count/unread_only, matching the
-    // pre-EmailQuery behavior. The remaining EmailQuery filters (query, from,
-    // category, received_after/before, since_days, has_attachments, flagged,
-    // high_importance) are wired up for real COM filtering in Task 2.
+    // Cheap filters become sequential COM `Restrict` calls (they AND together);
+    // `category` and `has_attachments` are filtered client-side while iterating.
     fn list_emails(&self, q: EmailQuery) -> Result<Vec<EmailSummary>, ToolError> {
         self.with_com(|| {
             let (_app, ns) = mapi()?;
             let count = q.count.clamp(1, MAX_EMAIL_COUNT);
             let folder_obj = resolve_folder(&ns, Some(&q.folder))?;
             let mut items = to_disp(get_property(&folder_obj, "Items")?)?;
+
+            // Text query: DASL @SQL across subject/sender/body (escaped).
+            if let Some(query) = q.query.as_deref().filter(|s| !s.is_empty()) {
+                let e = query.replace('\'', "''");
+                let dasl = format!(
+                    "@SQL=(\"urn:schemas:httpmail:subject\" LIKE '%{e}%' \
+                     OR \"urn:schemas:httpmail:fromname\" LIKE '%{e}%' \
+                     OR \"urn:schemas:httpmail:textdescription\" LIKE '%{e}%')"
+                );
+                items = to_disp(call_method(&items, "Restrict", &mut [variant_from_str(&dasl)])?)?;
+            }
+            // Sender: DASL @SQL against fromname + fromemail.
+            if let Some(from) = q.from.as_deref().filter(|s| !s.is_empty()) {
+                let e = from.replace('\'', "''");
+                let dasl = format!(
+                    "@SQL=(\"urn:schemas:httpmail:fromname\" LIKE '%{e}%' \
+                     OR \"urn:schemas:httpmail:fromemail\" LIKE '%{e}%')"
+                );
+                items = to_disp(call_method(&items, "Restrict", &mut [variant_from_str(&dasl)])?)?;
+            }
             if q.unread_only {
                 items = to_disp(call_method(
                     &items,
@@ -421,12 +423,69 @@ impl OutlookClient for WindowsOutlookClient {
                     &mut [variant_from_str("[UnRead] = True")],
                 )?)?;
             }
+            if q.flagged {
+                // FlagStatus 2 = flagged/marked.
+                items = to_disp(call_method(
+                    &items,
+                    "Restrict",
+                    &mut [variant_from_str("[FlagStatus] = 2")],
+                )?)?;
+            }
+            if q.high_importance {
+                items = to_disp(call_method(
+                    &items,
+                    "Restrict",
+                    &mut [variant_from_str("[Importance] = 2")],
+                )?)?;
+            }
+            // Date filters: since_days (relative), received_after/before (absolute).
+            if q.since_days.is_some_and(|d| d != 0) {
+                let cutoff = chrono::Local::now().naive_local()
+                    - chrono::Duration::days(q.since_days.unwrap() as i64);
+                let f = format!("[ReceivedTime] >= '{}'", jet_datetime(&cutoff));
+                items = to_disp(call_method(&items, "Restrict", &mut [variant_from_str(&f)])?)?;
+            }
+            if let Some(after) = q.received_after.as_deref().filter(|s| !s.is_empty()) {
+                let dt = parse_dt(after, "received_after")?;
+                let f = format!("[ReceivedTime] >= '{}'", jet_datetime(&dt));
+                items = to_disp(call_method(&items, "Restrict", &mut [variant_from_str(&f)])?)?;
+            }
+            if let Some(before) = q.received_before.as_deref().filter(|s| !s.is_empty()) {
+                let dt = parse_dt(before, "received_before")?;
+                let f = format!("[ReceivedTime] <= '{}'", jet_datetime(&dt));
+                items = to_disp(call_method(&items, "Restrict", &mut [variant_from_str(&f)])?)?;
+            }
+
             call_method(
                 &items,
                 "Sort",
                 &mut [variant_from_str("[ReceivedTime]"), variant_from_bool(true)],
             )?;
-            collect_summaries(&items, count)
+
+            // Client-side fuzzy filters: category + has_attachments. Iterate,
+            // build each summary, keep it only if it passes, stop at count.
+            let cat_want = q.category.as_deref().map(|c| c.to_lowercase());
+            let total = variant_to_i32(&get_property(&items, "Count")?).unwrap_or(0);
+            let mut results = Vec::new();
+            for i in 1..=total {
+                let item = to_disp(call_method(&items, "Item", &mut [variant_from_i32(i)])?)?;
+                let summary = email_summary(&item)?;
+                if let Some(want) = &cat_want {
+                    if !summary.categories.iter().any(|c| c.to_lowercase() == *want) {
+                        continue;
+                    }
+                }
+                if let Some(want_att) = q.has_attachments {
+                    if summary.has_attachments != want_att {
+                        continue;
+                    }
+                }
+                results.push(summary);
+                if results.len() as i32 >= count {
+                    break;
+                }
+            }
+            Ok(results)
         })
     }
 
