@@ -115,3 +115,37 @@ fn list_emails_query_filter_narrows_results() {
     }).expect("query list should work");
     assert!(filtered.len() <= all.len());
 }
+
+#[test]
+#[ignore]
+fn create_draft_with_attachment_round_trips() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("outlook-mcp-rs-live-attach.txt");
+    std::fs::write(&path, b"live attachment test").expect("write temp file");
+    let path_str = path.to_string_lossy().to_string();
+
+    let c = WindowsOutlookClient::new();
+    let created = c.create_draft(
+        vec!["nobody@example.invalid".to_string()],
+        "outlook-mcp-rs attachment test".to_string(),
+        "see attached".to_string(),
+        None, None, false,
+        Some(vec![path_str]),
+    ).expect("create_draft with attachment should succeed");
+    let id = created["id"].as_str().expect("draft id").to_string();
+    c.delete_email(id).expect("cleanup: delete the draft");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+#[ignore]
+fn send_with_missing_attachment_errors_before_sending() {
+    let c = WindowsOutlookClient::new();
+    let err = c.send_email(
+        vec!["nobody@example.invalid".to_string()],
+        "should not send".to_string(), "body".to_string(),
+        None, None, false,
+        Some(vec!["C:/definitely/does/not/exist/nope.pdf".to_string()]),
+    ).unwrap_err();
+    assert!(err.to_string().contains("attachment not found"));
+}
