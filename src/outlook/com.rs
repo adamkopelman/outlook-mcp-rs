@@ -32,6 +32,22 @@ pub fn safe_filename(name: &str) -> String {
     if trimmed.is_empty() { "attachment".to_string() } else { trimmed.to_string() }
 }
 
+/// Outlook stores categories as one `", "`-joined string. Split it into names,
+/// trimming whitespace and dropping empties. Mirrors how the Python client
+/// would `.split(", ")`.
+pub fn parse_categories(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Join category names back into the `", "`-separated string Outlook expects.
+pub fn join_categories(cats: &[String]) -> String {
+    cats.join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,6 +78,15 @@ mod tests {
         assert_eq!(safe_filename("report:final*.pdf"), "report_final_.pdf");
         assert_eq!(safe_filename("   "), "attachment");
         assert_eq!(safe_filename(""), "attachment");
+    }
+
+    #[test]
+    fn categories_round_trip_and_trim() {
+        assert_eq!(parse_categories("Work, Receipts"), vec!["Work", "Receipts"]);
+        assert_eq!(parse_categories("  Work ,  Personal "), vec!["Work", "Personal"]);
+        assert_eq!(parse_categories(""), Vec::<String>::new());
+        assert_eq!(join_categories(&["Work".into(), "Personal".into()]), "Work, Personal");
+        assert_eq!(join_categories(&[]), "");
     }
 }
 
@@ -186,6 +211,19 @@ pub fn put_property(disp: &IDispatch, name: &str, value: VARIANT) -> WinResult<(
 
 pub fn call_method(disp: &IDispatch, name: &str, args: &mut [VARIANT]) -> WinResult<VARIANT> {
     invoke(disp, name, DISPATCH_METHOD, args)
+}
+
+/// Read an item's color categories (empty vec if the property is missing or blank).
+pub fn get_item_categories(disp: &IDispatch) -> Vec<String> {
+    let raw = get_property(disp, "Categories")
+        .map(|v| variant_to_string(&v))
+        .unwrap_or_default();
+    parse_categories(&raw)
+}
+
+/// Overwrite an item's categories with the given list.
+pub fn set_item_categories(disp: &IDispatch, cats: &[String]) -> WinResult<()> {
+    put_property(disp, "Categories", variant_from_str(&join_categories(cats)))
 }
 
 /// Mirrors Python's `hasattr(obj, name)` for a COM dispatch member: resolves
