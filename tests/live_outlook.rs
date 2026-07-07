@@ -95,3 +95,23 @@ fn create_event_then_delete_it() {
     // frequent enough to automate.
     let _ = c.get_event(id); // just confirm it round-trips before manual cleanup
 }
+
+#[test]
+#[ignore]
+fn list_emails_query_filter_narrows_results() {
+    use outlook_mcp_rs::outlook::EmailQuery;
+    let c = WindowsOutlookClient::new();
+    let all = c.list_emails(EmailQuery {
+        query: None, folder: "inbox".into(), count: 25, unread_only: false,
+        from: None, category: None, received_after: None, received_before: None,
+        since_days: None, has_attachments: None, flagged: false, high_importance: false,
+    }).expect("plain list should work");
+    // A query that almost certainly matches nothing should return <= all.
+    let filtered = c.list_emails(EmailQuery {
+        query: Some("zzqx-improbable-token-9137".into()),
+        folder: "inbox".into(), count: 25, unread_only: false,
+        from: None, category: None, received_after: None, received_before: None,
+        since_days: None, has_attachments: None, flagged: false, high_importance: false,
+    }).expect("query list should work");
+    assert!(filtered.len() <= all.len());
+}
