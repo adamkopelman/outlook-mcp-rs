@@ -87,6 +87,8 @@ pub struct SendEmailParams {
     pub bcc: Option<Vec<String>>,
     #[serde(default)]
     pub html: bool,
+    #[serde(default)]
+    pub attachments: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -100,6 +102,8 @@ pub struct CreateDraftParams {
     pub bcc: Option<Vec<String>>,
     #[serde(default)]
     pub html: bool,
+    #[serde(default)]
+    pub attachments: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -112,6 +116,8 @@ pub struct ReplyEmailParams {
     pub html: bool,
     #[serde(default = "default_true")]
     pub send: bool,
+    #[serde(default)]
+    pub attachments: Option<Vec<String>>,
 }
 fn default_true() -> bool { true }
 
@@ -259,30 +265,30 @@ impl OutlookMcpServer {
     #[tool(description = "Send a new email immediately.")]
     pub async fn send_email(
         &self,
-        Parameters(SendEmailParams { to, subject, body, cc, bcc, html }): Parameters<SendEmailParams>,
+        Parameters(SendEmailParams { to, subject, body, cc, bcc, html, attachments }): Parameters<SendEmailParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let result = run_blocking(move || client.send_email(to, subject, body, cc, bcc, html)).await?;
+        let result = run_blocking(move || client.send_email(to, subject, body, cc, bcc, html, attachments)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
     #[tool(description = "Create (but don't send) a draft email.")]
     pub async fn create_draft(
         &self,
-        Parameters(CreateDraftParams { to, subject, body, cc, bcc, html }): Parameters<CreateDraftParams>,
+        Parameters(CreateDraftParams { to, subject, body, cc, bcc, html, attachments }): Parameters<CreateDraftParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let result = run_blocking(move || client.create_draft(to, subject, body, cc, bcc, html)).await?;
+        let result = run_blocking(move || client.create_draft(to, subject, body, cc, bcc, html, attachments)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
     #[tool(description = "Reply to an email, optionally to all recipients, optionally as a draft.")]
     pub async fn reply_email(
         &self,
-        Parameters(ReplyEmailParams { email_id, body, reply_all, html, send }): Parameters<ReplyEmailParams>,
+        Parameters(ReplyEmailParams { email_id, body, reply_all, html, send, attachments }): Parameters<ReplyEmailParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let result = run_blocking(move || client.reply_email(email_id, body, reply_all, html, send)).await?;
+        let result = run_blocking(move || client.reply_email(email_id, body, reply_all, html, send, attachments)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 

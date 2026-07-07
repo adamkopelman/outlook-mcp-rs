@@ -45,7 +45,7 @@ fn create_draft_then_delete_round_trips() {
         vec!["nobody@example.invalid".to_string()],
         "outlook-mcp-rs live test draft".to_string(),
         "This draft is created and deleted by an automated test.".to_string(),
-        None, None, false,
+        None, None, false, None,
     ).expect("create_draft should succeed");
     let id = created["id"].as_str().expect("create_draft returns an id").to_string();
     c.delete_email(id).expect("cleanup: delete_email should succeed");

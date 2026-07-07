@@ -83,25 +83,25 @@ impl OutlookClient for FakeOutlookClient {
     }
 
     fn send_email(&self, to: Vec<String>, subject: String, body: String,
-        cc: Option<Vec<String>>, bcc: Option<Vec<String>>, html: bool)
-        -> Result<Value, ToolError> {
+        cc: Option<Vec<String>>, bcc: Option<Vec<String>>, html: bool,
+        attachments: Option<Vec<String>>) -> Result<Value, ToolError> {
         self.record("send_email",
-            json!({"to": to, "subject": subject, "body": body, "cc": cc, "bcc": bcc, "html": html}))?;
+            json!({"to": to, "subject": subject, "body": body, "cc": cc, "bcc": bcc, "html": html, "attachments": attachments}))?;
         Ok(json!({"status": "sent", "to": to.join("; "), "subject": subject}))
     }
 
     fn create_draft(&self, to: Vec<String>, subject: String, body: String,
-        cc: Option<Vec<String>>, bcc: Option<Vec<String>>, html: bool)
-        -> Result<Value, ToolError> {
+        cc: Option<Vec<String>>, bcc: Option<Vec<String>>, html: bool,
+        attachments: Option<Vec<String>>) -> Result<Value, ToolError> {
         self.record("create_draft",
-            json!({"to": to, "subject": subject, "body": body, "cc": cc, "bcc": bcc, "html": html}))?;
+            json!({"to": to, "subject": subject, "body": body, "cc": cc, "bcc": bcc, "html": html, "attachments": attachments}))?;
         Ok(json!({"status": "draft_saved", "id": EMAIL_ID, "subject": subject}))
     }
 
     fn reply_email(&self, email_id: String, body: String, reply_all: bool,
-        html: bool, send: bool) -> Result<Value, ToolError> {
+        html: bool, send: bool, attachments: Option<Vec<String>>) -> Result<Value, ToolError> {
         self.record("reply_email",
-            json!({"email_id": email_id, "body": body, "reply_all": reply_all, "html": html, "send": send}))?;
+            json!({"email_id": email_id, "body": body, "reply_all": reply_all, "html": html, "send": send, "attachments": attachments}))?;
         Ok(json!({"status": if send { "sent" } else { "draft_saved" }}))
     }
 

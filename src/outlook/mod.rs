@@ -31,13 +31,14 @@ pub trait OutlookClient: Send + Sync {
     fn get_email(&self, email_id: String, prefer_html: bool)
         -> Result<EmailDetail, ToolError>;
     fn send_email(&self, to: Vec<String>, subject: String, body: String,
-        cc: Option<Vec<String>>, bcc: Option<Vec<String>>, html: bool)
-        -> Result<Value, ToolError>;
+        cc: Option<Vec<String>>, bcc: Option<Vec<String>>, html: bool,
+        attachments: Option<Vec<String>>) -> Result<Value, ToolError>;
     fn create_draft(&self, to: Vec<String>, subject: String, body: String,
-        cc: Option<Vec<String>>, bcc: Option<Vec<String>>, html: bool)
-        -> Result<Value, ToolError>;
+        cc: Option<Vec<String>>, bcc: Option<Vec<String>>, html: bool,
+        attachments: Option<Vec<String>>) -> Result<Value, ToolError>;
     fn reply_email(&self, email_id: String, body: String, reply_all: bool,
-        html: bool, send: bool) -> Result<Value, ToolError>;
+        html: bool, send: bool, attachments: Option<Vec<String>>)
+        -> Result<Value, ToolError>;
     fn move_email(&self, email_id: String, target_folder: String)
         -> Result<Value, ToolError>;
     fn delete_email(&self, email_id: String) -> Result<Value, ToolError>;

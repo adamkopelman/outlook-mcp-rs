@@ -114,6 +114,7 @@ async fn send_email_passes_recipients_and_html_flag() {
             cc: None,
             bcc: None,
             html: false,
+            attachments: None,
         }))
         .await
         .unwrap();
@@ -135,6 +136,7 @@ async fn create_draft_returns_draft_saved_status() {
             cc: None,
             bcc: None,
             html: false,
+            attachments: None,
         }))
         .await
         .unwrap();
@@ -152,12 +154,26 @@ async fn reply_email_passes_reply_all_and_send_flags() {
             reply_all: true,
             html: false,
             send: false,
+            attachments: None,
         }))
         .await
         .unwrap();
     let (_, args) = &fake.calls()[0];
     assert_eq!(args["reply_all"], true);
     assert_eq!(args["send"], false);
+}
+
+#[tokio::test]
+async fn send_email_forwards_attachments() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let params: SendEmailParams = serde_json::from_value(json!({
+        "to": ["a@x.com"], "subject": "Hi", "body": "yo",
+        "attachments": ["C:/tmp/a.pdf", "C:/tmp/b.png"]
+    })).unwrap();
+    server.send_email(Parameters(params)).await.unwrap();
+    let (_, args) = &fake.calls()[0];
+    assert_eq!(args["attachments"], serde_json::json!(["C:/tmp/a.pdf", "C:/tmp/b.png"]));
 }
 
 #[tokio::test]

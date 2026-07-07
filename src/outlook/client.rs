@@ -328,6 +328,22 @@ fn compose(
     Ok(mail)
 }
 
+/// Attach local files to a mail/reply item. Validates every path exists
+/// FIRST (so a bad path fails before anything is sent), then adds each via
+/// `MailItem.Attachments.Add(path)`.
+fn attach_files(mail: &IDispatch, paths: &[String]) -> Result<(), ToolError> {
+    for p in paths {
+        if !std::path::Path::new(p).is_file() {
+            return Err(ToolError::new(format!("attachment not found: {p}")));
+        }
+    }
+    let atts = to_disp(get_property(mail, "Attachments")?)?;
+    for p in paths {
+        call_method(&atts, "Add", &mut [variant_from_str(p)])?;
+    }
+    Ok(())
+}
+
 impl OutlookClient for WindowsOutlookClient {
     // ---- Email (implemented in Task 12) --------------------------------
 
@@ -543,6 +559,7 @@ impl OutlookClient for WindowsOutlookClient {
         cc: Option<Vec<String>>,
         bcc: Option<Vec<String>>,
         html: bool,
+        attachments: Option<Vec<String>>,
     ) -> Result<Value, ToolError> {
         if to.is_empty() {
             return Err(ToolError::new(
@@ -552,6 +569,9 @@ impl OutlookClient for WindowsOutlookClient {
         self.with_com(|| {
             let (app, _ns) = mapi()?;
             let mail = compose(&app, &to, &subject, &body, cc.as_deref(), bcc.as_deref(), html)?;
+            if let Some(atts) = attachments.as_deref() {
+                attach_files(&mail, atts)?;
+            }
             call_method(&mail, "Send", &mut [])?;
             Ok(json!({"status": "sent", "to": to.join("; "), "subject": subject}))
         })
@@ -565,10 +585,14 @@ impl OutlookClient for WindowsOutlookClient {
         cc: Option<Vec<String>>,
         bcc: Option<Vec<String>>,
         html: bool,
+        attachments: Option<Vec<String>>,
     ) -> Result<Value, ToolError> {
         self.with_com(|| {
             let (app, _ns) = mapi()?;
             let mail = compose(&app, &to, &subject, &body, cc.as_deref(), bcc.as_deref(), html)?;
+            if let Some(atts) = attachments.as_deref() {
+                attach_files(&mail, atts)?;
+            }
             call_method(&mail, "Save", &mut [])?; // Save first so EntryID exists
             let id = make_id(&mail)?;
             Ok(json!({"status": "draft_saved", "id": id, "subject": subject}))
@@ -582,6 +606,7 @@ impl OutlookClient for WindowsOutlookClient {
         reply_all: bool,
         html: bool,
         send: bool,
+        attachments: Option<Vec<String>>,
     ) -> Result<Value, ToolError> {
         self.with_com(|| {
             let (_app, ns) = mapi()?;
@@ -597,6 +622,9 @@ impl OutlookClient for WindowsOutlookClient {
             } else {
                 let existing = variant_to_string(&get_property(&reply, "Body")?);
                 put_property(&reply, "Body", variant_from_str(&format!("{body}\n\n{existing}")))?;
+            }
+            if let Some(atts) = attachments.as_deref() {
+                attach_files(&reply, atts)?;
             }
             if send {
                 call_method(&reply, "Send", &mut [])?;
