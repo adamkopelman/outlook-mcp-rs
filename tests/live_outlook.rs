@@ -139,6 +139,27 @@ fn create_draft_with_attachment_round_trips() {
 
 #[test]
 #[ignore]
+fn get_email_reports_item_type_for_real_inbox_item() {
+    let c = WindowsOutlookClient::new();
+    let list = c.list_emails(EmailQuery {
+        query: None, folder: "inbox".into(), count: 1, unread_only: false,
+        from: None, category: None, received_after: None, received_before: None,
+        since_days: None, has_attachments: None, flagged: false, high_importance: false,
+    }).expect("list");
+    if let Some(first) = list.first() {
+        let detail = c.get_email(first.id.clone(), false).expect("get_email");
+        let v = serde_json::to_value(&detail).unwrap();
+        let t = v["item_type"].as_str().unwrap();
+        assert!(["email", "meeting", "bounce", "read_receipt", "other"].contains(&t));
+        // If it's a meeting, the meeting block must be present.
+        if v["is_meeting"].as_bool().unwrap() {
+            assert!(v.get("meeting").is_some());
+        }
+    }
+}
+
+#[test]
+#[ignore]
 fn send_with_missing_attachment_errors_before_sending() {
     let c = WindowsOutlookClient::new();
     let err = c.send_email(
