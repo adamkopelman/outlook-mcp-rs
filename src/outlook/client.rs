@@ -1259,3 +1259,425 @@ impl OutlookClient for WindowsOutlookClient {
         })
     }
 }
+
+#[cfg(test)]
+mod event_filter_tests {
+    use super::*;
+
+    /// Create a representative base EventSummary for testing.
+    fn base() -> EventSummary {
+        EventSummary {
+            id: "test-id|store-id".to_string(),
+            subject: "Weekly Review".to_string(),
+            start: Some("2026-06-10T14:00:00".to_string()),
+            end: Some("2026-06-10T15:00:00".to_string()),
+            location: "Room A".to_string(),
+            organizer: "Alice Smith; alice@example.com".to_string(),
+            all_day: false,
+            is_recurring: false,
+            is_meeting: true,
+            categories: vec!["Work".to_string()],
+            show_as: "busy".to_string(),
+            my_response: "accepted".to_string(),
+            required_attendees: "Alice Smith; alice@example.com".to_string(),
+            optional_attendees: "Bob Jones; bob@example.com".to_string(),
+        }
+    }
+
+    #[test]
+    fn empty_query_matches_any_summary() {
+        let summary = base();
+        let query = EventQuery::default();
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn query_substring_matches_subject() {
+        let summary = base();
+        let query = EventQuery {
+            query: Some("weekly".to_string()),
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn query_substring_matches_location() {
+        let summary = base();
+        let query = EventQuery {
+            query: Some("room".to_string()),
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn query_substring_no_match() {
+        let summary = base();
+        let query = EventQuery {
+            query: Some("nonexistent".to_string()),
+            ..Default::default()
+        };
+        assert!(!event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn query_substring_case_insensitive() {
+        let summary = base();
+        let query = EventQuery {
+            query: Some("WEEKLY REVIEW".to_string()),
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn empty_query_string_is_noop() {
+        let summary = base();
+        let query = EventQuery {
+            query: Some("".to_string()),
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn category_present_case_insensitive() {
+        let summary = base();
+        let query = EventQuery {
+            category: Some("work".to_string()),
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn category_absent() {
+        let summary = base();
+        let query = EventQuery {
+            category: Some("Personal".to_string()),
+            ..Default::default()
+        };
+        assert!(!event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn category_multiple_matches_one() {
+        let mut summary = base();
+        summary.categories = vec!["Work".to_string(), "Meeting".to_string()];
+        let query = EventQuery {
+            category: Some("MEETING".to_string()),
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn show_as_match_case_insensitive() {
+        let summary = base();
+        let query = EventQuery {
+            show_as: Some("BUSY".to_string()),
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn show_as_mismatch() {
+        let summary = base();
+        let query = EventQuery {
+            show_as: Some("free".to_string()),
+            ..Default::default()
+        };
+        assert!(!event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn my_response_match_case_insensitive() {
+        let summary = base();
+        let query = EventQuery {
+            my_response: Some("ACCEPTED".to_string()),
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn my_response_mismatch() {
+        let summary = base();
+        let query = EventQuery {
+            my_response: Some("declined".to_string()),
+            ..Default::default()
+        };
+        assert!(!event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn meetings_only_true_with_meeting() {
+        let summary = base();
+        let query = EventQuery {
+            meetings_only: true,
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn meetings_only_true_without_meeting() {
+        let mut summary = base();
+        summary.is_meeting = false;
+        let query = EventQuery {
+            meetings_only: true,
+            ..Default::default()
+        };
+        assert!(!event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn all_day_true_matches_all_day_event() {
+        let mut summary = base();
+        summary.all_day = true;
+        let query = EventQuery {
+            all_day: Some(true),
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn all_day_true_rejects_non_all_day_event() {
+        let summary = base();
+        let query = EventQuery {
+            all_day: Some(true),
+            ..Default::default()
+        };
+        assert!(!event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn all_day_false_matches_non_all_day_event() {
+        let summary = base();
+        let query = EventQuery {
+            all_day: Some(false),
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn all_day_false_rejects_all_day_event() {
+        let mut summary = base();
+        summary.all_day = true;
+        let query = EventQuery {
+            all_day: Some(false),
+            ..Default::default()
+        };
+        assert!(!event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn all_day_none_is_noop() {
+        let summary = base();
+        let query = EventQuery {
+            all_day: None,
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn attendees_required_role_substring_match() {
+        let summary = base();
+        let query = EventQuery {
+            attendees: Some(vec!["alice".to_string()]),
+            attendee_role: Some("required".to_string()),
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn attendees_required_role_no_match() {
+        let summary = base();
+        let query = EventQuery {
+            attendees: Some(vec!["bob".to_string()]),
+            attendee_role: Some("required".to_string()),
+            ..Default::default()
+        };
+        assert!(!event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn attendees_optional_role_substring_match() {
+        let summary = base();
+        let query = EventQuery {
+            attendees: Some(vec!["bob".to_string()]),
+            attendee_role: Some("optional".to_string()),
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn attendees_optional_role_no_match() {
+        let summary = base();
+        let query = EventQuery {
+            attendees: Some(vec!["alice".to_string()]),
+            attendee_role: Some("optional".to_string()),
+            ..Default::default()
+        };
+        assert!(!event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn attendees_any_role_matches_required() {
+        let summary = base();
+        let query = EventQuery {
+            attendees: Some(vec!["alice".to_string()]),
+            attendee_role: Some("any".to_string()),
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn attendees_any_role_matches_optional() {
+        let summary = base();
+        let query = EventQuery {
+            attendees: Some(vec!["bob".to_string()]),
+            attendee_role: Some("any".to_string()),
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn attendees_no_role_defaults_to_any() {
+        let summary = base();
+        let query = EventQuery {
+            attendees: Some(vec!["alice".to_string()]),
+            attendee_role: None,
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn attendees_case_insensitive_search() {
+        let summary = base();
+        let query = EventQuery {
+            attendees: Some(vec!["ALICE".to_string()]),
+            attendee_role: Some("required".to_string()),
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn attendees_multiple_in_list_any_matches() {
+        let summary = base();
+        let query = EventQuery {
+            attendees: Some(vec!["nonexistent".to_string(), "bob".to_string()]),
+            attendee_role: Some("optional".to_string()),
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn attendees_empty_string_does_not_match() {
+        let summary = base();
+        let query = EventQuery {
+            attendees: Some(vec!["".to_string()]),
+            attendee_role: None,
+            ..Default::default()
+        };
+        assert!(!event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn attendees_empty_list_is_noop() {
+        let summary = base();
+        let query = EventQuery {
+            attendees: Some(vec![]),
+            attendee_role: None,
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn multiple_filters_all_satisfied() {
+        let summary = base();
+        let query = EventQuery {
+            query: Some("weekly".to_string()),
+            category: Some("work".to_string()),
+            show_as: Some("busy".to_string()),
+            meetings_only: true,
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn multiple_filters_one_fails() {
+        let summary = base();
+        let query = EventQuery {
+            query: Some("weekly".to_string()),
+            category: Some("work".to_string()),
+            show_as: Some("free".to_string()),
+            meetings_only: true,
+            ..Default::default()
+        };
+        assert!(!event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn complex_scenario_meeting_with_required_attendee_and_category() {
+        let summary = base();
+        let query = EventQuery {
+            meetings_only: true,
+            category: Some("Work".to_string()),
+            attendees: Some(vec!["alice".to_string()]),
+            attendee_role: Some("required".to_string()),
+            query: Some("review".to_string()),
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn complex_scenario_wrong_attendee_tier() {
+        let summary = base();
+        let query = EventQuery {
+            meetings_only: true,
+            category: Some("Work".to_string()),
+            attendees: Some(vec!["bob".to_string()]),
+            attendee_role: Some("required".to_string()),
+            query: Some("review".to_string()),
+            ..Default::default()
+        };
+        assert!(!event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn attendees_full_email_substring_match() {
+        let summary = base();
+        let query = EventQuery {
+            attendees: Some(vec!["example.com".to_string()]),
+            attendee_role: Some("required".to_string()),
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+
+    #[test]
+    fn query_location_exact_match_case_insensitive() {
+        let summary = base();
+        let query = EventQuery {
+            query: Some("ROOM A".to_string()),
+            ..Default::default()
+        };
+        assert!(event_matches(&summary, &query));
+    }
+}
