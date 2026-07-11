@@ -9,7 +9,7 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::error::ToolError;
-use crate::outlook::{EmailQuery, EmailUpdate, OutlookClient};
+use crate::outlook::{EmailQuery, EmailUpdate, EventQuery, OutlookClient};
 
 /// Runs a blocking `OutlookClient` call on a dedicated blocking thread so the
 /// tokio scheduler never migrates it mid-call (COM apartment-threading
@@ -157,6 +157,33 @@ pub struct ListEventsParams {
     pub start_date: Option<String>,
     #[serde(default)]
     pub end_date: Option<String>,
+    /// Text match on subject + location.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Filter to a color category.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// "free" | "tentative" | "busy" | "out_of_office" | "working_elsewhere".
+    #[serde(default)]
+    pub show_as: Option<String>,
+    /// This mailbox's response: "organizer" | "accepted" | "declined" | "tentative" | "not_responded".
+    #[serde(default)]
+    pub my_response: Option<String>,
+    /// Names/emails; match events where ANY listed person participates.
+    #[serde(default)]
+    pub attendees: Option<Vec<String>>,
+    /// "required" | "optional" | "any" (default "any").
+    #[serde(default)]
+    pub attendee_role: Option<String>,
+    /// Only events that have other attendees (meetings).
+    #[serde(default)]
+    pub meetings_only: bool,
+    /// Only all-day (true) or only non-all-day (false) events.
+    #[serde(default)]
+    pub all_day: Option<bool>,
+    /// Email/name of another person whose shared calendar to view (default: your own).
+    #[serde(default)]
+    pub calendar_of: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -336,13 +363,20 @@ impl OutlookMcpServer {
 
     // ---- Calendar ----
 
-    #[tool(description = "List calendar events in a date range (default: next 7 days).")]
+    #[tool(description = "List/search calendar events. Filter by date range, text (subject/location), category, show_as, your response, attendees (+role), meetings-only, all-day; or view another person's shared calendar via calendar_of.")]
     pub async fn list_events(
         &self,
-        Parameters(ListEventsParams { start_date, end_date }): Parameters<ListEventsParams>,
+        Parameters(p): Parameters<ListEventsParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let result = run_blocking(move || client.list_events(start_date, end_date)).await?;
+        let q = EventQuery {
+            start_date: p.start_date, end_date: p.end_date, query: p.query,
+            category: p.category, show_as: p.show_as, my_response: p.my_response,
+            attendees: p.attendees, attendee_role: p.attendee_role,
+            meetings_only: p.meetings_only, all_day: p.all_day,
+            calendar_of: p.calendar_of,
+        };
+        let result = run_blocking(move || client.list_events(q)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 

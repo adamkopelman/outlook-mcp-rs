@@ -40,6 +40,25 @@ pub struct EmailUpdate {
     pub importance: Option<String>,         // "low" | "normal" | "high"
 }
 
+/// All filters for `list_events`. Every field is optional; supplying several
+/// ANDs them. `start_date`/`end_date` bound the (recurrence-expanded) scan;
+/// the rest filter the streamed events client-side. `calendar_of` (an
+/// email/name) opens another person's shared calendar instead of your own.
+#[derive(Debug, Clone, Default)]
+pub struct EventQuery {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub query: Option<String>,                 // text match on subject + location
+    pub category: Option<String>,
+    pub show_as: Option<String>,               // "free"|"tentative"|"busy"|"out_of_office"|"working_elsewhere"
+    pub my_response: Option<String>,           // "organizer"|"accepted"|"declined"|"tentative"|"not_responded"
+    pub attendees: Option<Vec<String>>,        // match events where ANY listed person participates
+    pub attendee_role: Option<String>,         // "required"|"optional"|"any" (default "any")
+    pub meetings_only: bool,
+    pub all_day: Option<bool>,
+    pub calendar_of: Option<String>,
+}
+
 pub trait OutlookClient: Send + Sync {
     fn list_folders(&self) -> Result<Vec<FolderInfo>, ToolError>;
     fn list_emails(&self, q: EmailQuery) -> Result<Vec<EmailSummary>, ToolError>;
@@ -57,8 +76,7 @@ pub trait OutlookClient: Send + Sync {
     fn update_email(&self, u: EmailUpdate) -> Result<Value, ToolError>;
     fn delete_email(&self, email_id: String) -> Result<Value, ToolError>;
 
-    fn list_events(&self, start_date: Option<String>, end_date: Option<String>)
-        -> Result<Vec<EventSummary>, ToolError>;
+    fn list_events(&self, q: EventQuery) -> Result<Vec<EventSummary>, ToolError>;
     fn get_event(&self, event_id: String) -> Result<EventDetail, ToolError>;
     fn create_event(&self, subject: String, start: String, end: String,
         body: Option<String>, location: Option<String>,

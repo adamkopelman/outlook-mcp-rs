@@ -21,7 +21,7 @@ use crate::outlook::com::{
     variant_to_bool, variant_to_i32, variant_to_iso_string, variant_to_string, ComGuard,
 };
 use crate::outlook::types::*;
-use crate::outlook::{EmailQuery, EmailUpdate, OutlookClient};
+use crate::outlook::{EmailQuery, EmailUpdate, EventQuery, OutlookClient};
 
 /// Matches `MAX_EMAIL_COUNT` in `client.py`.
 const MAX_EMAIL_COUNT: i32 = 50;
@@ -781,27 +781,23 @@ impl OutlookClient for WindowsOutlookClient {
 
     // ---- Calendar (Task 13) --------------------------------------------
 
-    fn list_events(
-        &self,
-        start_date: Option<String>,
-        end_date: Option<String>,
-    ) -> Result<Vec<EventSummary>, ToolError> {
+    fn list_events(&self, q: EventQuery) -> Result<Vec<EventSummary>, ToolError> {
         self.with_com(|| {
             let (_app, ns) = mapi()?;
-            let start = match &start_date {
+            let start = match &q.start_date {
                 Some(s) => parse_dt(s, "start_date")?,
                 None => chrono::Local::now()
                     .date_naive()
                     .and_hms_opt(0, 0, 0)
                     .unwrap(),
             };
-            let mut end = match &end_date {
+            let mut end = match &q.end_date {
                 Some(s) => parse_dt(s, "end_date")?,
                 None => start + chrono::Duration::days(7),
             };
             // If only a bare date was given for the end, treat it as the whole
             // end day (Python: `end.time() == time.min and "T" not in end_date`).
-            if let Some(ed) = &end_date {
+            if let Some(ed) = &q.end_date {
                 if end.time() == chrono::NaiveTime::MIN && !ed.contains('T') {
                     end = end.date().and_hms_micro_opt(23, 59, 59, 999_999).unwrap();
                 }

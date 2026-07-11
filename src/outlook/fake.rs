@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use crate::error::ToolError;
 use super::types::*;
-use super::{EmailQuery, EmailUpdate, OutlookClient};
+use super::{EmailQuery, EmailUpdate, EventQuery, OutlookClient};
 
 pub const EMAIL_ID: &str = "entry-1|store-1";
 pub const EVENT_ID: &str = "entry-2|store-1";
@@ -136,9 +136,14 @@ impl OutlookClient for FakeOutlookClient {
         Ok(json!({"status": "deleted"}))
     }
 
-    fn list_events(&self, start_date: Option<String>, end_date: Option<String>)
-        -> Result<Vec<EventSummary>, ToolError> {
-        self.record("list_events", json!({"start_date": start_date, "end_date": end_date}))?;
+    fn list_events(&self, q: EventQuery) -> Result<Vec<EventSummary>, ToolError> {
+        self.record("list_events", json!({
+            "start_date": q.start_date, "end_date": q.end_date, "query": q.query,
+            "category": q.category, "show_as": q.show_as, "my_response": q.my_response,
+            "attendees": q.attendees, "attendee_role": q.attendee_role,
+            "meetings_only": q.meetings_only, "all_day": q.all_day,
+            "calendar_of": q.calendar_of,
+        }))?;
         Ok(vec![EventSummary {
             id: EVENT_ID.into(), subject: "Standup".into(), start: None, end: None,
             location: "".into(), organizer: "".into(), all_day: false,

@@ -269,12 +269,48 @@ async fn list_events_passes_date_range() {
         .list_events(Parameters(ListEventsParams {
             start_date: Some("2026-06-10".to_string()),
             end_date: Some("2026-06-17".to_string()),
+            query: None, category: None, show_as: None, my_response: None,
+            attendees: None, attendee_role: None, meetings_only: false,
+            all_day: None, calendar_of: None,
         }))
         .await
         .unwrap();
-    assert_eq!(fake.calls(), vec![
-        ("list_events".to_string(), json!({"start_date": "2026-06-10", "end_date": "2026-06-17"})),
-    ]);
+    let (name, args) = fake.calls().pop().unwrap();
+    assert_eq!(name, "list_events");
+    assert_eq!(args["start_date"], "2026-06-10");
+    assert_eq!(args["end_date"], "2026-06-17");
+}
+
+#[tokio::test]
+async fn list_events_forwards_all_filters() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    server
+        .list_events(Parameters(ListEventsParams {
+            start_date: None, end_date: None,
+            query: Some("review".to_string()),
+            category: Some("Work".to_string()),
+            show_as: Some("busy".to_string()),
+            my_response: Some("accepted".to_string()),
+            attendees: Some(vec!["alice@example.com".to_string()]),
+            attendee_role: Some("required".to_string()),
+            meetings_only: true,
+            all_day: Some(false),
+            calendar_of: Some("bob@example.com".to_string()),
+        }))
+        .await
+        .unwrap();
+    let (name, args) = fake.calls().pop().unwrap();
+    assert_eq!(name, "list_events");
+    assert_eq!(args["query"], "review");
+    assert_eq!(args["category"], "Work");
+    assert_eq!(args["show_as"], "busy");
+    assert_eq!(args["my_response"], "accepted");
+    assert_eq!(args["attendees"], serde_json::json!(["alice@example.com"]));
+    assert_eq!(args["attendee_role"], "required");
+    assert_eq!(args["meetings_only"], true);
+    assert_eq!(args["all_day"], false);
+    assert_eq!(args["calendar_of"], "bob@example.com");
 }
 
 #[tokio::test]
