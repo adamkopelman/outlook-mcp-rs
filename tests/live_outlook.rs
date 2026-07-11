@@ -9,7 +9,7 @@
 //! can't be undone — see TESTING.md for how to test those by hand.
 
 use outlook_mcp_rs::outlook::client::WindowsOutlookClient;
-use outlook_mcp_rs::outlook::{EmailQuery, OutlookClient, EmailUpdate};
+use outlook_mcp_rs::outlook::{EmailQuery, EventQuery, OutlookClient, EmailUpdate};
 
 fn client() -> WindowsOutlookClient {
     WindowsOutlookClient::new()
@@ -94,6 +94,65 @@ fn create_event_then_delete_it() {
     // trait with a delete_event method if this becomes frequent enough to
     // automate.
     let _ = c.get_event(id); // just confirm it round-trips before manual cleanup
+}
+
+#[test]
+#[ignore]
+fn list_events_filters_by_query_and_category() {
+    let c = WindowsOutlookClient::new();
+    // A far-future, uniquely-named appointment we can pinpoint and clean up.
+    let created = c.create_event(
+        "outlook-mcp-rs P6 filter probe".to_string(),
+        "2099-01-05T09:00".to_string(),
+        "2099-01-05T09:30".to_string(),
+        None, None, None, false, None,
+    ).expect("create_event");
+    let id = created["id"].as_str().expect("event id").to_string();
+
+    // A matching query in the window finds it.
+    let hits = c.list_events(EventQuery {
+        start_date: Some("2099-01-05".to_string()),
+        end_date: Some("2099-01-05".to_string()),
+        query: Some("filter probe".to_string()),
+        ..Default::default()
+    }).expect("list_events query");
+    assert!(hits.iter().any(|e| e.id == id), "query should match the probe");
+    // Enriched fields are populated.
+    let probe = hits.iter().find(|e| e.id == id).unwrap();
+    assert_eq!(probe.show_as, "busy");
+
+    // A non-matching query in the same window excludes it.
+    let misses = c.list_events(EventQuery {
+        start_date: Some("2099-01-05".to_string()),
+        end_date: Some("2099-01-05".to_string()),
+        query: Some("no-such-subject-xyz".to_string()),
+        ..Default::default()
+    }).expect("list_events non-matching query");
+    assert!(!misses.iter().any(|e| e.id == id), "non-matching query must exclude the probe");
+
+    // Cleanup: delete the probe.
+    c.delete_email(id).expect("cleanup delete");
+}
+
+#[test]
+#[ignore]
+fn list_events_calendar_of_self_opens_own_calendar() {
+    // Opening your OWN calendar via calendar_of exercises the recipient-resolve
+    // + GetSharedDefaultFolder path without needing a second user's sharing grant.
+    // Set OUTLOOK_MCP_TEST_EMAIL to your SMTP address to run this.
+    let me = match std::env::var("OUTLOOK_MCP_TEST_EMAIL") {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            eprintln!("skipping: set OUTLOOK_MCP_TEST_EMAIL to your address");
+            return;
+        }
+    };
+    let c = WindowsOutlookClient::new();
+    // Should resolve and return without error (contents may be empty — that's fine).
+    let _events = c.list_events(EventQuery {
+        calendar_of: Some(me),
+        ..Default::default()
+    }).expect("list_events calendar_of self should resolve and not error");
 }
 
 #[test]

@@ -52,3 +52,12 @@ been *sent or received*, and Outlook rejects it on a draft. To verify by hand:
 4. Pick a received email in your test mailbox and call `update_email` with
    `flag: "follow_up"`; confirm a follow-up flag appears. Repeat with
    `"complete"` (flag shows complete) and `"clear"` (flag removed).
+
+`list_events` with `calendar_of` pointing to **another user's calendar**
+requires that user to have granted you calendar-sharing permission; this
+setup cannot be automated in a test suite. The automated live test
+(`list_events_calendar_of_self_opens_own_calendar`) exercises the
+recipient-resolve + GetSharedDefaultFolder path by opening your own
+calendar; to verify cross-user sharing works, call `list_events` with a
+colleague's email address in `calendar_of` (one who has shared their
+calendar with you) and confirm it returns their events without error.
