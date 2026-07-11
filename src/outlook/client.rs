@@ -674,8 +674,10 @@ impl OutlookClient for WindowsOutlookClient {
             // ---- state changes first (they address the item by its current id) ----
 
             if let Some(read) = u.mark_read {
-                // UnRead is the inverse of "read".
+                // UnRead is the inverse of "read". Save so a mark_read-only
+                // update persists even when no later Save/Move follows.
                 put_property(&item, "UnRead", variant_from_bool(!read))?;
+                call_method(&item, "Save", &mut [])?;
                 changed.push("mark_read");
             }
 
