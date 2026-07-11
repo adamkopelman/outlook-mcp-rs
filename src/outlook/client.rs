@@ -205,7 +205,8 @@ fn parse_dt(value: &str, field: &str) -> Result<chrono::NaiveDateTime, ToolError
     )))
 }
 
-/// `client.py::_event_summary`.
+/// `client.py::_event_summary`, enriched for v2 with show_as/my_response and the
+/// attendee strings so every calendar filter can operate on the built summary.
 fn event_summary(item: &IDispatch) -> Result<EventSummary, ToolError> {
     let meeting_status = variant_to_i32(&get_property(item, "MeetingStatus").unwrap_or_default())
         .unwrap_or(c::OL_NONMEETING);
@@ -222,6 +223,22 @@ fn event_summary(item: &IDispatch) -> Result<EventSummary, ToolError> {
             .unwrap_or(false),
         is_meeting: meeting_status != c::OL_NONMEETING,
         categories: get_item_categories(item),
+        show_as: crate::friendly::busy_status_word(
+            variant_to_i32(&get_property(item, "BusyStatus").unwrap_or_default())
+                .unwrap_or(c::OL_BUSY),
+        )
+        .to_string(),
+        my_response: crate::friendly::response_word(
+            variant_to_i32(&get_property(item, "ResponseStatus").unwrap_or_default())
+                .unwrap_or(c::OL_RESPONSE_NONE),
+        )
+        .to_string(),
+        required_attendees: variant_to_string(
+            &get_property(item, "RequiredAttendees").unwrap_or_default(),
+        ),
+        optional_attendees: variant_to_string(
+            &get_property(item, "OptionalAttendees").unwrap_or_default(),
+        ),
     })
 }
 
@@ -826,24 +843,9 @@ impl OutlookClient for WindowsOutlookClient {
             let (_app, ns) = mapi()?;
             let item = get_item(&ns, &event_id)?;
             let summary = event_summary(&item)?;
-            // Python's `get_event` reads all four via `getattr(..., default)`, so an
-            // item lacking these appointment-only properties yields partial detail
-            // instead of a COM error. An empty VARIANT for ResponseStatus decodes to
-            // `OL_RESPONSE_NONE`, which `friendly::response_word` renders as "none".
             Ok(EventDetail {
                 summary,
                 body: truncate(&variant_to_string(&get_property(&item, "Body").unwrap_or_default())),
-                required_attendees: variant_to_string(
-                    &get_property(&item, "RequiredAttendees").unwrap_or_default(),
-                ),
-                optional_attendees: variant_to_string(
-                    &get_property(&item, "OptionalAttendees").unwrap_or_default(),
-                ),
-                response: crate::friendly::response_word(
-                    variant_to_i32(&get_property(&item, "ResponseStatus").unwrap_or_default())
-                        .unwrap_or(c::OL_RESPONSE_NONE),
-                )
-                .to_string(),
             })
         })
     }

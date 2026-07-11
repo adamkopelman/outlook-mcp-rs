@@ -61,6 +61,12 @@ pub struct EventSummary {
     pub is_recurring: bool,
     pub is_meeting: bool,
     pub categories: Vec<String>,
+    /// Busy status as a friendly word: "free"/"tentative"/"busy"/"out_of_office"/"working_elsewhere".
+    pub show_as: String,
+    /// This mailbox's response as a friendly word: "organizer"/"accepted"/"declined"/"tentative"/"not_responded"/"none".
+    pub my_response: String,
+    pub required_attendees: String,
+    pub optional_attendees: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,9 +74,6 @@ pub struct EventDetail {
     #[serde(flatten)]
     pub summary: EventSummary,
     pub body: String,
-    pub required_attendees: String,
-    pub optional_attendees: String,
-    pub response: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

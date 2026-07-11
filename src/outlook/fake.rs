@@ -143,6 +143,8 @@ impl OutlookClient for FakeOutlookClient {
             id: EVENT_ID.into(), subject: "Standup".into(), start: None, end: None,
             location: "".into(), organizer: "".into(), all_day: false,
             is_recurring: false, is_meeting: false, categories: vec![],
+            show_as: "busy".into(), my_response: "accepted".into(),
+            required_attendees: "".into(), optional_attendees: "".into(),
         }])
     }
 
@@ -153,9 +155,10 @@ impl OutlookClient for FakeOutlookClient {
                 id: event_id, subject: "Standup".into(), start: None, end: None,
                 location: "".into(), organizer: "".into(), all_day: false,
                 is_recurring: false, is_meeting: false, categories: vec![],
+                show_as: "busy".into(), my_response: "accepted".into(),
+                required_attendees: "".into(), optional_attendees: "".into(),
             },
-            body: "".into(), required_attendees: "".into(),
-            optional_attendees: "".into(), response: "accepted".to_string(),
+            body: "".into(),
         })
     }
 

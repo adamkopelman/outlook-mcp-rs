@@ -278,7 +278,7 @@ async fn list_events_passes_date_range() {
 }
 
 #[tokio::test]
-async fn get_event_returns_subject() {
+async fn get_event_returns_subject_and_friendly_fields() {
     use outlook_mcp_rs::outlook::fake::EVENT_ID;
     let fake = Arc::new(FakeOutlookClient::new());
     let server = OutlookMcpServer::new(fake.clone());
@@ -286,7 +286,15 @@ async fn get_event_returns_subject() {
         .get_event(Parameters(GetEventParams { event_id: EVENT_ID.to_string() }))
         .await
         .unwrap();
-    assert_eq!(result_json(&result)["subject"], "Standup");
+    let v = result_json(&result);
+    assert_eq!(v["subject"], "Standup");
+    // New enriched fields surface at the top level (EventDetail flattens the summary).
+    assert_eq!(v["show_as"], "busy");
+    assert_eq!(v["my_response"], "accepted");
+    assert_eq!(v["required_attendees"], "");
+    assert_eq!(v["optional_attendees"], "");
+    // The old nested "response" key is gone (renamed to my_response in the summary).
+    assert!(v.get("response").is_none());
 }
 
 #[tokio::test]
