@@ -858,11 +858,41 @@ impl OutlookClient for WindowsOutlookClient {
                     end = end.date().and_hms_micro_opt(23, 59, 59, 999_999).unwrap();
                 }
             }
-            let calendar = to_disp(call_method(
-                &ns,
-                "GetDefaultFolder",
-                &mut [variant_from_i32(c::OL_FOLDER_CALENDAR)],
-            )?)?;
+            // `calendar_of`: open another person's shared calendar; otherwise
+            // our own default calendar (current behavior).
+            let calendar = match q.calendar_of.as_deref().filter(|s| !s.is_empty()) {
+                Some(person) => {
+                    let recipient = to_disp(call_method(
+                        &ns, "CreateRecipient", &mut [variant_from_str(person)],
+                    )?)?;
+                    let resolved = variant_to_bool(&call_method(&recipient, "Resolve", &mut [])?)
+                        .unwrap_or(false);
+                    if !resolved {
+                        return Err(ToolError::new(format!(
+                            "Could not resolve {person:?} to a person — check the name/email."
+                        )));
+                    }
+                    // olFolderCalendar = 9. Requires that person to have shared
+                    // their calendar with you; otherwise COM errors with a
+                    // permission message, surfaced as-is.
+                    to_disp(call_method(
+                        &ns,
+                        "GetSharedDefaultFolder",
+                        &mut [
+                            VARIANT::from(recipient),
+                            variant_from_i32(c::OL_FOLDER_CALENDAR),
+                        ],
+                    ).map_err(|e| ToolError::new(format!(
+                        "Could not open {person:?}'s calendar — they may not have shared it with you. {}",
+                        format_com_error(&e)
+                    )))?)?
+                }
+                None => to_disp(call_method(
+                    &ns,
+                    "GetDefaultFolder",
+                    &mut [variant_from_i32(c::OL_FOLDER_CALENDAR)],
+                )?)?,
+            };
             let items = to_disp(get_property(&calendar, "Items")?)?;
             // Must precede Sort/Restrict — setting it afterwards has no effect.
             put_property(&items, "IncludeRecurrences", variant_from_bool(true))?;
