@@ -42,3 +42,13 @@ hand before a release:
 3. Find (or create) a meeting invite in your test mailbox and call
    `respond_to_meeting` with `response: "tentative"`; confirm the organizer
    sees a tentative response.
+
+`update_email`'s `flag` field (`follow_up`/`complete`/`clear`) is also
+manual-only. The automated live test (`update_email_applies_state_then_moves`)
+exercises `mark_read`, `add_categories`, `importance`, and `move_to` against a
+disposable draft, but not `flag`: `MarkAsTask` is only valid on items that have
+been *sent or received*, and Outlook rejects it on a draft. To verify by hand:
+
+4. Pick a received email in your test mailbox and call `update_email` with
+   `flag: "follow_up"`; confirm a follow-up flag appears. Repeat with
+   `"complete"` (flag shows complete) and `"clear"` (flag removed).

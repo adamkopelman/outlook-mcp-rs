@@ -88,11 +88,11 @@ fn create_event_then_delete_it() {
         None, None, None, false, None,
     ).expect("create_event should succeed");
     let id = created["id"].as_str().unwrap().to_string();
-    // Calendar items don't have a dedicated "delete" tool in the trait; use
-    // move_email into Deleted Items works for mail but not appointments —
-    // delete the test event manually from the calendar after this test runs,
-    // or extend the trait with a delete_event method if this becomes
-    // frequent enough to automate.
+    // Calendar items don't have a dedicated "delete" tool in the trait; moving
+    // into Deleted Items works for mail but not appointments — delete the test
+    // event manually from the calendar after this test runs, or extend the
+    // trait with a delete_event method if this becomes frequent enough to
+    // automate.
     let _ = c.get_event(id); // just confirm it round-trips before manual cleanup
 }
 
@@ -172,11 +172,17 @@ fn update_email_applies_state_then_moves() {
     let id = created["id"].as_str().expect("draft id").to_string();
 
     // Apply state changes only (no move yet) so we can read them back by the same id.
+    // NOTE: `flag` is deliberately NOT exercised here. `MarkAsTask` (follow_up)
+    // is only valid on sent/received items — Outlook rejects it on a draft
+    // ("MarkAsTask is only valid on items that have been sent or received").
+    // A draft is the only safe disposable target we can create, and mutating a
+    // real received email's flag state isn't cleanly reversible from the trait
+    // layer, so flag is verified manually — see TESTING.md.
     let res = c.update_email(EmailUpdate {
         email_id: id.clone(),
         move_to: None,
         mark_read: Some(true),
-        flag: Some("follow_up".to_string()),
+        flag: None,
         add_categories: Some(vec!["Work".to_string()]),
         remove_categories: None,
         importance: Some("high".to_string()),
@@ -185,7 +191,7 @@ fn update_email_applies_state_then_moves() {
     assert_eq!(res["id"], id); // no move → id unchanged
     let changed = res["changed"].as_array().unwrap();
     assert!(changed.iter().any(|v| v == "importance"));
-    assert!(changed.iter().any(|v| v == "flag"));
+    assert!(changed.iter().any(|v| v == "add_categories"));
 
     // Verify importance + category landed.
     let detail = c.get_email(id.clone(), false).expect("get_email");
