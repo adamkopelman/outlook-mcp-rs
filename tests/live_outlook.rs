@@ -9,7 +9,7 @@
 //! can't be undone — see TESTING.md for how to test those by hand.
 
 use outlook_mcp_rs::outlook::client::WindowsOutlookClient;
-use outlook_mcp_rs::outlook::{EmailQuery, OutlookClient};
+use outlook_mcp_rs::outlook::{EmailQuery, OutlookClient, EmailUpdate};
 
 fn client() -> WindowsOutlookClient {
     WindowsOutlookClient::new()
@@ -156,6 +156,66 @@ fn get_email_reports_item_type_for_real_inbox_item() {
             assert!(v.get("meeting").is_some());
         }
     }
+}
+
+#[test]
+#[ignore]
+fn update_email_applies_state_then_moves() {
+    let c = WindowsOutlookClient::new();
+    // A draft is a safe, disposable target (never sent).
+    let created = c.create_draft(
+        vec!["nobody@example.invalid".to_string()],
+        "outlook-mcp-rs update_email live test".to_string(),
+        "body".to_string(),
+        None, None, false, None,
+    ).expect("create_draft");
+    let id = created["id"].as_str().expect("draft id").to_string();
+
+    // Apply state changes only (no move yet) so we can read them back by the same id.
+    let res = c.update_email(EmailUpdate {
+        email_id: id.clone(),
+        move_to: None,
+        mark_read: Some(true),
+        flag: Some("follow_up".to_string()),
+        add_categories: Some(vec!["Work".to_string()]),
+        remove_categories: None,
+        importance: Some("high".to_string()),
+    }).expect("update_email state");
+    assert_eq!(res["status"], "updated");
+    assert_eq!(res["id"], id); // no move → id unchanged
+    let changed = res["changed"].as_array().unwrap();
+    assert!(changed.iter().any(|v| v == "importance"));
+    assert!(changed.iter().any(|v| v == "flag"));
+
+    // Verify importance + category landed.
+    let detail = c.get_email(id.clone(), false).expect("get_email");
+    let dv = serde_json::to_value(&detail).unwrap();
+    assert_eq!(dv["summary"]["importance"], "high");
+    assert!(dv["summary"]["categories"].as_array().unwrap().iter().any(|v| v == "Work"));
+    // mark_read(true) → the item must now read as read (unread == false).
+    assert_eq!(dv["summary"]["unread"], false);
+
+    // A standalone mark_read (no other field, so nothing else Saves afterward)
+    // must still persist — set it back to unread and confirm it stuck.
+    let unread = c.update_email(EmailUpdate {
+        email_id: id.clone(),
+        mark_read: Some(false),
+        ..Default::default()
+    }).expect("update_email mark unread");
+    assert_eq!(unread["changed"], serde_json::json!(["mark_read"]));
+    let redetail = c.get_email(id.clone(), false).expect("get_email after unread");
+    let rv = serde_json::to_value(&redetail).unwrap();
+    assert_eq!(rv["summary"]["unread"], true);
+
+    // Now move it; the id must change, then delete via the new id for cleanup.
+    let moved = c.update_email(EmailUpdate {
+        email_id: id.clone(),
+        move_to: Some("Deleted Items".to_string()),
+        ..Default::default()
+    }).expect("update_email move");
+    assert_eq!(moved["changed"], serde_json::json!(["move_to"]));
+    let new_id = moved["id"].as_str().expect("moved id").to_string();
+    c.delete_email(new_id).expect("cleanup delete");
 }
 
 #[test]
