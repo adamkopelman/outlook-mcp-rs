@@ -28,7 +28,7 @@ your MCP client at it directly — no install step.
 - `send_email` — send a new email immediately
 - `create_draft` — create a draft email without sending it
 - `reply_email` — reply to an existing email
-- `move_email` — move an email to a different folder
+- `update_email` — change an existing email: move to a folder, mark read/unread, flag (follow_up/complete/clear), add/remove categories, set importance
 - `delete_email` — delete an email
 
 **Calendar**

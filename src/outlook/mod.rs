@@ -25,6 +25,21 @@ pub struct EmailQuery {
     pub high_importance: bool,
 }
 
+/// All changes `update_email` can apply to one existing email. Every field
+/// except `email_id` is optional; supplying several applies all of them.
+/// State changes are applied first and `move_to` last (Move changes the
+/// EntryID, so it must come after everything that addresses the item by id).
+#[derive(Debug, Clone, Default)]
+pub struct EmailUpdate {
+    pub email_id: String,
+    pub move_to: Option<String>,
+    pub mark_read: Option<bool>,
+    pub flag: Option<String>,               // "follow_up" | "complete" | "clear"
+    pub add_categories: Option<Vec<String>>,
+    pub remove_categories: Option<Vec<String>>,
+    pub importance: Option<String>,         // "low" | "normal" | "high"
+}
+
 pub trait OutlookClient: Send + Sync {
     fn list_folders(&self) -> Result<Vec<FolderInfo>, ToolError>;
     fn list_emails(&self, q: EmailQuery) -> Result<Vec<EmailSummary>, ToolError>;
@@ -39,8 +54,7 @@ pub trait OutlookClient: Send + Sync {
     fn reply_email(&self, email_id: String, body: String, reply_all: bool,
         html: bool, send: bool, attachments: Option<Vec<String>>)
         -> Result<Value, ToolError>;
-    fn move_email(&self, email_id: String, target_folder: String)
-        -> Result<Value, ToolError>;
+    fn update_email(&self, u: EmailUpdate) -> Result<Value, ToolError>;
     fn delete_email(&self, email_id: String) -> Result<Value, ToolError>;
 
     fn list_events(&self, start_date: Option<String>, end_date: Option<String>)

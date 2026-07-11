@@ -4,9 +4,9 @@ use outlook_mcp_rs::outlook::fake::{FakeOutlookClient, EMAIL_ID};
 use outlook_mcp_rs::server::{
     CompleteTaskParams, CreateDraftParams, CreateEventParams, CreateNoteParams, CreateTaskParams,
     DeleteEmailParams, GetEmailParams, GetEventParams, GetNoteParams, ListAttachmentsParams,
-    ListEmailsParams, ListEventsParams, ListTasksParams, MoveEmailParams, OutlookMcpServer,
+    ListEmailsParams, ListEventsParams, ListTasksParams, OutlookMcpServer,
     ReplyEmailParams, RespondToMeetingParams, SaveAttachmentsParams,
-    SendEmailParams,
+    SendEmailParams, UpdateEmailParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -192,17 +192,49 @@ async fn send_email_forwards_attachments() {
 }
 
 #[tokio::test]
-async fn move_email_returns_new_id() {
+async fn update_email_move_returns_new_id() {
     let fake = Arc::new(FakeOutlookClient::new());
     let server = OutlookMcpServer::new(fake.clone());
     let result = server
-        .move_email(Parameters(MoveEmailParams {
+        .update_email(Parameters(UpdateEmailParams {
             email_id: EMAIL_ID.to_string(),
-            target_folder: "Archive".to_string(),
+            move_to: Some("Archive".to_string()),
+            mark_read: None, flag: None, add_categories: None,
+            remove_categories: None, importance: None,
         }))
         .await
         .unwrap();
-    assert_eq!(result_json(&result)["id"], "new-entry|store-1");
+    let v = result_json(&result);
+    assert_eq!(v["id"], "new-entry|store-1");
+    assert_eq!(v["status"], "updated");
+    assert_eq!(v["changed"], serde_json::json!(["move_to"]));
+}
+
+#[tokio::test]
+async fn update_email_state_only_keeps_same_id_and_lists_changes() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let result = server
+        .update_email(Parameters(UpdateEmailParams {
+            email_id: EMAIL_ID.to_string(),
+            move_to: None,
+            mark_read: Some(true),
+            flag: Some("follow_up".to_string()),
+            add_categories: Some(vec!["Work".to_string()]),
+            remove_categories: None,
+            importance: Some("high".to_string()),
+        }))
+        .await
+        .unwrap();
+    let v = result_json(&result);
+    // No move → id unchanged.
+    assert_eq!(v["id"], EMAIL_ID);
+    assert_eq!(v["changed"], serde_json::json!(["mark_read", "flag", "add_categories", "importance"]));
+    // The client saw the full update.
+    let (name, args) = fake.calls().pop().unwrap();
+    assert_eq!(name, "update_email");
+    assert_eq!(args["flag"], "follow_up");
+    assert_eq!(args["importance"], "high");
 }
 
 #[tokio::test]

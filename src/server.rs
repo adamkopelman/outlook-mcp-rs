@@ -9,7 +9,7 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::error::ToolError;
-use crate::outlook::{EmailQuery, OutlookClient};
+use crate::outlook::{EmailQuery, EmailUpdate, OutlookClient};
 
 /// Runs a blocking `OutlookClient` call on a dedicated blocking thread so the
 /// tokio scheduler never migrates it mid-call (COM apartment-threading
@@ -122,9 +122,26 @@ pub struct ReplyEmailParams {
 fn default_true() -> bool { true }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct MoveEmailParams {
+pub struct UpdateEmailParams {
     pub email_id: String,
-    pub target_folder: String,
+    /// Destination folder name (e.g. "Archive"). Applied last; changes the id.
+    #[serde(default)]
+    pub move_to: Option<String>,
+    /// true = mark read, false = mark unread.
+    #[serde(default)]
+    pub mark_read: Option<bool>,
+    /// "follow_up" | "complete" | "clear".
+    #[serde(default)]
+    pub flag: Option<String>,
+    /// Category names to add (existing categories are preserved).
+    #[serde(default)]
+    pub add_categories: Option<Vec<String>>,
+    /// Category names to remove.
+    #[serde(default)]
+    pub remove_categories: Option<Vec<String>>,
+    /// "low" | "normal" | "high".
+    #[serde(default)]
+    pub importance: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -292,13 +309,18 @@ impl OutlookMcpServer {
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
-    #[tool(description = "Move an email to another folder.")]
-    pub async fn move_email(
+    #[tool(description = "Update an existing email: move to a folder, mark read/unread, flag (follow_up/complete/clear), add/remove categories, or set importance. Combine any of these in one call.")]
+    pub async fn update_email(
         &self,
-        Parameters(MoveEmailParams { email_id, target_folder }): Parameters<MoveEmailParams>,
+        Parameters(p): Parameters<UpdateEmailParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let result = run_blocking(move || client.move_email(email_id, target_folder)).await?;
+        let u = EmailUpdate {
+            email_id: p.email_id, move_to: p.move_to, mark_read: p.mark_read,
+            flag: p.flag, add_categories: p.add_categories,
+            remove_categories: p.remove_categories, importance: p.importance,
+        };
+        let result = run_blocking(move || client.update_email(u)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 

@@ -21,7 +21,7 @@ use crate::outlook::com::{
     variant_to_bool, variant_to_i32, variant_to_iso_string, variant_to_string, ComGuard,
 };
 use crate::outlook::types::*;
-use crate::outlook::{EmailQuery, OutlookClient};
+use crate::outlook::{EmailQuery, EmailUpdate, OutlookClient};
 
 /// Matches `MAX_EMAIL_COUNT` in `client.py`.
 const MAX_EMAIL_COUNT: i32 = 50;
@@ -665,22 +665,9 @@ impl OutlookClient for WindowsOutlookClient {
         })
     }
 
-    fn move_email(&self, email_id: String, target_folder: String) -> Result<Value, ToolError> {
-        self.with_com(|| {
-            let (_app, ns) = mapi()?;
-            let item = get_item(&ns, &email_id)?;
-            let target = resolve_folder(&ns, Some(&target_folder))?;
-            // `Move` takes the destination folder as its argument; wrap the
-            // IDispatch in a VARIANT (clone — `From<IDispatch>` consumes it).
-            let moved = to_disp(call_method(
-                &item,
-                "Move",
-                &mut [VARIANT::from(target.clone())],
-            )?)?;
-            let folder_name = variant_to_string(&get_property(&target, "Name")?);
-            let id = make_id(&moved)?; // EntryID changes on Move — return the new id.
-            Ok(json!({"status": "moved", "folder": folder_name, "id": id}))
-        })
+    fn update_email(&self, _u: EmailUpdate) -> Result<Value, ToolError> {
+        // Real COM implementation added in Plan 5 Task 2.
+        todo!("update_email real COM impl — Plan 5 Task 2")
     }
 
     fn delete_email(&self, email_id: String) -> Result<Value, ToolError> {

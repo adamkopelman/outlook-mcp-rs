@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use crate::error::ToolError;
 use super::types::*;
-use super::{EmailQuery, OutlookClient};
+use super::{EmailQuery, EmailUpdate, OutlookClient};
 
 pub const EMAIL_ID: &str = "entry-1|store-1";
 pub const EVENT_ID: &str = "entry-2|store-1";
@@ -108,10 +108,27 @@ impl OutlookClient for FakeOutlookClient {
         Ok(json!({"status": if send { "sent" } else { "draft_saved" }}))
     }
 
-    fn move_email(&self, email_id: String, target_folder: String)
-        -> Result<Value, ToolError> {
-        self.record("move_email", json!({"email_id": email_id, "target_folder": target_folder}))?;
-        Ok(json!({"status": "moved", "folder": target_folder, "id": "new-entry|store-1"}))
+    fn update_email(&self, u: EmailUpdate) -> Result<Value, ToolError> {
+        self.record("update_email", json!({
+            "email_id": u.email_id, "move_to": u.move_to, "mark_read": u.mark_read,
+            "flag": u.flag, "add_categories": u.add_categories,
+            "remove_categories": u.remove_categories, "importance": u.importance,
+        }))?;
+        // Mirror the real client's `changed` ordering: state changes first, move last.
+        let mut changed: Vec<&str> = Vec::new();
+        if u.mark_read.is_some() { changed.push("mark_read"); }
+        if u.flag.is_some() { changed.push("flag"); }
+        if u.add_categories.is_some() { changed.push("add_categories"); }
+        if u.remove_categories.is_some() { changed.push("remove_categories"); }
+        if u.importance.is_some() { changed.push("importance"); }
+        // Move changes the EntryID; simulate a new id only when we moved.
+        let id = if u.move_to.is_some() {
+            changed.push("move_to");
+            "new-entry|store-1".to_string()
+        } else {
+            u.email_id.clone()
+        };
+        Ok(json!({"status": "updated", "id": id, "changed": changed}))
     }
 
     fn delete_email(&self, email_id: String) -> Result<Value, ToolError> {
