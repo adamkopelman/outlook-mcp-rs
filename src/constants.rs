@@ -41,6 +41,14 @@ pub const OL_IMPORTANCE_LOW: i32 = 0;
 pub const OL_IMPORTANCE_NORMAL: i32 = 1;
 pub const OL_IMPORTANCE_HIGH: i32 = 2;
 
+// OlFlagStatus (MailItem.FlagStatus)
+pub const OL_NO_FLAG: i32 = 0;
+pub const OL_FLAG_COMPLETE: i32 = 1;
+pub const OL_FLAG_MARKED: i32 = 2;
+
+// OlMarkInterval (MailItem.MarkAsTask)
+pub const OL_MARK_NO_DATE: i32 = 0;
+
 // OlBusyStatus (AppointmentItem.BusyStatus)
 pub const OL_FREE: i32 = 0;
 pub const OL_TENTATIVE: i32 = 1;

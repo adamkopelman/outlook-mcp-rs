@@ -17,7 +17,7 @@ use crate::error::ToolError;
 use crate::outlook::com::{
     call_method, create_com_object, format_com_error, get_item_categories, get_property,
     has_member, jet_datetime, make_item_id, parse_item_id, put_property, safe_filename,
-    variant_from_bool, variant_from_datetime, variant_from_i32, variant_from_str,
+    set_item_categories, variant_from_bool, variant_from_datetime, variant_from_i32, variant_from_str,
     variant_to_bool, variant_to_i32, variant_to_iso_string, variant_to_string, ComGuard,
 };
 use crate::outlook::types::*;
@@ -665,9 +665,89 @@ impl OutlookClient for WindowsOutlookClient {
         })
     }
 
-    fn update_email(&self, _u: EmailUpdate) -> Result<Value, ToolError> {
-        // Real COM implementation added in Plan 5 Task 2.
-        todo!("update_email real COM impl — Plan 5 Task 2")
+    fn update_email(&self, u: EmailUpdate) -> Result<Value, ToolError> {
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let item = get_item(&ns, &u.email_id)?;
+            let mut changed: Vec<&str> = Vec::new();
+
+            // ---- state changes first (they address the item by its current id) ----
+
+            if let Some(read) = u.mark_read {
+                // UnRead is the inverse of "read".
+                put_property(&item, "UnRead", variant_from_bool(!read))?;
+                changed.push("mark_read");
+            }
+
+            if let Some(flag) = &u.flag {
+                match flag.to_lowercase().as_str() {
+                    "follow_up" => {
+                        // MarkAsTask flags for follow-up with no due date.
+                        call_method(&item, "MarkAsTask", &mut [variant_from_i32(c::OL_MARK_NO_DATE)])?;
+                    }
+                    "complete" => {
+                        put_property(&item, "FlagStatus", variant_from_i32(c::OL_FLAG_COMPLETE))?;
+                    }
+                    "clear" => {
+                        // ClearTaskFlag removes the follow-up flag entirely.
+                        call_method(&item, "ClearTaskFlag", &mut [])?;
+                    }
+                    other => {
+                        return Err(ToolError::new(format!(
+                            "invalid flag {other:?}: expected \"follow_up\", \"complete\", or \"clear\""
+                        )));
+                    }
+                }
+                call_method(&item, "Save", &mut [])?;
+                changed.push("flag");
+            }
+
+            // Categories: read the current set once, then add/remove against it,
+            // so tagging never wipes existing categories.
+            if u.add_categories.is_some() || u.remove_categories.is_some() {
+                let mut cats = get_item_categories(&item);
+                if let Some(add) = &u.add_categories {
+                    for a in add {
+                        if !cats.iter().any(|c| c.eq_ignore_ascii_case(a)) {
+                            cats.push(a.clone());
+                        }
+                    }
+                    changed.push("add_categories");
+                }
+                if let Some(remove) = &u.remove_categories {
+                    cats.retain(|c| !remove.iter().any(|r| r.eq_ignore_ascii_case(c)));
+                    changed.push("remove_categories");
+                }
+                set_item_categories(&item, &cats)?;
+                call_method(&item, "Save", &mut [])?;
+            }
+
+            if let Some(imp) = &u.importance {
+                let id = c::importance_name_to_id(imp).ok_or_else(|| {
+                    ToolError::new(format!(
+                        "invalid importance {imp:?}: expected \"low\", \"normal\", or \"high\""
+                    ))
+                })?;
+                put_property(&item, "Importance", variant_from_i32(id))?;
+                call_method(&item, "Save", &mut [])?;
+                changed.push("importance");
+            }
+
+            // ---- move last (Move changes the EntryID) ----
+
+            let id = if let Some(dest) = &u.move_to {
+                let target = resolve_folder(&ns, Some(dest))?;
+                let moved = to_disp(call_method(
+                    &item, "Move", &mut [VARIANT::from(target.clone())],
+                )?)?;
+                changed.push("move_to");
+                make_id(&moved)? // EntryID changed — return the new id.
+            } else {
+                u.email_id.clone()
+            };
+
+            Ok(json!({"status": "updated", "id": id, "changed": changed}))
+        })
     }
 
     fn delete_email(&self, email_id: String) -> Result<Value, ToolError> {
