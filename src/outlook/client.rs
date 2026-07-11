@@ -242,6 +242,62 @@ fn event_summary(item: &IDispatch) -> Result<EventSummary, ToolError> {
     })
 }
 
+/// True if `summary` passes every filter set on `q`. All comparisons are
+/// case-insensitive. Attendee matching is a substring test against the
+/// semicolon-separated `RequiredAttendees`/`OptionalAttendees` strings.
+fn event_matches(summary: &EventSummary, q: &EventQuery) -> bool {
+    if let Some(query) = q.query.as_deref().filter(|s| !s.is_empty()) {
+        let needle = query.to_lowercase();
+        if !summary.subject.to_lowercase().contains(&needle)
+            && !summary.location.to_lowercase().contains(&needle)
+        {
+            return false;
+        }
+    }
+    if let Some(cat) = q.category.as_deref().filter(|s| !s.is_empty()) {
+        let want = cat.to_lowercase();
+        if !summary.categories.iter().any(|c| c.to_lowercase() == want) {
+            return false;
+        }
+    }
+    if let Some(show_as) = q.show_as.as_deref().filter(|s| !s.is_empty()) {
+        if !summary.show_as.eq_ignore_ascii_case(show_as) {
+            return false;
+        }
+    }
+    if let Some(resp) = q.my_response.as_deref().filter(|s| !s.is_empty()) {
+        if !summary.my_response.eq_ignore_ascii_case(resp) {
+            return false;
+        }
+    }
+    if q.meetings_only && !summary.is_meeting {
+        return false;
+    }
+    if let Some(want_all_day) = q.all_day {
+        if summary.all_day != want_all_day {
+            return false;
+        }
+    }
+    if let Some(people) = q.attendees.as_ref().filter(|v| !v.is_empty()) {
+        // Which attendee tier(s) to search, per attendee_role (default "any").
+        let role = q.attendee_role.as_deref().unwrap_or("any").to_lowercase();
+        let required = summary.required_attendees.to_lowercase();
+        let optional = summary.optional_attendees.to_lowercase();
+        let haystack = match role.as_str() {
+            "required" => required,
+            "optional" => optional,
+            _ => format!("{required}; {optional}"), // "any"
+        };
+        if !people
+            .iter()
+            .any(|p| !p.is_empty() && haystack.contains(&p.to_lowercase()))
+        {
+            return false;
+        }
+    }
+    true
+}
+
 /// `client.py::_task_summary`. `status` and `importance` are read as raw
 /// numeric COM properties (not name lookups), with a missing value falling
 /// back to Outlook's defaults exactly like the Python `getattr(..., default)`,
@@ -824,9 +880,12 @@ impl OutlookClient for WindowsOutlookClient {
             let mut results = Vec::new();
             let mut current = call_method(&restricted, "GetFirst", &mut [])?;
             while let Ok(item) = IDispatch::try_from(&current) {
-                results.push(event_summary(&item)?);
-                if results.len() >= MAX_CALENDAR_ITEMS {
-                    break;
+                let summary = event_summary(&item)?;
+                if event_matches(&summary, &q) {
+                    results.push(summary);
+                    if results.len() >= MAX_CALENDAR_ITEMS {
+                        break;
+                    }
                 }
                 current = call_method(&restricted, "GetNext", &mut [])?;
             }
