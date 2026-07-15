@@ -88,6 +88,28 @@ mod tests {
         assert_eq!(join_categories(&["Work".into(), "Personal".into()]), "Work, Personal");
         assert_eq!(join_categories(&[]), "");
     }
+
+    #[test]
+    fn variant_to_iso_string_round_trips_a_vt_date_variant() {
+        use chrono::NaiveDate;
+        let dt = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap().and_hms_opt(14, 30, 0).unwrap();
+        let v = variant_from_datetime(&dt).expect("variant_from_datetime should succeed");
+        assert_eq!(variant_to_iso_string(&v), Some("2026-06-10T14:30:00".to_string()));
+    }
+
+    // Guards the non-VT_DATE fallback path: the fix branches on `vt`, so this
+    // pins that a VARIANT the fallback can't decode still yields `None` (not
+    // garbage). A non-numeric string is used because the fallback is
+    // `f64::try_from` == Win32 `VariantToDouble`, which *coerces* numeric
+    // VARIANTs (e.g. VT_I4 42 -> 42.0 -> a valid-but-bogus date) but rejects a
+    // non-numeric string with a type mismatch. That coercion is pre-existing
+    // Win32 behavior, unchanged by this fix (the fallback branch is a verbatim
+    // `f64::try_from`).
+    #[test]
+    fn variant_to_iso_string_returns_none_for_non_date_variant() {
+        let v = variant_from_str("not a date");
+        assert_eq!(variant_to_iso_string(&v), None);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -319,7 +341,19 @@ pub fn variant_to_bool(value: &VARIANT) -> Option<bool> {
 /// `outlook_mcp/outlook/client.py`. Returns `None` if the VARIANT isn't a
 /// date the Win32 `VariantTimeToSystemTime` call can decode.
 pub fn variant_to_iso_string(value: &VARIANT) -> Option<String> {
-    let date = f64::try_from(value).ok()?;
+    // Outlook returns every Date-typed property as VT_DATE, but the crate's
+    // `f64::try_from(&VARIANT)` only accepts VT_R8 — it rejects VT_DATE with a
+    // type mismatch. Read the OLE Automation date out of the union directly for
+    // VT_DATE (mirroring how `variant_from_datetime` writes it), and keep the
+    // type-checked `f64::try_from` path for any VT_R8 caller.
+    let date = unsafe {
+        let inner = &*value.Anonymous.Anonymous;
+        if inner.vt == VT_DATE {
+            inner.Anonymous.date
+        } else {
+            f64::try_from(value).ok()?
+        }
+    };
     let mut sys_time = SYSTEMTIME::default();
     unsafe {
         if VariantTimeToSystemTime(date, &mut sys_time) == 0 {
