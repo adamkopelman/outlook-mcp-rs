@@ -217,6 +217,24 @@ fn add_meeting_recipient(recipients: &IDispatch, address: &str, role: i32) -> Re
     Ok(())
 }
 
+/// Removes every recipient whose `Name` or `Address` case-insensitively
+/// matches any entry in `addresses`. Iterates from `Count` down to `1` —
+/// `Recipients.Remove(index)` is 1-based and shifts every later index down
+/// by one, so removing in reverse means an index we haven't visited yet is
+/// never invalidated by an earlier removal.
+fn remove_meeting_recipients(recipients: &IDispatch, addresses: &[String]) -> Result<(), ToolError> {
+    let count = variant_to_i32(&get_property(recipients, "Count")?).unwrap_or(0);
+    for i in (1..=count).rev() {
+        let recipient = to_disp(call_method(recipients, "Item", &mut [variant_from_i32(i)])?)?;
+        let name = variant_to_string(&get_property(&recipient, "Name").unwrap_or_default());
+        let address = variant_to_string(&get_property(&recipient, "Address").unwrap_or_default());
+        if addresses.iter().any(|a| a.eq_ignore_ascii_case(&name) || a.eq_ignore_ascii_case(&address)) {
+            call_method(recipients, "Remove", &mut [variant_from_i32(i)])?;
+        }
+    }
+    Ok(())
+}
+
 /// `client.py::_event_summary`, enriched for v2 with show_as/my_response and the
 /// attendee strings so every calendar filter can operate on the built summary.
 fn event_summary(item: &IDispatch) -> Result<EventSummary, ToolError> {
@@ -1115,9 +1133,44 @@ impl OutlookClient for WindowsOutlookClient {
                 set_item_categories(&item, &cats)?;
             }
 
-            // Attendee add/remove and the Save-vs-Send decision land in Task 3.
-            // Interim: always just Save (matches pre-attendee-support behavior).
-            call_method(&item, "Save", &mut [])?;
+            // Adding either tier converts a personal appointment into a
+            // meeting; MeetingStatus must be set before Recipients.Add for a
+            // previously-non-meeting item.
+            let adding_attendees = u.add_required_attendees.as_ref().is_some_and(|v| !v.is_empty())
+                || u.add_optional_attendees.as_ref().is_some_and(|v| !v.is_empty());
+            if adding_attendees {
+                let current_status =
+                    variant_to_i32(&get_property(&item, "MeetingStatus")?).unwrap_or(c::OL_NONMEETING);
+                if current_status == c::OL_NONMEETING {
+                    put_property(&item, "MeetingStatus", variant_from_i32(c::OL_MEETING))?;
+                }
+                let recipients = to_disp(get_property(&item, "Recipients")?)?;
+                for address in u.add_required_attendees.as_deref().unwrap_or(&[]) {
+                    add_meeting_recipient(&recipients, address, c::OL_RECIPIENT_REQUIRED)?;
+                }
+                for address in u.add_optional_attendees.as_deref().unwrap_or(&[]) {
+                    add_meeting_recipient(&recipients, address, c::OL_RECIPIENT_OPTIONAL)?;
+                }
+                call_method(&recipients, "ResolveAll", &mut [])?;
+                if u.add_required_attendees.is_some() { changed.push("add_required_attendees"); }
+                if u.add_optional_attendees.is_some() { changed.push("add_optional_attendees"); }
+            }
+            if let Some(remove) = u.remove_attendees.as_ref().filter(|v| !v.is_empty()) {
+                let recipients = to_disp(get_property(&item, "Recipients")?)?;
+                remove_meeting_recipients(&recipients, remove)?;
+                changed.push("remove_attendees");
+            }
+
+            // Save vs Send: only a meeting can notify attendees; a personal
+            // appointment always just saves, regardless of send_update.
+            let is_meeting =
+                variant_to_i32(&get_property(&item, "MeetingStatus")?).unwrap_or(c::OL_NONMEETING)
+                    != c::OL_NONMEETING;
+            if is_meeting && u.send_update {
+                call_method(&item, "Send", &mut [])?;
+            } else {
+                call_method(&item, "Save", &mut [])?;
+            }
 
             Ok(json!({"status": "updated", "id": u.event_id, "changed": changed}))
         })
