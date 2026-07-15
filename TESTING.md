@@ -19,9 +19,8 @@ running on your machine. Preconditions:
 - Outlook is open and signed in to a normal mailbox
 - You're comfortable with a handful of test items (a draft, a task, a note,
   a calendar event, each clearly named "outlook-mcp-rs live test ...") being
-  created in that mailbox — most are cleaned up automatically, but the
-  calendar event test currently requires manual deletion afterward (there's
-  no `delete_event` tool; see `tests/live_outlook.rs` for why).
+  created in that mailbox — every live test cleans up after itself
+  (calendar events via `delete_event`, since Plan 8).
 
 Run them with:
 
@@ -48,6 +47,14 @@ before a release:
    invite arrives in their mailbox. (With `send: false`, the event is saved
    without sending, so the attendee addresses are not required to be real —
    this is covered by the automated test `create_event_with_tiers_categories_and_show_as`.)
+
+5. Call `update_event` on a meeting you organize with `send_update: true` and
+   real attendees; confirm they receive the update email. Call `delete_event`
+   on a meeting you organize with `send_cancellation: true`; confirm they
+   receive the cancellation. (The automated live test
+   `update_event_edits_fields_and_manages_attendees` uses placeholder
+   attendee addresses with `send_update: false`, so nothing is ever
+   delivered — this is why real-recipient delivery still needs a manual check.)
 
 `update_email`'s `flag` field (`follow_up`/`complete`/`clear`) is also
 manual-only. The automated live test (`update_email_applies_state_then_moves`)

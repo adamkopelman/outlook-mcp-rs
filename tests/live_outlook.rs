@@ -9,7 +9,7 @@
 //! can't be undone — see TESTING.md for how to test those by hand.
 
 use outlook_mcp_rs::outlook::client::WindowsOutlookClient;
-use outlook_mcp_rs::outlook::{CreateEventInput, EmailQuery, EventQuery, OutlookClient, EmailUpdate};
+use outlook_mcp_rs::outlook::{CreateEventInput, EmailQuery, EventQuery, OutlookClient, EmailUpdate, EventUpdate};
 
 fn client() -> WindowsOutlookClient {
     WindowsOutlookClient::new()
@@ -90,12 +90,8 @@ fn create_event_then_delete_it() {
         send: true,
     }).expect("create_event should succeed");
     let id = created["id"].as_str().unwrap().to_string();
-    // Calendar items don't have a dedicated "delete" tool in the trait; moving
-    // into Deleted Items works for mail but not appointments — delete the test
-    // event manually from the calendar after this test runs, or extend the
-    // trait with a delete_event method if this becomes frequent enough to
-    // automate.
-    let _ = c.get_event(id); // just confirm it round-trips before manual cleanup
+    let _ = c.get_event(id.clone()).expect("get_event should round-trip before cleanup");
+    c.delete_event(id, true).expect("cleanup delete_event");
 }
 
 #[test]
@@ -120,14 +116,86 @@ fn create_event_with_tiers_categories_and_show_as() {
     assert_eq!(created["status"], "meeting_saved");
     let id = created["id"].as_str().unwrap().to_string();
 
-    let detail = c.get_event(id).expect("get_event should succeed");
+    let detail = c.get_event(id.clone()).expect("get_event should succeed");
     assert!(detail.summary.required_attendees.contains("required-probe@example.com"));
     assert!(detail.summary.optional_attendees.contains("optional-probe@example.com"));
     assert!(detail.summary.categories.iter().any(|cat| cat == "Work"));
     assert_eq!(detail.summary.show_as, "tentative");
     assert!(detail.summary.is_meeting);
-    // Calendar items have no dedicated delete tool yet (Plan 8's delete_event);
-    // delete the probe manually from the calendar after this test runs.
+    c.delete_event(id, false).expect("cleanup delete_event");
+}
+
+#[test]
+#[ignore]
+fn update_event_edits_fields_and_manages_attendees() {
+    let c = client();
+    let created = c.create_event(CreateEventInput {
+        subject: "outlook-mcp-rs P8 update probe".to_string(),
+        start: "2099-01-07T09:00".to_string(),
+        end: "2099-01-07T09:30".to_string(),
+        body: None, location: None,
+        required_attendees: Some(vec!["required-probe@example.com".to_string()]),
+        optional_attendees: None,
+        all_day: false, reminder_minutes: None, categories: None, show_as: None,
+        send: false,
+    }).expect("create_event should succeed");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Edit fields, add an optional attendee, remove the required one, quietly
+    // (send_update: false — nothing is ever delivered).
+    let updated = c.update_event(EventUpdate {
+        event_id: id.clone(),
+        subject: Some("outlook-mcp-rs P8 update probe (renamed)".to_string()),
+        start: None, end: None,
+        location: Some("Room 42".to_string()),
+        body: None, all_day: None, reminder_minutes: Some(15),
+        show_as: Some("tentative".to_string()),
+        add_categories: Some(vec!["Work".to_string()]),
+        remove_categories: None,
+        add_required_attendees: None,
+        add_optional_attendees: Some(vec!["optional-probe@example.com".to_string()]),
+        remove_attendees: Some(vec!["required-probe@example.com".to_string()]),
+        send_update: false,
+    }).expect("update_event should succeed");
+    assert_eq!(updated["status"], "updated");
+    let changed = updated["changed"].as_array().unwrap();
+    for field in ["subject", "location", "reminder_minutes", "show_as", "add_categories",
+                  "add_optional_attendees", "remove_attendees"] {
+        assert!(changed.iter().any(|v| v == field), "expected {field} in changed: {changed:?}");
+    }
+
+    let detail = c.get_event(id.clone()).expect("get_event should succeed");
+    assert_eq!(detail.summary.subject, "outlook-mcp-rs P8 update probe (renamed)");
+    assert_eq!(detail.summary.location, "Room 42");
+    assert_eq!(detail.summary.show_as, "tentative");
+    assert!(detail.summary.categories.iter().any(|cat| cat == "Work"));
+    assert!(!detail.summary.required_attendees.contains("required-probe@example.com"));
+    assert!(detail.summary.optional_attendees.contains("optional-probe@example.com"));
+
+    c.delete_event(id, false).expect("cleanup delete_event");
+}
+
+#[test]
+#[ignore]
+fn delete_event_removes_a_personal_appointment() {
+    let c = client();
+    let created = c.create_event(CreateEventInput {
+        subject: "outlook-mcp-rs P8 delete probe".to_string(),
+        start: "2099-01-08T09:00".to_string(),
+        end: "2099-01-08T09:30".to_string(),
+        body: None, location: None, required_attendees: None, optional_attendees: None,
+        all_day: false, reminder_minutes: None, categories: None, show_as: None,
+        send: true, // no attendees present, so this just Saves — nothing is sent
+    }).expect("create_event should succeed");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let deleted = c.delete_event(id.clone(), true).expect("delete_event should succeed");
+    assert_eq!(deleted["status"], "deleted");
+    assert_eq!(deleted["note"], "Moved to Deleted Items.");
+
+    // Soft-deleted: get_event on the original id should now fail (moved to
+    // Deleted Items changes its EntryID, same as delete_email's behavior).
+    assert!(c.get_event(id).is_err());
 }
 
 #[test]
