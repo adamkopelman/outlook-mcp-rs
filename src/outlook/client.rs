@@ -23,8 +23,8 @@ use crate::outlook::com::{
 use crate::outlook::types::*;
 use chrono::Datelike;
 use crate::outlook::{
-    create_event_status, validate_recurrence, CreateEventInput, EmailQuery, EmailUpdate,
-    EventQuery, EventUpdate, OutlookClient, RecurrenceInput,
+    com_recurrence_interval, create_event_status, validate_recurrence, CreateEventInput,
+    EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient, RecurrenceInput,
 };
 
 /// Matches `MAX_EMAIL_COUNT` in `client.py`.
@@ -228,7 +228,7 @@ fn apply_recurrence(appt: &IDispatch, r: &RecurrenceInput) -> Result<(), ToolErr
     let recurrence_type = validate_recurrence(r)?;
     let pattern = to_disp(call_method(appt, "GetRecurrencePattern", &mut [])?)?;
     put_property(&pattern, "RecurrenceType", variant_from_i32(recurrence_type))?;
-    put_property(&pattern, "Interval", variant_from_i32(r.interval.unwrap_or(1)))?;
+    put_property(&pattern, "Interval", variant_from_i32(com_recurrence_interval(r)))?;
     match r.pattern.to_lowercase().as_str() {
         "weekly" => {
             let mask = crate::friendly::day_of_week_words_to_mask(

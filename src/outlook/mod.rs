@@ -211,9 +211,25 @@ pub fn validate_recurrence(r: &RecurrenceInput) -> Result<i32, ToolError> {
     Ok(recurrence_type)
 }
 
+/// The `RecurrenceType`-dependent `Interval` value Outlook's COM object model
+/// expects. Every pattern except `"yearly"` passes the user's `interval`
+/// straight through ("every N days/weeks/months"). `"yearly"` is the one
+/// exception: Outlook's `RecurrencePattern.Interval` is documented as being
+/// in **months** for `olRecursYearly`, and must be a multiple of 12 — "every
+/// 1 year" is `Interval = 12`, "every 2 years" is `Interval = 24`. Called by
+/// `apply_recurrence` (`client.rs`) right after `validate_recurrence`.
+pub fn com_recurrence_interval(r: &RecurrenceInput) -> i32 {
+    let interval = r.interval.unwrap_or(1);
+    if r.pattern.eq_ignore_ascii_case("yearly") {
+        interval * 12
+    } else {
+        interval
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{create_event_status, validate_recurrence, RecurrenceInput};
+    use super::{com_recurrence_interval, create_event_status, validate_recurrence, RecurrenceInput};
 
     #[test]
     fn create_event_status_covers_all_three_outcomes() {
@@ -262,5 +278,18 @@ mod tests {
         r.until = Some("2099-01-01".to_string());
         r.occurrences = Some(5);
         assert!(validate_recurrence(&r).is_err());
+    }
+
+    #[test]
+    fn com_recurrence_interval_multiplies_yearly_by_12() {
+        assert_eq!(com_recurrence_interval(&recurrence("yearly")), 12); // default interval 1 -> 12
+        let mut r = recurrence("yearly");
+        r.interval = Some(2);
+        assert_eq!(com_recurrence_interval(&r), 24); // every 2 years -> 24 months
+
+        assert_eq!(com_recurrence_interval(&recurrence("daily")), 1);
+        let mut r = recurrence("weekly");
+        r.interval = Some(3);
+        assert_eq!(com_recurrence_interval(&r), 3); // unchanged for non-yearly
     }
 }
