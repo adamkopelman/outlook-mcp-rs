@@ -968,8 +968,11 @@ impl OutlookClient for WindowsOutlookClient {
                 put_property(&appt, "ReminderSet", variant_from_bool(true))?;
                 put_property(&appt, "ReminderMinutesBeforeStart", variant_from_i32(minutes))?;
             }
-            // Interim: categories, show_as, send are accepted but not yet applied
-            // (see Tasks 3-5). Both attendee tiers are wired here; the item still
+            if let Some(categories) = input.categories.as_ref().filter(|c| !c.is_empty()) {
+                set_item_categories(&appt, categories)?;
+            }
+            // Interim: show_as, send are accepted but not yet applied
+            // (see Tasks 4-5). Both attendee tiers are wired here; the item still
             // always sends when any attendee is present — Task 5 makes that honor
             // `input.send`.
             let required = input.required_attendees.unwrap_or_default();
