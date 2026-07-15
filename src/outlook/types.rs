@@ -74,6 +74,29 @@ pub struct EventDetail {
     #[serde(flatten)]
     pub summary: EventSummary,
     pub body: String,
+    pub recurrence: Option<RecurrenceInfo>,
+}
+
+/// The recurrence pattern of a recurring event, read back via
+/// `AppointmentItem.GetRecurrencePattern()`. `None` on `EventDetail` when the
+/// event isn't recurring. `until`/`occurrences` are mutually exclusive with
+/// each other and with `no_end: true` (exactly one of the three end
+/// conditions is populated).
+#[derive(Debug, Clone, Serialize)]
+pub struct RecurrenceInfo {
+    /// "daily" | "weekly" | "monthly" | "yearly".
+    pub pattern: String,
+    pub interval: i32,
+    /// Populated only for "weekly"; e.g. ["monday", "wednesday"].
+    pub days_of_week: Vec<String>,
+    /// Populated only for "monthly"/"yearly".
+    pub day_of_month: Option<i32>,
+    /// ISO end date, if the series ends on a date.
+    pub until: Option<String>,
+    /// Total occurrence count, if the series ends after N occurrences.
+    pub occurrences: Option<i32>,
+    /// True if the series never ends.
+    pub no_end: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

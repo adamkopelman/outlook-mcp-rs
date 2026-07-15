@@ -69,6 +69,23 @@ pub const OL_RESPONSE_ACCEPTED: i32 = 3;
 pub const OL_RESPONSE_DECLINED: i32 = 4;
 pub const OL_RESPONSE_NOT_RESPONDED: i32 = 5;
 
+// OlRecurrenceType (RecurrencePattern.RecurrenceType)
+pub const OL_RECURS_DAILY: i32 = 0;
+pub const OL_RECURS_WEEKLY: i32 = 1;
+pub const OL_RECURS_MONTHLY: i32 = 2;
+pub const OL_RECURS_MONTH_NTH: i32 = 3;
+pub const OL_RECURS_YEARLY: i32 = 5;
+pub const OL_RECURS_YEAR_NTH: i32 = 6;
+
+// OlDaysOfWeek (RecurrencePattern.DayOfWeekMask, a bitmask — OR the bits you want)
+pub const OL_SUNDAY: i32 = 1;
+pub const OL_MONDAY: i32 = 2;
+pub const OL_TUESDAY: i32 = 4;
+pub const OL_WEDNESDAY: i32 = 8;
+pub const OL_THURSDAY: i32 = 16;
+pub const OL_FRIDAY: i32 = 32;
+pub const OL_SATURDAY: i32 = 64;
+
 pub fn folder_name_to_id(name: &str) -> Option<i32> {
     match name.to_lowercase().as_str() {
         "inbox" => Some(OL_FOLDER_INBOX),

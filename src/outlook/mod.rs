@@ -79,6 +79,7 @@ pub struct CreateEventInput {
     pub categories: Option<Vec<String>>,
     pub show_as: Option<String>,
     pub send: bool,
+    pub recurrence: Option<RecurrenceInput>,
 }
 
 /// All changes `update_event` can apply to one existing calendar event. Every
@@ -107,6 +108,24 @@ pub struct EventUpdate {
     pub add_optional_attendees: Option<Vec<String>>,
     pub remove_attendees: Option<Vec<String>>,
     pub send_update: bool,
+    pub recurrence: Option<RecurrenceInput>,
+    pub clear_recurrence: bool,
+}
+
+/// One recurrence pattern for `create_event`/`update_event`. `pattern`
+/// selects which of the other fields matter: `"weekly"` requires
+/// `days_of_week`; `"monthly"` requires `day_of_month`; `"yearly"` derives
+/// its month/day from the event's own start date (no field needed);
+/// `"daily"` needs nothing extra. At most one of `until`/`occurrences` may
+/// be set; if neither is set the series has no end date.
+#[derive(Debug, Clone)]
+pub struct RecurrenceInput {
+    pub pattern: String,
+    pub interval: Option<i32>,
+    pub days_of_week: Option<Vec<String>>,
+    pub day_of_month: Option<i32>,
+    pub until: Option<String>,
+    pub occurrences: Option<i32>,
 }
 
 pub trait OutlookClient: Send + Sync {
@@ -161,9 +180,40 @@ pub fn create_event_status(has_attendees: bool, send: bool) -> &'static str {
     }
 }
 
+/// Resolves `r.pattern` to its `OlRecurrenceType` id and checks the fields
+/// each pattern requires. Called first by both `create_event`'s and
+/// `update_event`'s real-COM recurrence-writing code, before any COM call is
+/// made, so a bad `recurrence` object fails fast with a clear message.
+pub fn validate_recurrence(r: &RecurrenceInput) -> Result<i32, ToolError> {
+    let recurrence_type = crate::friendly::recurrence_pattern_to_id(&r.pattern).ok_or_else(|| {
+        ToolError::new(format!(
+            "invalid recurrence.pattern {:?}: expected \"daily\", \"weekly\", \"monthly\", or \"yearly\"",
+            r.pattern
+        ))
+    })?;
+    if r.pattern.eq_ignore_ascii_case("weekly")
+        && !r.days_of_week.as_ref().is_some_and(|d| !d.is_empty())
+    {
+        return Err(ToolError::new(
+            "recurrence.days_of_week is required for a \"weekly\" pattern",
+        ));
+    }
+    if r.pattern.eq_ignore_ascii_case("monthly") && r.day_of_month.is_none() {
+        return Err(ToolError::new(
+            "recurrence.day_of_month is required for a \"monthly\" pattern",
+        ));
+    }
+    if r.occurrences.is_some() && r.until.is_some() {
+        return Err(ToolError::new(
+            "recurrence: specify at most one of \"until\" or \"occurrences\", not both",
+        ));
+    }
+    Ok(recurrence_type)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::create_event_status;
+    use super::{create_event_status, validate_recurrence, RecurrenceInput};
 
     #[test]
     fn create_event_status_covers_all_three_outcomes() {
@@ -171,5 +221,46 @@ mod tests {
         assert_eq!(create_event_status(true, false), "meeting_saved");
         assert_eq!(create_event_status(false, true), "saved");
         assert_eq!(create_event_status(false, false), "saved");
+    }
+
+    fn recurrence(pattern: &str) -> RecurrenceInput {
+        RecurrenceInput {
+            pattern: pattern.to_string(), interval: None, days_of_week: None,
+            day_of_month: None, until: None, occurrences: None,
+        }
+    }
+
+    #[test]
+    fn validate_recurrence_accepts_daily_with_no_extra_fields() {
+        assert_eq!(validate_recurrence(&recurrence("daily")).unwrap(), 0);
+    }
+
+    #[test]
+    fn validate_recurrence_rejects_unknown_pattern() {
+        assert!(validate_recurrence(&recurrence("biweekly")).is_err());
+    }
+
+    #[test]
+    fn validate_recurrence_requires_days_of_week_for_weekly() {
+        assert!(validate_recurrence(&recurrence("weekly")).is_err());
+        let mut r = recurrence("weekly");
+        r.days_of_week = Some(vec!["monday".to_string()]);
+        assert_eq!(validate_recurrence(&r).unwrap(), 1);
+    }
+
+    #[test]
+    fn validate_recurrence_requires_day_of_month_for_monthly() {
+        assert!(validate_recurrence(&recurrence("monthly")).is_err());
+        let mut r = recurrence("monthly");
+        r.day_of_month = Some(15);
+        assert_eq!(validate_recurrence(&r).unwrap(), 2);
+    }
+
+    #[test]
+    fn validate_recurrence_rejects_both_until_and_occurrences() {
+        let mut r = recurrence("daily");
+        r.until = Some("2099-01-01".to_string());
+        r.occurrences = Some(5);
+        assert!(validate_recurrence(&r).is_err());
     }
 }

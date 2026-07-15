@@ -2,6 +2,7 @@
 //! MCP API exposes, so callers see "accepted" / "busy" rather than 3 / 2.
 
 use crate::constants as c;
+use crate::error::ToolError;
 
 pub fn importance_word(v: i32) -> &'static str {
     match v {
@@ -62,6 +63,60 @@ pub fn task_status_to_id(name: &str) -> Option<i32> {
         "deferred" => Some(c::OL_TASK_DEFERRED),
         _ => None,
     }
+}
+
+pub fn recurrence_pattern_to_id(name: &str) -> Option<i32> {
+    match name.to_lowercase().as_str() {
+        "daily" => Some(c::OL_RECURS_DAILY),
+        "weekly" => Some(c::OL_RECURS_WEEKLY),
+        "monthly" => Some(c::OL_RECURS_MONTHLY),
+        "yearly" => Some(c::OL_RECURS_YEARLY),
+        _ => None,
+    }
+}
+
+pub fn recurrence_pattern_word(v: i32) -> &'static str {
+    match v {
+        c::OL_RECURS_WEEKLY => "weekly",
+        c::OL_RECURS_MONTHLY | c::OL_RECURS_MONTH_NTH => "monthly",
+        c::OL_RECURS_YEARLY | c::OL_RECURS_YEAR_NTH => "yearly",
+        _ => "daily",
+    }
+}
+
+const WEEKDAYS: [(i32, &str); 7] = [
+    (c::OL_SUNDAY, "sunday"),
+    (c::OL_MONDAY, "monday"),
+    (c::OL_TUESDAY, "tuesday"),
+    (c::OL_WEDNESDAY, "wednesday"),
+    (c::OL_THURSDAY, "thursday"),
+    (c::OL_FRIDAY, "friday"),
+    (c::OL_SATURDAY, "saturday"),
+];
+
+pub fn day_of_week_words_to_mask(days: &[String]) -> Result<i32, ToolError> {
+    let mut mask = 0;
+    for day in days {
+        let bit = WEEKDAYS
+            .iter()
+            .find(|(_, name)| name.eq_ignore_ascii_case(day))
+            .map(|(bit, _)| *bit)
+            .ok_or_else(|| {
+                ToolError::new(format!(
+                    "invalid day_of_week {day:?}: expected a full weekday name like \"monday\""
+                ))
+            })?;
+        mask |= bit;
+    }
+    Ok(mask)
+}
+
+pub fn day_of_week_mask_to_words(mask: i32) -> Vec<String> {
+    WEEKDAYS
+        .iter()
+        .filter(|(bit, _)| mask & bit != 0)
+        .map(|(_, name)| name.to_string())
+        .collect()
 }
 
 /// Map an Outlook `MessageClass` to a coarse item type.
@@ -138,5 +193,41 @@ mod tests {
         assert_eq!(busy_status_to_id("nope"), None);
         assert_eq!(task_status_to_id("COMPLETE"), Some(2));
         assert_eq!(task_status_to_id("nope"), None);
+    }
+
+    #[test]
+    fn recurrence_pattern_round_trips() {
+        assert_eq!(recurrence_pattern_to_id("daily"), Some(0));
+        assert_eq!(recurrence_pattern_to_id("Weekly"), Some(1));
+        assert_eq!(recurrence_pattern_to_id("MONTHLY"), Some(2));
+        assert_eq!(recurrence_pattern_to_id("yearly"), Some(5));
+        assert_eq!(recurrence_pattern_to_id("biweekly"), None);
+        assert_eq!(recurrence_pattern_word(0), "daily");
+        assert_eq!(recurrence_pattern_word(1), "weekly");
+        assert_eq!(recurrence_pattern_word(2), "monthly");
+        assert_eq!(recurrence_pattern_word(3), "monthly"); // olRecursMonthNth, treated as monthly
+        assert_eq!(recurrence_pattern_word(5), "yearly");
+        assert_eq!(recurrence_pattern_word(6), "yearly"); // olRecursYearNth, treated as yearly
+        assert_eq!(recurrence_pattern_word(99), "daily"); // unknown -> default
+    }
+
+    #[test]
+    fn day_of_week_mask_round_trips() {
+        let days = vec!["monday".to_string(), "Wednesday".to_string(), "FRIDAY".to_string()];
+        let mask = day_of_week_words_to_mask(&days).unwrap();
+        assert_eq!(mask, 2 | 8 | 32); // olMonday | olWednesday | olFriday
+        assert_eq!(
+            day_of_week_mask_to_words(mask),
+            vec!["monday".to_string(), "wednesday".to_string(), "friday".to_string()]
+        );
+        assert_eq!(day_of_week_mask_to_words(127), vec![
+            "sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
+        ]);
+        assert_eq!(day_of_week_mask_to_words(0), Vec::<String>::new());
+    }
+
+    #[test]
+    fn day_of_week_words_to_mask_rejects_unknown_names() {
+        assert!(day_of_week_words_to_mask(&["funday".to_string()]).is_err());
     }
 }
