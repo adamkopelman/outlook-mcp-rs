@@ -119,3 +119,27 @@ pub trait OutlookClient: Send + Sync {
     fn get_note(&self, note_id: String) -> Result<NoteDetail, ToolError>;
     fn create_note(&self, body: String) -> Result<Value, ToolError>;
 }
+
+/// The status string `create_event` returns: `"meeting_sent"` (attendees +
+/// send), `"meeting_saved"` (attendees + no send), or `"saved"` (no
+/// attendees, regardless of `send` — there's nothing to send or withhold).
+pub fn create_event_status(has_attendees: bool, send: bool) -> &'static str {
+    match (has_attendees, send) {
+        (true, true) => "meeting_sent",
+        (true, false) => "meeting_saved",
+        (false, _) => "saved",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_event_status;
+
+    #[test]
+    fn create_event_status_covers_all_three_outcomes() {
+        assert_eq!(create_event_status(true, true), "meeting_sent");
+        assert_eq!(create_event_status(true, false), "meeting_saved");
+        assert_eq!(create_event_status(false, true), "saved");
+        assert_eq!(create_event_status(false, false), "saved");
+    }
+}

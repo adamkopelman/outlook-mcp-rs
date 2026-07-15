@@ -21,7 +21,9 @@ use crate::outlook::com::{
     variant_to_bool, variant_to_i32, variant_to_iso_string, variant_to_string, ComGuard,
 };
 use crate::outlook::types::*;
-use crate::outlook::{CreateEventInput, EmailQuery, EmailUpdate, EventQuery, OutlookClient};
+use crate::outlook::{
+    create_event_status, CreateEventInput, EmailQuery, EmailUpdate, EventQuery, OutlookClient,
+};
 
 /// Matches `MAX_EMAIL_COUNT` in `client.py`.
 const MAX_EMAIL_COUNT: i32 = 50;
@@ -979,13 +981,10 @@ impl OutlookClient for WindowsOutlookClient {
                 })?;
                 put_property(&appt, "BusyStatus", variant_from_i32(busy_status))?;
             }
-            // Interim: send is accepted but not yet applied (see Task 5).
-            // Both attendee tiers are wired here; the item still
-            // always sends when any attendee is present — Task 5 makes that honor
-            // `input.send`.
             let required = input.required_attendees.unwrap_or_default();
             let optional = input.optional_attendees.unwrap_or_default();
-            let status = if !required.is_empty() || !optional.is_empty() {
+            let has_attendees = !required.is_empty() || !optional.is_empty();
+            if has_attendees {
                 put_property(&appt, "MeetingStatus", variant_from_i32(c::OL_MEETING))?;
                 let recipients = to_disp(get_property(&appt, "Recipients")?)?;
                 for address in &required {
@@ -995,14 +994,15 @@ impl OutlookClient for WindowsOutlookClient {
                     add_meeting_recipient(&recipients, address, c::OL_RECIPIENT_OPTIONAL)?;
                 }
                 call_method(&recipients, "ResolveAll", &mut [])?;
-                // Interim: still always sends when any attendee is present —
-                // Task 5 makes this honor `input.send`.
-                call_method(&appt, "Send", &mut [])?;
-                "meeting_sent"
+                if input.send {
+                    call_method(&appt, "Send", &mut [])?;
+                } else {
+                    call_method(&appt, "Save", &mut [])?;
+                }
             } else {
                 call_method(&appt, "Save", &mut [])?;
-                "saved"
-            };
+            }
+            let status = create_event_status(has_attendees, input.send);
             Ok(json!({"status": status, "id": make_id(&appt)?, "subject": input.subject}))
         })
     }

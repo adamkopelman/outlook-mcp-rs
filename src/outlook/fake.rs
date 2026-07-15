@@ -177,7 +177,10 @@ impl OutlookClient for FakeOutlookClient {
             "categories": input.categories, "show_as": input.show_as,
             "send": input.send,
         }))?;
-        Ok(json!({"status": "saved", "id": EVENT_ID, "subject": input.subject}))
+        let has_attendees = input.required_attendees.as_ref().is_some_and(|v| !v.is_empty())
+            || input.optional_attendees.as_ref().is_some_and(|v| !v.is_empty());
+        let status = super::create_event_status(has_attendees, input.send);
+        Ok(json!({"status": status, "id": EVENT_ID, "subject": input.subject}))
     }
 
     fn respond_to_meeting(&self, event_id: String, response: String,

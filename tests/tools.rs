@@ -361,6 +361,33 @@ async fn create_event_passes_attendees() {
 }
 
 #[tokio::test]
+async fn create_event_status_reflects_attendees_and_send() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+
+    let base = |required: Option<Vec<String>>, send: bool| CreateEventParams {
+        subject: "Sync".to_string(),
+        start: "2026-06-12T14:00".to_string(),
+        end: "2026-06-12T15:00".to_string(),
+        body: None, location: None, attendees: None,
+        required_attendees: required, optional_attendees: None,
+        all_day: false, reminder_minutes: None, categories: None, show_as: None,
+        send,
+    };
+
+    let r = server.create_event(Parameters(base(Some(vec!["a@example.com".to_string()]), true)))
+        .await.unwrap();
+    assert_eq!(result_json(&r)["status"], "meeting_sent");
+
+    let r = server.create_event(Parameters(base(Some(vec!["a@example.com".to_string()]), false)))
+        .await.unwrap();
+    assert_eq!(result_json(&r)["status"], "meeting_saved");
+
+    let r = server.create_event(Parameters(base(None, true))).await.unwrap();
+    assert_eq!(result_json(&r)["status"], "saved");
+}
+
+#[tokio::test]
 async fn respond_to_meeting_defaults_send_true() {
     use outlook_mcp_rs::outlook::fake::EVENT_ID;
     let fake = Arc::new(FakeOutlookClient::new());
