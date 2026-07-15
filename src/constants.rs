@@ -29,6 +29,10 @@ pub const OL_MEETING_DECLINED: i32 = 4;
 pub const OL_NONMEETING: i32 = 0;
 pub const OL_MEETING: i32 = 1;
 
+// OlMeetingRecipientType (Recipient.Type on an AppointmentItem)
+pub const OL_RECIPIENT_REQUIRED: i32 = 1;
+pub const OL_RECIPIENT_OPTIONAL: i32 = 2;
+
 // OlTaskStatus
 pub const OL_TASK_NOT_STARTED: i32 = 0;
 pub const OL_TASK_IN_PROGRESS: i32 = 1;

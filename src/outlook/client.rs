@@ -205,6 +205,15 @@ fn parse_dt(value: &str, field: &str) -> Result<chrono::NaiveDateTime, ToolError
     )))
 }
 
+/// Adds `address` to `recipients` and marks it required or optional. The
+/// `Recipient` object `Recipients.Add()` returns must have its `.Type` set
+/// explicitly — Outlook does not infer tier from call order.
+fn add_meeting_recipient(recipients: &IDispatch, address: &str, role: i32) -> Result<(), ToolError> {
+    let recipient = to_disp(call_method(recipients, "Add", &mut [variant_from_str(address)])?)?;
+    put_property(&recipient, "Type", variant_from_i32(role))?;
+    Ok(())
+}
+
 /// `client.py::_event_summary`, enriched for v2 with show_as/my_response and the
 /// attendee strings so every calendar filter can operate on the built summary.
 fn event_summary(item: &IDispatch) -> Result<EventSummary, ToolError> {
@@ -959,25 +968,29 @@ impl OutlookClient for WindowsOutlookClient {
                 put_property(&appt, "ReminderSet", variant_from_bool(true))?;
                 put_property(&appt, "ReminderMinutesBeforeStart", variant_from_i32(minutes))?;
             }
-            // Interim: only the required tier has an effect (optional_attendees,
-            // categories, show_as, send are accepted but not yet applied — see
-            // Tasks 2-5). Matches the pre-Plan-7 behavior of always sending when
-            // any attendee is present.
-            let status = match input.required_attendees.filter(|a| !a.is_empty()) {
-                Some(addresses) => {
-                    put_property(&appt, "MeetingStatus", variant_from_i32(c::OL_MEETING))?;
-                    let recipients = to_disp(get_property(&appt, "Recipients")?)?;
-                    for address in &addresses {
-                        call_method(&recipients, "Add", &mut [variant_from_str(address)])?;
-                    }
-                    call_method(&recipients, "ResolveAll", &mut [])?;
-                    call_method(&appt, "Send", &mut [])?;
-                    "meeting_sent"
+            // Interim: categories, show_as, send are accepted but not yet applied
+            // (see Tasks 3-5). Both attendee tiers are wired here; the item still
+            // always sends when any attendee is present — Task 5 makes that honor
+            // `input.send`.
+            let required = input.required_attendees.unwrap_or_default();
+            let optional = input.optional_attendees.unwrap_or_default();
+            let status = if !required.is_empty() || !optional.is_empty() {
+                put_property(&appt, "MeetingStatus", variant_from_i32(c::OL_MEETING))?;
+                let recipients = to_disp(get_property(&appt, "Recipients")?)?;
+                for address in &required {
+                    add_meeting_recipient(&recipients, address, c::OL_RECIPIENT_REQUIRED)?;
                 }
-                None => {
-                    call_method(&appt, "Save", &mut [])?;
-                    "saved"
+                for address in &optional {
+                    add_meeting_recipient(&recipients, address, c::OL_RECIPIENT_OPTIONAL)?;
                 }
+                call_method(&recipients, "ResolveAll", &mut [])?;
+                // Interim: still always sends when any attendee is present —
+                // Task 5 makes this honor `input.send`.
+                call_method(&appt, "Send", &mut [])?;
+                "meeting_sent"
+            } else {
+                call_method(&appt, "Save", &mut [])?;
+                "saved"
             };
             Ok(json!({"status": status, "id": make_id(&appt)?, "subject": input.subject}))
         })
