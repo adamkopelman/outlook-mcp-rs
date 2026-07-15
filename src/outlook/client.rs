@@ -1253,6 +1253,20 @@ impl OutlookClient for WindowsOutlookClient {
                 changed.push("remove_attendees");
             }
 
+            if u.recurrence.is_some() && u.clear_recurrence {
+                return Err(ToolError::new(
+                    "cannot set recurrence and clear_recurrence in the same update_event call",
+                ));
+            }
+            if let Some(recurrence) = u.recurrence.as_ref() {
+                apply_recurrence(&item, recurrence)?;
+                changed.push("recurrence");
+            }
+            if u.clear_recurrence {
+                call_method(&item, "ClearRecurrencePattern", &mut [])?;
+                changed.push("clear_recurrence");
+            }
+
             // Save vs Send: only a meeting can notify attendees; a personal
             // appointment always just saves, regardless of send_update.
             let is_meeting =

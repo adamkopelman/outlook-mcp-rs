@@ -294,6 +294,14 @@ pub struct UpdateEventParams {
     /// false = apply quietly to your own copy only. Ignored for non-meetings.
     #[serde(default = "default_true")]
     pub send_update: bool,
+    /// Set or replace the event's recurrence pattern (whole series, not one
+    /// occurrence). Mutually exclusive with `clear_recurrence`.
+    #[serde(default)]
+    pub recurrence: Option<RecurrenceParams>,
+    /// Remove the event's recurrence pattern, converting it back to a single
+    /// occurrence. Mutually exclusive with `recurrence`.
+    #[serde(default)]
+    pub clear_recurrence: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -512,12 +520,16 @@ impl OutlookMcpServer {
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
-    #[tool(description = "Update an existing calendar event: subject, start/end, location, body, show_as, add/remove categories, add/remove attendees, reminder, all_day. Adding an attendee converts a personal appointment into a meeting. send_update (default true) notifies attendees if the event is a meeting.")]
+    #[tool(description = "Update an existing calendar event: subject, start/end, location, body, show_as, add/remove categories, add/remove attendees, reminder, all_day, recurrence (set/replace) or clear_recurrence (remove it). Adding an attendee converts a personal appointment into a meeting. Recurrence edits apply to the whole series. send_update (default true) notifies attendees if the event is a meeting.")]
     pub async fn update_event(
         &self,
         Parameters(p): Parameters<UpdateEventParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
+        let recurrence = p.recurrence.map(|r| RecurrenceInput {
+            pattern: r.pattern, interval: r.interval, days_of_week: r.days_of_week,
+            day_of_month: r.day_of_month, until: r.until, occurrences: r.occurrences,
+        });
         let u = EventUpdate {
             event_id: p.event_id, subject: p.subject, start: p.start, end: p.end,
             location: p.location, body: p.body, all_day: p.all_day,
@@ -526,6 +538,7 @@ impl OutlookMcpServer {
             add_required_attendees: p.add_required_attendees,
             add_optional_attendees: p.add_optional_attendees,
             remove_attendees: p.remove_attendees, send_update: p.send_update,
+            recurrence, clear_recurrence: p.clear_recurrence,
         };
         let result = run_blocking(move || client.update_event(u)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))

@@ -159,6 +159,8 @@ fn update_event_edits_fields_and_manages_attendees() {
         add_optional_attendees: Some(vec!["optional-probe@example.com".to_string()]),
         remove_attendees: Some(vec!["required-probe@example.com".to_string()]),
         send_update: false,
+        recurrence: None,
+        clear_recurrence: false,
     }).expect("update_event should succeed");
     assert_eq!(updated["status"], "updated");
     let changed = updated["changed"].as_array().unwrap();

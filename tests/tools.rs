@@ -461,6 +461,7 @@ async fn update_event_lists_changed_fields() {
             add_required_attendees: Some(vec!["a@example.com".to_string()]),
             add_optional_attendees: None, remove_attendees: None,
             send_update: true,
+            recurrence: None, clear_recurrence: false,
         }))
         .await
         .unwrap();
@@ -490,11 +491,62 @@ async fn update_event_remove_attendees_is_tracked() {
             add_required_attendees: None, add_optional_attendees: None,
             remove_attendees: Some(vec!["a@example.com".to_string()]),
             send_update: false,
+            recurrence: None, clear_recurrence: false,
         }))
         .await
         .unwrap();
     let v = result_json(&result);
     assert_eq!(v["changed"], json!(["remove_attendees"]));
+}
+
+#[tokio::test]
+async fn update_event_forwards_recurrence() {
+    use outlook_mcp_rs::outlook::fake::EVENT_ID;
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let result = server
+        .update_event(Parameters(UpdateEventParams {
+            event_id: EVENT_ID.to_string(),
+            subject: None, start: None, end: None, location: None, body: None,
+            all_day: None, reminder_minutes: None, show_as: None,
+            add_categories: None, remove_categories: None,
+            add_required_attendees: None, add_optional_attendees: None, remove_attendees: None,
+            send_update: false,
+            recurrence: Some(RecurrenceParams {
+                pattern: "daily".to_string(), interval: Some(2), days_of_week: None,
+                day_of_month: None, until: Some("2099-06-01".to_string()), occurrences: None,
+            }),
+            clear_recurrence: false,
+        }))
+        .await
+        .unwrap();
+    let v = result_json(&result);
+    assert_eq!(v["changed"], json!(["recurrence"]));
+    let (_, args) = fake.calls().last().unwrap().clone();
+    assert_eq!(args["recurrence"]["pattern"], "daily");
+    assert_eq!(args["recurrence"]["until"], "2099-06-01");
+}
+
+#[tokio::test]
+async fn update_event_forwards_clear_recurrence() {
+    use outlook_mcp_rs::outlook::fake::EVENT_ID;
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let result = server
+        .update_event(Parameters(UpdateEventParams {
+            event_id: EVENT_ID.to_string(),
+            subject: None, start: None, end: None, location: None, body: None,
+            all_day: None, reminder_minutes: None, show_as: None,
+            add_categories: None, remove_categories: None,
+            add_required_attendees: None, add_optional_attendees: None, remove_attendees: None,
+            send_update: false,
+            recurrence: None,
+            clear_recurrence: true,
+        }))
+        .await
+        .unwrap();
+    let v = result_json(&result);
+    assert_eq!(v["changed"], json!(["clear_recurrence"]));
 }
 
 #[tokio::test]

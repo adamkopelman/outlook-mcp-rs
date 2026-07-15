@@ -204,6 +204,11 @@ impl OutlookClient for FakeOutlookClient {
             "add_required_attendees": u.add_required_attendees,
             "add_optional_attendees": u.add_optional_attendees,
             "remove_attendees": u.remove_attendees, "send_update": u.send_update,
+            "recurrence": u.recurrence.as_ref().map(|r| json!({
+                "pattern": r.pattern, "interval": r.interval, "days_of_week": r.days_of_week,
+                "day_of_month": r.day_of_month, "until": r.until, "occurrences": r.occurrences,
+            })),
+            "clear_recurrence": u.clear_recurrence,
         }))?;
         let mut changed: Vec<&str> = Vec::new();
         if u.subject.is_some() { changed.push("subject"); }
@@ -219,6 +224,8 @@ impl OutlookClient for FakeOutlookClient {
         if u.add_required_attendees.is_some() { changed.push("add_required_attendees"); }
         if u.add_optional_attendees.is_some() { changed.push("add_optional_attendees"); }
         if u.remove_attendees.is_some() { changed.push("remove_attendees"); }
+        if u.recurrence.is_some() { changed.push("recurrence"); }
+        if u.clear_recurrence { changed.push("clear_recurrence"); }
         Ok(json!({"status": "updated", "id": u.event_id, "changed": changed}))
     }
 
