@@ -420,6 +420,19 @@ async fn create_event_forwards_recurrence() {
 }
 
 #[tokio::test]
+async fn get_event_recurrence_is_none_by_default() {
+    use outlook_mcp_rs::outlook::fake::EVENT_ID;
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let result = server
+        .get_event(Parameters(GetEventParams { event_id: EVENT_ID.to_string() }))
+        .await
+        .unwrap();
+    let v = result_json(&result);
+    assert!(v["recurrence"].is_null());
+}
+
+#[tokio::test]
 async fn respond_to_meeting_defaults_send_true() {
     use outlook_mcp_rs::outlook::fake::EVENT_ID;
     let fake = Arc::new(FakeOutlookClient::new());

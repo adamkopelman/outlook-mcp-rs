@@ -322,6 +322,43 @@ fn event_summary(item: &IDispatch) -> Result<EventSummary, ToolError> {
     })
 }
 
+/// Reads an appointment's recurrence pattern back via
+/// `GetRecurrencePattern()`, or `None` if `IsRecurring` is false. Mirrors
+/// `apply_recurrence`'s field set in the opposite direction.
+fn recurrence_info(item: &IDispatch) -> Result<Option<RecurrenceInfo>, ToolError> {
+    let is_recurring =
+        variant_to_bool(&get_property(item, "IsRecurring").unwrap_or_default()).unwrap_or(false);
+    if !is_recurring {
+        return Ok(None);
+    }
+    let pattern = to_disp(call_method(item, "GetRecurrencePattern", &mut [])?)?;
+    let recurrence_type =
+        variant_to_i32(&get_property(&pattern, "RecurrenceType").unwrap_or_default())
+            .unwrap_or(c::OL_RECURS_DAILY);
+    let interval =
+        variant_to_i32(&get_property(&pattern, "Interval").unwrap_or_default()).unwrap_or(1);
+    let day_mask =
+        variant_to_i32(&get_property(&pattern, "DayOfWeekMask").unwrap_or_default()).unwrap_or(0);
+    let day_of_month = variant_to_i32(&get_property(&pattern, "DayOfMonth").unwrap_or_default());
+    let no_end =
+        variant_to_bool(&get_property(&pattern, "NoEndDate").unwrap_or_default()).unwrap_or(false);
+    let occurrences = variant_to_i32(&get_property(&pattern, "Occurrences").unwrap_or_default());
+    let until = if no_end {
+        None
+    } else {
+        variant_to_iso_string(&get_property(&pattern, "PatternEndDate").unwrap_or_default())
+    };
+    Ok(Some(RecurrenceInfo {
+        pattern: crate::friendly::recurrence_pattern_word(recurrence_type).to_string(),
+        interval,
+        days_of_week: crate::friendly::day_of_week_mask_to_words(day_mask),
+        day_of_month: day_of_month.filter(|d| *d > 0),
+        until,
+        occurrences: if no_end { None } else { occurrences },
+        no_end,
+    }))
+}
+
 /// True if `summary` passes every filter set on `q`. All comparisons are
 /// case-insensitive. Attendee matching is a substring test against the
 /// semicolon-separated `RequiredAttendees`/`OptionalAttendees` strings.
@@ -1008,9 +1045,11 @@ impl OutlookClient for WindowsOutlookClient {
             let (_app, ns) = mapi()?;
             let item = get_item(&ns, &event_id)?;
             let summary = event_summary(&item)?;
+            let recurrence = recurrence_info(&item)?;
             Ok(EventDetail {
                 summary,
                 body: truncate(&variant_to_string(&get_property(&item, "Body").unwrap_or_default())),
+                recurrence,
             })
         })
     }

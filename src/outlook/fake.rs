@@ -164,6 +164,7 @@ impl OutlookClient for FakeOutlookClient {
                 required_attendees: "".into(), optional_attendees: "".into(),
             },
             body: "".into(),
+            recurrence: None,
         })
     }
 
