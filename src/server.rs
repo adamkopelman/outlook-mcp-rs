@@ -9,7 +9,7 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::error::ToolError;
-use crate::outlook::{CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient};
+use crate::outlook::{CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient, RecurrenceInput};
 
 /// Runs a blocking `OutlookClient` call on a dedicated blocking thread so the
 /// tokio scheduler never migrates it mid-call (COM apartment-threading
@@ -192,6 +192,28 @@ pub struct GetEventParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RecurrenceParams {
+    /// "daily" | "weekly" | "monthly" | "yearly".
+    pub pattern: String,
+    /// Repeat every N days/weeks/months/years (default 1).
+    #[serde(default)]
+    pub interval: Option<i32>,
+    /// Required for "weekly": full weekday names, e.g. ["monday", "wednesday"].
+    #[serde(default)]
+    pub days_of_week: Option<Vec<String>>,
+    /// Required for "monthly": day of the month (1-31). Not used for "yearly"
+    /// (the event's own start date supplies the month/day).
+    #[serde(default)]
+    pub day_of_month: Option<i32>,
+    /// End date (ISO). At most one of `until`/`occurrences`; neither = no end date.
+    #[serde(default)]
+    pub until: Option<String>,
+    /// Number of occurrences. At most one of `until`/`occurrences`.
+    #[serde(default)]
+    pub occurrences: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CreateEventParams {
     pub subject: String,
     pub start: String,
@@ -219,6 +241,9 @@ pub struct CreateEventParams {
     /// If false, a meeting with attendees is saved (not sent) for later review.
     #[serde(default = "default_true")]
     pub send: bool,
+    /// Repeat this event daily/weekly/monthly/yearly. Omit for a one-off event.
+    #[serde(default)]
+    pub recurrence: Option<RecurrenceParams>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -451,12 +476,13 @@ impl OutlookMcpServer {
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
-    #[tool(description = "Create a calendar event. required_attendees/optional_attendees invite two tiers (attendees is a legacy alias merged into required_attendees); any attendee makes it a meeting. categories and show_as (busy status) can be set on creation. send (default true) controls whether a meeting is actually sent to attendees or just saved for review.")]
+    #[tool(description = "Create a calendar event. required_attendees/optional_attendees invite two tiers (attendees is a legacy alias merged into required_attendees); any attendee makes it a meeting. categories and show_as (busy status) can be set on creation. recurrence repeats the event (daily/weekly/monthly/yearly, with an interval and an until date or occurrence count). send (default true) controls whether a meeting is actually sent to attendees or just saved for review.")]
     pub async fn create_event(
         &self,
         Parameters(CreateEventParams {
             subject, start, end, body, location, attendees, required_attendees,
             optional_attendees, all_day, reminder_minutes, categories, show_as, send,
+            recurrence,
         }): Parameters<CreateEventParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
@@ -464,9 +490,13 @@ impl OutlookMcpServer {
         let mut required = required_attendees.unwrap_or_default();
         required.extend(attendees.unwrap_or_default());
         let required_attendees = (!required.is_empty()).then_some(required);
+        let recurrence = recurrence.map(|r| RecurrenceInput {
+            pattern: r.pattern, interval: r.interval, days_of_week: r.days_of_week,
+            day_of_month: r.day_of_month, until: r.until, occurrences: r.occurrences,
+        });
         let input = CreateEventInput {
             subject, start, end, body, location, required_attendees, optional_attendees,
-            all_day, reminder_minutes, categories, show_as, send,
+            all_day, reminder_minutes, categories, show_as, send, recurrence,
         };
         let result = run_blocking(move || client.create_event(input)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))

@@ -176,6 +176,10 @@ impl OutlookClient for FakeOutlookClient {
             "all_day": input.all_day, "reminder_minutes": input.reminder_minutes,
             "categories": input.categories, "show_as": input.show_as,
             "send": input.send,
+            "recurrence": input.recurrence.as_ref().map(|r| json!({
+                "pattern": r.pattern, "interval": r.interval, "days_of_week": r.days_of_week,
+                "day_of_month": r.day_of_month, "until": r.until, "occurrences": r.occurrences,
+            })),
         }))?;
         let has_attendees = input.required_attendees.as_ref().is_some_and(|v| !v.is_empty())
             || input.optional_attendees.as_ref().is_some_and(|v| !v.is_empty());

@@ -5,7 +5,7 @@ use outlook_mcp_rs::server::{
     CompleteTaskParams, CreateDraftParams, CreateEventParams, CreateNoteParams, CreateTaskParams,
     DeleteEmailParams, DeleteEventParams, GetEmailParams, GetEventParams, GetNoteParams, ListAttachmentsParams,
     ListEmailsParams, ListEventsParams, ListTasksParams, OutlookMcpServer,
-    ReplyEmailParams, RespondToMeetingParams, SaveAttachmentsParams,
+    RecurrenceParams, ReplyEmailParams, RespondToMeetingParams, SaveAttachmentsParams,
     SendEmailParams, UpdateEmailParams, UpdateEventParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
@@ -352,6 +352,7 @@ async fn create_event_passes_attendees() {
             categories: None,
             show_as: None,
             send: true,
+            recurrence: None,
         }))
         .await
         .unwrap();
@@ -373,6 +374,7 @@ async fn create_event_status_reflects_attendees_and_send() {
         required_attendees: required, optional_attendees: None,
         all_day: false, reminder_minutes: None, categories: None, show_as: None,
         send,
+        recurrence: None,
     };
 
     let r = server.create_event(Parameters(base(Some(vec!["a@example.com".to_string()]), true)))
@@ -385,6 +387,36 @@ async fn create_event_status_reflects_attendees_and_send() {
 
     let r = server.create_event(Parameters(base(None, true))).await.unwrap();
     assert_eq!(result_json(&r)["status"], "saved");
+}
+
+#[tokio::test]
+async fn create_event_forwards_recurrence() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    server
+        .create_event(Parameters(CreateEventParams {
+            subject: "Standup".to_string(),
+            start: "2026-06-12T09:00".to_string(),
+            end: "2026-06-12T09:15".to_string(),
+            body: None, location: None, attendees: None,
+            required_attendees: None, optional_attendees: None,
+            all_day: false, reminder_minutes: None, categories: None, show_as: None,
+            send: true,
+            recurrence: Some(RecurrenceParams {
+                pattern: "weekly".to_string(),
+                interval: Some(1),
+                days_of_week: Some(vec!["monday".to_string(), "wednesday".to_string()]),
+                day_of_month: None,
+                until: None,
+                occurrences: Some(10),
+            }),
+        }))
+        .await
+        .unwrap();
+    let (_, args) = &fake.calls()[0];
+    assert_eq!(args["recurrence"]["pattern"], "weekly");
+    assert_eq!(args["recurrence"]["days_of_week"], json!(["monday", "wednesday"]));
+    assert_eq!(args["recurrence"]["occurrences"], 10);
 }
 
 #[tokio::test]

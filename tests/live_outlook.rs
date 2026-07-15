@@ -88,6 +88,7 @@ fn create_event_then_delete_it() {
         body: None, location: None, required_attendees: None, optional_attendees: None,
         all_day: false, reminder_minutes: None, categories: None, show_as: None,
         send: true,
+        recurrence: None,
     }).expect("create_event should succeed");
     let id = created["id"].as_str().unwrap().to_string();
     let _ = c.get_event(id.clone()).expect("get_event should round-trip before cleanup");
@@ -112,6 +113,7 @@ fn create_event_with_tiers_categories_and_show_as() {
         categories: Some(vec!["Work".to_string()]),
         show_as: Some("tentative".to_string()),
         send: false,
+        recurrence: None,
     }).expect("create_event should succeed");
     assert_eq!(created["status"], "meeting_saved");
     let id = created["id"].as_str().unwrap().to_string();
@@ -138,6 +140,7 @@ fn update_event_edits_fields_and_manages_attendees() {
         optional_attendees: None,
         all_day: false, reminder_minutes: None, categories: None, show_as: None,
         send: false,
+        recurrence: None,
     }).expect("create_event should succeed");
     let id = created["id"].as_str().unwrap().to_string();
 
@@ -186,6 +189,7 @@ fn delete_event_removes_a_personal_appointment() {
         body: None, location: None, required_attendees: None, optional_attendees: None,
         all_day: false, reminder_minutes: None, categories: None, show_as: None,
         send: true, // no attendees present, so this just Saves — nothing is sent
+        recurrence: None,
     }).expect("create_event should succeed");
     let id = created["id"].as_str().unwrap().to_string();
 
@@ -210,6 +214,7 @@ fn list_events_filters_by_query_and_category() {
         body: None, location: None, required_attendees: None, optional_attendees: None,
         all_day: false, reminder_minutes: None, categories: None, show_as: None,
         send: true,
+        recurrence: None,
     }).expect("create_event");
     let id = created["id"].as_str().expect("event id").to_string();
 

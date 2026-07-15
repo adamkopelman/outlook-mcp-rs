@@ -21,9 +21,10 @@ use crate::outlook::com::{
     variant_to_bool, variant_to_i32, variant_to_iso_string, variant_to_string, ComGuard,
 };
 use crate::outlook::types::*;
+use chrono::Datelike;
 use crate::outlook::{
-    create_event_status, CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate,
-    OutlookClient,
+    create_event_status, validate_recurrence, CreateEventInput, EmailQuery, EmailUpdate,
+    EventQuery, EventUpdate, OutlookClient, RecurrenceInput,
 };
 
 /// Matches `MAX_EMAIL_COUNT` in `client.py`.
@@ -214,6 +215,55 @@ fn parse_dt(value: &str, field: &str) -> Result<chrono::NaiveDateTime, ToolError
 fn add_meeting_recipient(recipients: &IDispatch, address: &str, role: i32) -> Result<(), ToolError> {
     let recipient = to_disp(call_method(recipients, "Add", &mut [variant_from_str(address)])?)?;
     put_property(&recipient, "Type", variant_from_i32(role))?;
+    Ok(())
+}
+
+/// Sets an appointment's recurrence pattern via `GetRecurrencePattern()`.
+/// Calling this on a non-recurring appointment converts it into a recurring
+/// one (this is how `update_event` adds recurrence to an existing single
+/// event, too — see Task 4). `"yearly"` derives its month/day from the
+/// appointment's own `Start` property rather than a separate input field, so
+/// this must run after `Start` is already set to its final value.
+fn apply_recurrence(appt: &IDispatch, r: &RecurrenceInput) -> Result<(), ToolError> {
+    let recurrence_type = validate_recurrence(r)?;
+    let pattern = to_disp(call_method(appt, "GetRecurrencePattern", &mut [])?)?;
+    put_property(&pattern, "RecurrenceType", variant_from_i32(recurrence_type))?;
+    put_property(&pattern, "Interval", variant_from_i32(r.interval.unwrap_or(1)))?;
+    match r.pattern.to_lowercase().as_str() {
+        "weekly" => {
+            let mask = crate::friendly::day_of_week_words_to_mask(
+                r.days_of_week.as_deref().unwrap_or(&[]),
+            )?;
+            put_property(&pattern, "DayOfWeekMask", variant_from_i32(mask))?;
+        }
+        "monthly" => {
+            put_property(&pattern, "DayOfMonth", variant_from_i32(r.day_of_month.unwrap()))?;
+        }
+        "yearly" => {
+            let start_iso = variant_to_iso_string(&get_property(appt, "Start")?).ok_or_else(|| {
+                ToolError::new("could not read Start to derive the yearly recurrence date")
+            })?;
+            let start_dt =
+                chrono::NaiveDateTime::parse_from_str(&start_iso, "%Y-%m-%dT%H:%M:%S").map_err(|_| {
+                    ToolError::new("could not parse Start to derive the yearly recurrence date")
+                })?;
+            put_property(&pattern, "MonthOfYear", variant_from_i32(start_dt.month() as i32))?;
+            put_property(&pattern, "DayOfMonth", variant_from_i32(start_dt.day() as i32))?;
+        }
+        _ => {}
+    }
+    match (r.occurrences, r.until.as_deref()) {
+        (Some(n), _) => {
+            put_property(&pattern, "Occurrences", variant_from_i32(n))?;
+        }
+        (None, Some(until)) => {
+            let until_dt = parse_dt(until, "recurrence.until")?;
+            put_property(&pattern, "PatternEndDate", variant_from_datetime(&until_dt)?)?;
+        }
+        (None, None) => {
+            put_property(&pattern, "NoEndDate", variant_from_bool(true))?;
+        }
+    }
     Ok(())
 }
 
@@ -999,6 +1049,9 @@ impl OutlookClient for WindowsOutlookClient {
                     ))
                 })?;
                 put_property(&appt, "BusyStatus", variant_from_i32(busy_status))?;
+            }
+            if let Some(recurrence) = input.recurrence.as_ref() {
+                apply_recurrence(&appt, recurrence)?;
             }
             let required = input.required_attendees.unwrap_or_default();
             let optional = input.optional_attendees.unwrap_or_default();
