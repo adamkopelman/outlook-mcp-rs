@@ -271,6 +271,14 @@ pub struct UpdateEventParams {
     pub send_update: bool,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteEventParams {
+    pub event_id: String,
+    /// If you organize the meeting, notify attendees of the cancellation (default true).
+    #[serde(default = "default_true")]
+    pub send_cancellation: bool,
+}
+
 // ---- Attachments ----
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -490,6 +498,16 @@ impl OutlookMcpServer {
             remove_attendees: p.remove_attendees, send_update: p.send_update,
         };
         let result = run_blocking(move || client.update_event(u)).await?;
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    #[tool(description = "Delete/cancel a calendar event (moves it to Deleted Items). If you organize the meeting, send_cancellation (default true) notifies attendees; if false, it's canceled quietly.")]
+    pub async fn delete_event(
+        &self,
+        Parameters(DeleteEventParams { event_id, send_cancellation }): Parameters<DeleteEventParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.clone();
+        let result = run_blocking(move || client.delete_event(event_id, send_cancellation)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 

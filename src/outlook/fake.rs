@@ -217,6 +217,11 @@ impl OutlookClient for FakeOutlookClient {
         Ok(json!({"status": "updated", "id": u.event_id, "changed": changed}))
     }
 
+    fn delete_event(&self, event_id: String, send_cancellation: bool) -> Result<Value, ToolError> {
+        self.record("delete_event", json!({"event_id": event_id, "send_cancellation": send_cancellation}))?;
+        Ok(json!({"status": "deleted", "note": "Moved to Deleted Items."}))
+    }
+
     fn list_attachments(&self, email_id: String)
         -> Result<Vec<AttachmentInfo>, ToolError> {
         self.record("list_attachments", json!({"email_id": email_id}))?;

@@ -1176,6 +1176,31 @@ impl OutlookClient for WindowsOutlookClient {
         })
     }
 
+    fn delete_event(&self, event_id: String, send_cancellation: bool) -> Result<Value, ToolError> {
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let item = get_item(&ns, &event_id)?;
+            let subject = variant_to_string(&get_property(&item, "Subject")?);
+            let meeting_status =
+                variant_to_i32(&get_property(&item, "MeetingStatus")?).unwrap_or(c::OL_NONMEETING);
+            let note = if meeting_status == c::OL_MEETING {
+                // You organize this meeting: mark it canceled, optionally
+                // notify attendees, then remove your own copy.
+                put_property(&item, "MeetingStatus", variant_from_i32(c::OL_MEETING_CANCELED))?;
+                if send_cancellation {
+                    call_method(&item, "Send", &mut [])?;
+                    "Meeting canceled; attendees notified. Moved to Deleted Items."
+                } else {
+                    "Meeting canceled without notifying attendees. Moved to Deleted Items."
+                }
+            } else {
+                "Moved to Deleted Items."
+            };
+            call_method(&item, "Delete", &mut [])?;
+            Ok(json!({"status": "deleted", "subject": subject, "note": note}))
+        })
+    }
+
     // ---- Attachments (Task 14) -----------------------------------------
 
     fn list_attachments(&self, email_id: String) -> Result<Vec<AttachmentInfo>, ToolError> {

@@ -28,6 +28,7 @@ pub const OL_MEETING_DECLINED: i32 = 4;
 // OlMeetingStatus
 pub const OL_NONMEETING: i32 = 0;
 pub const OL_MEETING: i32 = 1;
+pub const OL_MEETING_CANCELED: i32 = 5;
 
 // OlMeetingRecipientType (Recipient.Type on an AppointmentItem)
 pub const OL_RECIPIENT_REQUIRED: i32 = 1;

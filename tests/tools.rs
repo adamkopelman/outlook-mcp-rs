@@ -3,7 +3,7 @@ use std::sync::Arc;
 use outlook_mcp_rs::outlook::fake::{FakeOutlookClient, EMAIL_ID};
 use outlook_mcp_rs::server::{
     CompleteTaskParams, CreateDraftParams, CreateEventParams, CreateNoteParams, CreateTaskParams,
-    DeleteEmailParams, GetEmailParams, GetEventParams, GetNoteParams, ListAttachmentsParams,
+    DeleteEmailParams, DeleteEventParams, GetEmailParams, GetEventParams, GetNoteParams, ListAttachmentsParams,
     ListEmailsParams, ListEventsParams, ListTasksParams, OutlookMcpServer,
     ReplyEmailParams, RespondToMeetingParams, SaveAttachmentsParams,
     SendEmailParams, UpdateEmailParams, UpdateEventParams,
@@ -450,6 +450,24 @@ async fn update_event_remove_attendees_is_tracked() {
         .unwrap();
     let v = result_json(&result);
     assert_eq!(v["changed"], json!(["remove_attendees"]));
+}
+
+#[tokio::test]
+async fn delete_event_returns_deleted_status() {
+    use outlook_mcp_rs::outlook::fake::EVENT_ID;
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let result = server
+        .delete_event(Parameters(DeleteEventParams {
+            event_id: EVENT_ID.to_string(),
+            send_cancellation: true,
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result_json(&result)["status"], "deleted");
+    let (name, args) = fake.calls().pop().unwrap();
+    assert_eq!(name, "delete_event");
+    assert_eq!(args["send_cancellation"], true);
 }
 
 #[tokio::test]
