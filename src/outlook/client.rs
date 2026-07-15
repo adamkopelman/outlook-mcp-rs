@@ -21,7 +21,7 @@ use crate::outlook::com::{
     variant_to_bool, variant_to_i32, variant_to_iso_string, variant_to_string, ComGuard,
 };
 use crate::outlook::types::*;
-use crate::outlook::{EmailQuery, EmailUpdate, EventQuery, OutlookClient};
+use crate::outlook::{CreateEventInput, EmailQuery, EmailUpdate, EventQuery, OutlookClient};
 
 /// Matches `MAX_EMAIL_COUNT` in `client.py`.
 const MAX_EMAIL_COUNT: i32 = 50;
@@ -935,17 +935,7 @@ impl OutlookClient for WindowsOutlookClient {
         })
     }
 
-    fn create_event(
-        &self,
-        subject: String,
-        start: String,
-        end: String,
-        body: Option<String>,
-        location: Option<String>,
-        attendees: Option<Vec<String>>,
-        all_day: bool,
-        reminder_minutes: Option<i32>,
-    ) -> Result<Value, ToolError> {
+    fn create_event(&self, input: CreateEventInput) -> Result<Value, ToolError> {
         self.with_com(|| {
             let (app, _ns) = mapi()?;
             let appt = to_disp(call_method(
@@ -953,24 +943,28 @@ impl OutlookClient for WindowsOutlookClient {
                 "CreateItem",
                 &mut [variant_from_i32(c::OL_APPOINTMENT_ITEM)],
             )?)?;
-            put_property(&appt, "Subject", variant_from_str(&subject))?;
-            put_property(&appt, "Start", variant_from_datetime(&parse_dt(&start, "start")?)?)?;
-            put_property(&appt, "End", variant_from_datetime(&parse_dt(&end, "end")?)?)?;
-            if all_day {
+            put_property(&appt, "Subject", variant_from_str(&input.subject))?;
+            put_property(&appt, "Start", variant_from_datetime(&parse_dt(&input.start, "start")?)?)?;
+            put_property(&appt, "End", variant_from_datetime(&parse_dt(&input.end, "end")?)?)?;
+            if input.all_day {
                 put_property(&appt, "AllDayEvent", variant_from_bool(true))?;
             }
-            if let Some(body) = body.as_deref().filter(|b| !b.is_empty()) {
+            if let Some(body) = input.body.as_deref().filter(|b| !b.is_empty()) {
                 put_property(&appt, "Body", variant_from_str(body))?;
             }
-            if let Some(location) = location.as_deref().filter(|l| !l.is_empty()) {
+            if let Some(location) = input.location.as_deref().filter(|l| !l.is_empty()) {
                 put_property(&appt, "Location", variant_from_str(location))?;
             }
-            if let Some(minutes) = reminder_minutes {
+            if let Some(minutes) = input.reminder_minutes {
                 put_property(&appt, "ReminderSet", variant_from_bool(true))?;
                 put_property(&appt, "ReminderMinutesBeforeStart", variant_from_i32(minutes))?;
             }
-            let status = match attendees {
-                Some(addresses) if !addresses.is_empty() => {
+            // Interim: only the required tier has an effect (optional_attendees,
+            // categories, show_as, send are accepted but not yet applied — see
+            // Tasks 2-5). Matches the pre-Plan-7 behavior of always sending when
+            // any attendee is present.
+            let status = match input.required_attendees.filter(|a| !a.is_empty()) {
+                Some(addresses) => {
                     put_property(&appt, "MeetingStatus", variant_from_i32(c::OL_MEETING))?;
                     let recipients = to_disp(get_property(&appt, "Recipients")?)?;
                     for address in &addresses {
@@ -980,12 +974,12 @@ impl OutlookClient for WindowsOutlookClient {
                     call_method(&appt, "Send", &mut [])?;
                     "meeting_sent"
                 }
-                _ => {
+                None => {
                     call_method(&appt, "Save", &mut [])?;
                     "saved"
                 }
             };
-            Ok(json!({"status": status, "id": make_id(&appt)?, "subject": subject}))
+            Ok(json!({"status": status, "id": make_id(&appt)?, "subject": input.subject}))
         })
     }
 

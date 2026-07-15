@@ -9,7 +9,7 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::error::ToolError;
-use crate::outlook::{EmailQuery, EmailUpdate, EventQuery, OutlookClient};
+use crate::outlook::{CreateEventInput, EmailQuery, EmailUpdate, EventQuery, OutlookClient};
 
 /// Runs a blocking `OutlookClient` call on a dedicated blocking thread so the
 /// tokio scheduler never migrates it mid-call (COM apartment-threading
@@ -200,12 +200,25 @@ pub struct CreateEventParams {
     pub body: Option<String>,
     #[serde(default)]
     pub location: Option<String>,
+    /// Legacy alias for `required_attendees`; merged in if both are given.
     #[serde(default)]
     pub attendees: Option<Vec<String>>,
+    #[serde(default)]
+    pub required_attendees: Option<Vec<String>>,
+    #[serde(default)]
+    pub optional_attendees: Option<Vec<String>>,
     #[serde(default)]
     pub all_day: bool,
     #[serde(default)]
     pub reminder_minutes: Option<i32>,
+    #[serde(default)]
+    pub categories: Option<Vec<String>>,
+    /// "free" | "tentative" | "busy" | "out_of_office" | "working_elsewhere".
+    #[serde(default)]
+    pub show_as: Option<String>,
+    /// If false, a meeting with attendees is saved (not sent) for later review.
+    #[serde(default = "default_true")]
+    pub send: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -390,17 +403,24 @@ impl OutlookMcpServer {
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
-    #[tool(description = "Create a calendar event, optionally sending meeting invites to attendees.")]
+    #[tool(description = "Create a calendar event. required_attendees/optional_attendees invite two tiers (attendees is a legacy alias merged into required_attendees); any attendee makes it a meeting. categories and show_as (busy status) can be set on creation. send (default true) controls whether a meeting is actually sent to attendees or just saved for review.")]
     pub async fn create_event(
         &self,
         Parameters(CreateEventParams {
-            subject, start, end, body, location, attendees, all_day, reminder_minutes,
+            subject, start, end, body, location, attendees, required_attendees,
+            optional_attendees, all_day, reminder_minutes, categories, show_as, send,
         }): Parameters<CreateEventParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let result = run_blocking(move || {
-            client.create_event(subject, start, end, body, location, attendees, all_day, reminder_minutes)
-        }).await?;
+        // `attendees` is a legacy alias for the required tier; merge it in.
+        let mut required = required_attendees.unwrap_or_default();
+        required.extend(attendees.unwrap_or_default());
+        let required_attendees = (!required.is_empty()).then_some(required);
+        let input = CreateEventInput {
+            subject, start, end, body, location, required_attendees, optional_attendees,
+            all_day, reminder_minutes, categories, show_as, send,
+        };
+        let result = run_blocking(move || client.create_event(input)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 

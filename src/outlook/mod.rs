@@ -59,6 +59,28 @@ pub struct EventQuery {
     pub calendar_of: Option<String>,
 }
 
+/// All inputs for `create_event`. `required_attendees`/`optional_attendees`
+/// are the two invite tiers Outlook shows a meeting organizer; any attendee
+/// in either tier makes the item a meeting. `send` (default true in the
+/// tool layer) controls whether a meeting is actually sent to attendees or
+/// merely saved for later review — see `create_event_status` below for the
+/// resulting status string.
+#[derive(Debug, Clone)]
+pub struct CreateEventInput {
+    pub subject: String,
+    pub start: String,
+    pub end: String,
+    pub body: Option<String>,
+    pub location: Option<String>,
+    pub required_attendees: Option<Vec<String>>,
+    pub optional_attendees: Option<Vec<String>>,
+    pub all_day: bool,
+    pub reminder_minutes: Option<i32>,
+    pub categories: Option<Vec<String>>,
+    pub show_as: Option<String>,
+    pub send: bool,
+}
+
 pub trait OutlookClient: Send + Sync {
     fn list_folders(&self) -> Result<Vec<FolderInfo>, ToolError>;
     fn list_emails(&self, q: EmailQuery) -> Result<Vec<EmailSummary>, ToolError>;
@@ -78,10 +100,7 @@ pub trait OutlookClient: Send + Sync {
 
     fn list_events(&self, q: EventQuery) -> Result<Vec<EventSummary>, ToolError>;
     fn get_event(&self, event_id: String) -> Result<EventDetail, ToolError>;
-    fn create_event(&self, subject: String, start: String, end: String,
-        body: Option<String>, location: Option<String>,
-        attendees: Option<Vec<String>>, all_day: bool,
-        reminder_minutes: Option<i32>) -> Result<Value, ToolError>;
+    fn create_event(&self, input: CreateEventInput) -> Result<Value, ToolError>;
     fn respond_to_meeting(&self, event_id: String, response: String,
         comment: Option<String>, send: bool) -> Result<Value, ToolError>;
 

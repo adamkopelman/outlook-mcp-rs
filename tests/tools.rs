@@ -345,13 +345,19 @@ async fn create_event_passes_attendees() {
             body: None,
             location: None,
             attendees: Some(vec!["a@example.com".to_string()]),
+            required_attendees: None,
+            optional_attendees: None,
             all_day: false,
             reminder_minutes: None,
+            categories: None,
+            show_as: None,
+            send: true,
         }))
         .await
         .unwrap();
     let (_, args) = &fake.calls()[0];
-    assert_eq!(args["attendees"], json!(["a@example.com"]));
+    // The legacy `attendees` alias merges into `required_attendees`.
+    assert_eq!(args["required_attendees"], json!(["a@example.com"]));
 }
 
 #[tokio::test]

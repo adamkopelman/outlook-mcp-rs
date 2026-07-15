@@ -9,7 +9,7 @@
 //! can't be undone — see TESTING.md for how to test those by hand.
 
 use outlook_mcp_rs::outlook::client::WindowsOutlookClient;
-use outlook_mcp_rs::outlook::{EmailQuery, EventQuery, OutlookClient, EmailUpdate};
+use outlook_mcp_rs::outlook::{CreateEventInput, EmailQuery, EventQuery, OutlookClient, EmailUpdate};
 
 fn client() -> WindowsOutlookClient {
     WindowsOutlookClient::new()
@@ -81,12 +81,14 @@ fn create_note_then_get_it_back() {
 #[ignore]
 fn create_event_then_delete_it() {
     let c = client();
-    let created = c.create_event(
-        "outlook-mcp-rs live test event".to_string(),
-        "2099-01-01T10:00:00".to_string(),
-        "2099-01-01T10:30:00".to_string(),
-        None, None, None, false, None,
-    ).expect("create_event should succeed");
+    let created = c.create_event(CreateEventInput {
+        subject: "outlook-mcp-rs live test event".to_string(),
+        start: "2099-01-01T10:00:00".to_string(),
+        end: "2099-01-01T10:30:00".to_string(),
+        body: None, location: None, required_attendees: None, optional_attendees: None,
+        all_day: false, reminder_minutes: None, categories: None, show_as: None,
+        send: true,
+    }).expect("create_event should succeed");
     let id = created["id"].as_str().unwrap().to_string();
     // Calendar items don't have a dedicated "delete" tool in the trait; moving
     // into Deleted Items works for mail but not appointments — delete the test
@@ -101,12 +103,14 @@ fn create_event_then_delete_it() {
 fn list_events_filters_by_query_and_category() {
     let c = WindowsOutlookClient::new();
     // A far-future, uniquely-named appointment we can pinpoint and clean up.
-    let created = c.create_event(
-        "outlook-mcp-rs P6 filter probe".to_string(),
-        "2099-01-05T09:00".to_string(),
-        "2099-01-05T09:30".to_string(),
-        None, None, None, false, None,
-    ).expect("create_event");
+    let created = c.create_event(CreateEventInput {
+        subject: "outlook-mcp-rs P6 filter probe".to_string(),
+        start: "2099-01-05T09:00".to_string(),
+        end: "2099-01-05T09:30".to_string(),
+        body: None, location: None, required_attendees: None, optional_attendees: None,
+        all_day: false, reminder_minutes: None, categories: None, show_as: None,
+        send: true,
+    }).expect("create_event");
     let id = created["id"].as_str().expect("event id").to_string();
 
     // A matching query in the window finds it.

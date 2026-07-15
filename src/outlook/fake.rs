@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use crate::error::ToolError;
 use super::types::*;
-use super::{EmailQuery, EmailUpdate, EventQuery, OutlookClient};
+use super::{CreateEventInput, EmailQuery, EmailUpdate, EventQuery, OutlookClient};
 
 pub const EMAIL_ID: &str = "entry-1|store-1";
 pub const EVENT_ID: &str = "entry-2|store-1";
@@ -167,16 +167,17 @@ impl OutlookClient for FakeOutlookClient {
         })
     }
 
-    fn create_event(&self, subject: String, start: String, end: String,
-        body: Option<String>, location: Option<String>,
-        attendees: Option<Vec<String>>, all_day: bool,
-        reminder_minutes: Option<i32>) -> Result<Value, ToolError> {
+    fn create_event(&self, input: CreateEventInput) -> Result<Value, ToolError> {
         self.record("create_event", json!({
-            "subject": subject, "start": start, "end": end, "body": body,
-            "location": location, "attendees": attendees, "all_day": all_day,
-            "reminder_minutes": reminder_minutes,
+            "subject": input.subject, "start": input.start, "end": input.end,
+            "body": input.body, "location": input.location,
+            "required_attendees": input.required_attendees,
+            "optional_attendees": input.optional_attendees,
+            "all_day": input.all_day, "reminder_minutes": input.reminder_minutes,
+            "categories": input.categories, "show_as": input.show_as,
+            "send": input.send,
         }))?;
-        Ok(json!({"status": "saved", "id": EVENT_ID, "subject": subject}))
+        Ok(json!({"status": "saved", "id": EVENT_ID, "subject": input.subject}))
     }
 
     fn respond_to_meeting(&self, event_id: String, response: String,
