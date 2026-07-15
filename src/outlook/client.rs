@@ -971,8 +971,16 @@ impl OutlookClient for WindowsOutlookClient {
             if let Some(categories) = input.categories.as_ref().filter(|c| !c.is_empty()) {
                 set_item_categories(&appt, categories)?;
             }
-            // Interim: show_as, send are accepted but not yet applied
-            // (see Tasks 4-5). Both attendee tiers are wired here; the item still
+            if let Some(show_as) = input.show_as.as_deref().filter(|s| !s.is_empty()) {
+                let busy_status = crate::friendly::busy_status_to_id(show_as).ok_or_else(|| {
+                    ToolError::new(format!(
+                        "invalid show_as {show_as:?}: expected \"free\", \"tentative\", \"busy\", \"out_of_office\", or \"working_elsewhere\""
+                    ))
+                })?;
+                put_property(&appt, "BusyStatus", variant_from_i32(busy_status))?;
+            }
+            // Interim: send is accepted but not yet applied (see Task 5).
+            // Both attendee tiers are wired here; the item still
             // always sends when any attendee is present — Task 5 makes that honor
             // `input.send`.
             let required = input.required_attendees.unwrap_or_default();
