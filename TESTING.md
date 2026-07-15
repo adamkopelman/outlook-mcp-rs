@@ -31,10 +31,11 @@ cargo test --test live_outlook -- --ignored
 
 ## Manual-only tests (not automated at all)
 
-`send_email` and `respond_to_meeting` have real, unrecoverable side effects
-(an actually-delivered email; an actual meeting response sent to an
-organizer) and are not covered by any automated test. To verify them by
-hand before a release:
+`send_email`, `respond_to_meeting`, and `create_event` with `send: true` have
+real, unrecoverable side effects (an actually-delivered email; an actual
+meeting response sent to an organizer; an actual meeting invite sent to real
+attendees) and are not covered by any automated test. To verify them by hand
+before a release:
 
 1. Pick a test recipient you control (e.g. a second mailbox of your own).
 2. Call `send_email` with that recipient and a clearly-marked test subject;
@@ -42,6 +43,11 @@ hand before a release:
 3. Find (or create) a meeting invite in your test mailbox and call
    `respond_to_meeting` with `response: "tentative"`; confirm the organizer
    sees a tentative response.
+4. Call `create_event` with `send: true`, real attendees in `required_attendees`
+   and/or `optional_attendees`, and your own email as a recipient; confirm the
+   invite arrives in their mailbox. (With `send: false`, the event is saved
+   without sending, so the attendee addresses are not required to be real —
+   this is covered by the automated test `create_event_with_tiers_categories_and_show_as`.)
 
 `update_email`'s `flag` field (`follow_up`/`complete`/`clear`) is also
 manual-only. The automated live test (`update_email_applies_state_then_moves`)

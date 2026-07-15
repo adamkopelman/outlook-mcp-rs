@@ -100,6 +100,38 @@ fn create_event_then_delete_it() {
 
 #[test]
 #[ignore]
+fn create_event_with_tiers_categories_and_show_as() {
+    let c = client();
+    // send:false means nothing is ever delivered, so a placeholder address
+    // for the invite tiers is safe — Outlook stores it without resolving
+    // for delivery.
+    let created = c.create_event(CreateEventInput {
+        subject: "outlook-mcp-rs P7 tiers probe".to_string(),
+        start: "2099-01-06T09:00".to_string(),
+        end: "2099-01-06T09:30".to_string(),
+        body: None, location: None,
+        required_attendees: Some(vec!["required-probe@example.com".to_string()]),
+        optional_attendees: Some(vec!["optional-probe@example.com".to_string()]),
+        all_day: false, reminder_minutes: None,
+        categories: Some(vec!["Work".to_string()]),
+        show_as: Some("tentative".to_string()),
+        send: false,
+    }).expect("create_event should succeed");
+    assert_eq!(created["status"], "meeting_saved");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let detail = c.get_event(id).expect("get_event should succeed");
+    assert!(detail.summary.required_attendees.contains("required-probe@example.com"));
+    assert!(detail.summary.optional_attendees.contains("optional-probe@example.com"));
+    assert!(detail.summary.categories.iter().any(|cat| cat == "Work"));
+    assert_eq!(detail.summary.show_as, "tentative");
+    assert!(detail.summary.is_meeting);
+    // Calendar items have no dedicated delete tool yet (Plan 8's delete_event);
+    // delete the probe manually from the calendar after this test runs.
+}
+
+#[test]
+#[ignore]
 fn list_events_filters_by_query_and_category() {
     let c = WindowsOutlookClient::new();
     // A far-future, uniquely-named appointment we can pinpoint and clean up.
