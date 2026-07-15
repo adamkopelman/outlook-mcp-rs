@@ -9,7 +9,7 @@
 //! can't be undone — see TESTING.md for how to test those by hand.
 
 use outlook_mcp_rs::outlook::client::WindowsOutlookClient;
-use outlook_mcp_rs::outlook::{CreateEventInput, EmailQuery, EventQuery, OutlookClient, EmailUpdate, EventUpdate};
+use outlook_mcp_rs::outlook::{CreateEventInput, EmailQuery, EventQuery, OutlookClient, EmailUpdate, EventUpdate, RecurrenceInput};
 
 fn client() -> WindowsOutlookClient {
     WindowsOutlookClient::new()
@@ -405,4 +405,164 @@ fn send_with_missing_attachment_errors_before_sending() {
         Some(vec!["C:/definitely/does/not/exist/nope.pdf".to_string()]),
     ).unwrap_err();
     assert!(err.to_string().contains("attachment not found"));
+}
+
+#[test]
+#[ignore]
+fn create_event_weekly_recurrence_round_trips() {
+    let c = client();
+    let created = c.create_event(CreateEventInput {
+        subject: "outlook-mcp-rs P9 weekly recurrence probe".to_string(),
+        start: "2099-02-02T09:00".to_string(), // a Monday
+        end: "2099-02-02T09:30".to_string(),
+        body: None, location: None, required_attendees: None, optional_attendees: None,
+        all_day: false, reminder_minutes: None, categories: None, show_as: None,
+        send: true,
+        recurrence: Some(RecurrenceInput {
+            pattern: "weekly".to_string(),
+            interval: Some(1),
+            days_of_week: Some(vec!["monday".to_string(), "wednesday".to_string()]),
+            day_of_month: None,
+            until: None,
+            occurrences: Some(10),
+        }),
+    }).expect("create_event with weekly recurrence should succeed");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let detail = c.get_event(id.clone()).expect("get_event should succeed");
+    assert!(detail.summary.is_recurring);
+    let recurrence = detail.recurrence.expect("recurring event should have a recurrence block");
+    assert_eq!(recurrence.pattern, "weekly");
+    assert_eq!(recurrence.interval, 1);
+    assert_eq!(recurrence.days_of_week, vec!["monday".to_string(), "wednesday".to_string()]);
+    assert_eq!(recurrence.occurrences, Some(10));
+    assert!(!recurrence.no_end);
+
+    c.delete_event(id, false).expect("cleanup delete_event");
+}
+
+#[test]
+#[ignore]
+fn create_event_monthly_recurrence_with_until_round_trips() {
+    let c = client();
+    let created = c.create_event(CreateEventInput {
+        subject: "outlook-mcp-rs P9 monthly recurrence probe".to_string(),
+        start: "2099-02-15T09:00".to_string(),
+        end: "2099-02-15T09:30".to_string(),
+        body: None, location: None, required_attendees: None, optional_attendees: None,
+        all_day: false, reminder_minutes: None, categories: None, show_as: None,
+        send: true,
+        recurrence: Some(RecurrenceInput {
+            pattern: "monthly".to_string(),
+            interval: Some(2),
+            days_of_week: None,
+            day_of_month: Some(15),
+            until: Some("2099-12-15".to_string()),
+            occurrences: None,
+        }),
+    }).expect("create_event with monthly recurrence should succeed");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let detail = c.get_event(id.clone()).expect("get_event should succeed");
+    let recurrence = detail.recurrence.expect("recurring event should have a recurrence block");
+    assert_eq!(recurrence.pattern, "monthly");
+    assert_eq!(recurrence.interval, 2);
+    assert_eq!(recurrence.day_of_month, Some(15));
+    assert!(recurrence.until.is_some());
+    assert!(!recurrence.no_end);
+
+    c.delete_event(id, false).expect("cleanup delete_event");
+}
+
+#[test]
+#[ignore]
+fn create_event_yearly_recurrence_with_no_end_round_trips() {
+    let c = client();
+    let created = c.create_event(CreateEventInput {
+        subject: "outlook-mcp-rs P9 yearly recurrence probe".to_string(),
+        start: "2099-03-10T09:00".to_string(),
+        end: "2099-03-10T09:30".to_string(),
+        body: None, location: None, required_attendees: None, optional_attendees: None,
+        all_day: false, reminder_minutes: None, categories: None, show_as: None,
+        send: true,
+        recurrence: Some(RecurrenceInput {
+            pattern: "yearly".to_string(),
+            interval: None,
+            days_of_week: None,
+            day_of_month: None,
+            until: None,
+            occurrences: None,
+        }),
+    }).expect("create_event with yearly recurrence should succeed");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let detail = c.get_event(id.clone()).expect("get_event should succeed");
+    let recurrence = detail.recurrence.expect("recurring event should have a recurrence block");
+    assert_eq!(recurrence.pattern, "yearly");
+    assert_eq!(recurrence.day_of_month, Some(10)); // derived from the March 10 start date
+    assert!(recurrence.no_end);
+    assert!(recurrence.until.is_none());
+    assert!(recurrence.occurrences.is_none());
+
+    c.delete_event(id, false).expect("cleanup delete_event");
+}
+
+#[test]
+#[ignore]
+fn update_event_changes_then_clears_recurrence() {
+    let c = client();
+    let created = c.create_event(CreateEventInput {
+        subject: "outlook-mcp-rs P9 update recurrence probe".to_string(),
+        start: "2099-04-01T09:00".to_string(),
+        end: "2099-04-01T09:30".to_string(),
+        body: None, location: None, required_attendees: None, optional_attendees: None,
+        all_day: false, reminder_minutes: None, categories: None, show_as: None,
+        send: true,
+        recurrence: Some(RecurrenceInput {
+            pattern: "daily".to_string(), interval: Some(1), days_of_week: None,
+            day_of_month: None, until: None, occurrences: Some(3),
+        }),
+    }).expect("create_event should succeed");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Change the pattern from daily to weekly.
+    let updated = c.update_event(EventUpdate {
+        event_id: id.clone(),
+        subject: None, start: None, end: None, location: None, body: None,
+        all_day: None, reminder_minutes: None, show_as: None,
+        add_categories: None, remove_categories: None,
+        add_required_attendees: None, add_optional_attendees: None, remove_attendees: None,
+        send_update: false,
+        recurrence: Some(RecurrenceInput {
+            pattern: "weekly".to_string(), interval: Some(1),
+            days_of_week: Some(vec!["tuesday".to_string()]),
+            day_of_month: None, until: None, occurrences: Some(4),
+        }),
+        clear_recurrence: false,
+    }).expect("update_event with recurrence should succeed");
+    assert!(updated["changed"].as_array().unwrap().iter().any(|v| v == "recurrence"));
+
+    let detail = c.get_event(id.clone()).expect("get_event should succeed");
+    let recurrence = detail.recurrence.expect("still recurring after the change");
+    assert_eq!(recurrence.pattern, "weekly");
+    assert_eq!(recurrence.days_of_week, vec!["tuesday".to_string()]);
+
+    // Now clear it entirely.
+    let cleared = c.update_event(EventUpdate {
+        event_id: id.clone(),
+        subject: None, start: None, end: None, location: None, body: None,
+        all_day: None, reminder_minutes: None, show_as: None,
+        add_categories: None, remove_categories: None,
+        add_required_attendees: None, add_optional_attendees: None, remove_attendees: None,
+        send_update: false,
+        recurrence: None,
+        clear_recurrence: true,
+    }).expect("update_event with clear_recurrence should succeed");
+    assert!(cleared["changed"].as_array().unwrap().iter().any(|v| v == "clear_recurrence"));
+
+    let detail = c.get_event(id.clone()).expect("get_event should succeed");
+    assert!(!detail.summary.is_recurring);
+    assert!(detail.recurrence.is_none());
+
+    c.delete_event(id, false).expect("cleanup delete_event");
 }
