@@ -6,7 +6,7 @@ use outlook_mcp_rs::server::{
     DeleteEmailParams, GetEmailParams, GetEventParams, GetNoteParams, ListAttachmentsParams,
     ListEmailsParams, ListEventsParams, ListTasksParams, OutlookMcpServer,
     ReplyEmailParams, RespondToMeetingParams, SaveAttachmentsParams,
-    SendEmailParams, UpdateEmailParams,
+    SendEmailParams, UpdateEmailParams, UpdateEventParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -398,6 +398,58 @@ async fn respond_to_meeting_defaults_send_true() {
     let (_, args) = &fake.calls()[0];
     assert_eq!(args["response"], "accept");
     assert_eq!(args["send"], true);
+}
+
+#[tokio::test]
+async fn update_event_lists_changed_fields() {
+    use outlook_mcp_rs::outlook::fake::EVENT_ID;
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let result = server
+        .update_event(Parameters(UpdateEventParams {
+            event_id: EVENT_ID.to_string(),
+            subject: Some("Renamed sync".to_string()),
+            start: None, end: None, location: None, body: None, all_day: None,
+            reminder_minutes: None, show_as: Some("tentative".to_string()),
+            add_categories: Some(vec!["Work".to_string()]),
+            remove_categories: None,
+            add_required_attendees: Some(vec!["a@example.com".to_string()]),
+            add_optional_attendees: None, remove_attendees: None,
+            send_update: true,
+        }))
+        .await
+        .unwrap();
+    let v = result_json(&result);
+    assert_eq!(v["status"], "updated");
+    assert_eq!(v["id"], EVENT_ID);
+    assert_eq!(
+        v["changed"],
+        json!(["subject", "show_as", "add_categories", "add_required_attendees"])
+    );
+    let (name, args) = fake.calls().pop().unwrap();
+    assert_eq!(name, "update_event");
+    assert_eq!(args["send_update"], true);
+}
+
+#[tokio::test]
+async fn update_event_remove_attendees_is_tracked() {
+    use outlook_mcp_rs::outlook::fake::EVENT_ID;
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let result = server
+        .update_event(Parameters(UpdateEventParams {
+            event_id: EVENT_ID.to_string(),
+            subject: None, start: None, end: None, location: None, body: None,
+            all_day: None, reminder_minutes: None, show_as: None,
+            add_categories: None, remove_categories: None,
+            add_required_attendees: None, add_optional_attendees: None,
+            remove_attendees: Some(vec!["a@example.com".to_string()]),
+            send_update: false,
+        }))
+        .await
+        .unwrap();
+    let v = result_json(&result);
+    assert_eq!(v["changed"], json!(["remove_attendees"]));
 }
 
 #[tokio::test]

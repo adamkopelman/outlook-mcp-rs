@@ -22,7 +22,8 @@ use crate::outlook::com::{
 };
 use crate::outlook::types::*;
 use crate::outlook::{
-    create_event_status, CreateEventInput, EmailQuery, EmailUpdate, EventQuery, OutlookClient,
+    create_event_status, CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate,
+    OutlookClient,
 };
 
 /// Matches `MAX_EMAIL_COUNT` in `client.py`.
@@ -1051,6 +1052,11 @@ impl OutlookClient for WindowsOutlookClient {
             let status = format!("{response_key}{}", if send { "_sent" } else { "_saved" });
             Ok(json!({"status": status, "subject": subject}))
         })
+    }
+
+    fn update_event(&self, _u: EventUpdate) -> Result<Value, ToolError> {
+        // Real COM implementation added in Plan 8 Tasks 2-3.
+        todo!("update_event real COM impl — Plan 8 Tasks 2-3")
     }
 
     // ---- Attachments (Task 14) -----------------------------------------

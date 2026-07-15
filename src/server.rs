@@ -9,7 +9,7 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::error::ToolError;
-use crate::outlook::{CreateEventInput, EmailQuery, EmailUpdate, EventQuery, OutlookClient};
+use crate::outlook::{CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient};
 
 /// Runs a blocking `OutlookClient` call on a dedicated blocking thread so the
 /// tokio scheduler never migrates it mid-call (COM apartment-threading
@@ -231,6 +231,46 @@ pub struct RespondToMeetingParams {
     pub send: bool,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateEventParams {
+    pub event_id: String,
+    #[serde(default)]
+    pub subject: Option<String>,
+    #[serde(default)]
+    pub start: Option<String>,
+    #[serde(default)]
+    pub end: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub all_day: Option<bool>,
+    #[serde(default)]
+    pub reminder_minutes: Option<i32>,
+    /// "free" | "tentative" | "busy" | "out_of_office" | "working_elsewhere".
+    #[serde(default)]
+    pub show_as: Option<String>,
+    /// Category names to add (existing categories are preserved).
+    #[serde(default)]
+    pub add_categories: Option<Vec<String>>,
+    /// Category names to remove.
+    #[serde(default)]
+    pub remove_categories: Option<Vec<String>>,
+    /// Adding either attendee list converts a personal appointment into a meeting.
+    #[serde(default)]
+    pub add_required_attendees: Option<Vec<String>>,
+    #[serde(default)]
+    pub add_optional_attendees: Option<Vec<String>>,
+    /// Names/emails to remove from either attendee tier.
+    #[serde(default)]
+    pub remove_attendees: Option<Vec<String>>,
+    /// If the event is a meeting, notify attendees of these changes (default true).
+    /// false = apply quietly to your own copy only. Ignored for non-meetings.
+    #[serde(default = "default_true")]
+    pub send_update: bool,
+}
+
 // ---- Attachments ----
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -431,6 +471,25 @@ impl OutlookMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
         let result = run_blocking(move || client.respond_to_meeting(event_id, response, comment, send)).await?;
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    #[tool(description = "Update an existing calendar event: subject, start/end, location, body, show_as, add/remove categories, add/remove attendees, reminder, all_day. Adding an attendee converts a personal appointment into a meeting. send_update (default true) notifies attendees if the event is a meeting.")]
+    pub async fn update_event(
+        &self,
+        Parameters(p): Parameters<UpdateEventParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.clone();
+        let u = EventUpdate {
+            event_id: p.event_id, subject: p.subject, start: p.start, end: p.end,
+            location: p.location, body: p.body, all_day: p.all_day,
+            reminder_minutes: p.reminder_minutes, show_as: p.show_as,
+            add_categories: p.add_categories, remove_categories: p.remove_categories,
+            add_required_attendees: p.add_required_attendees,
+            add_optional_attendees: p.add_optional_attendees,
+            remove_attendees: p.remove_attendees, send_update: p.send_update,
+        };
+        let result = run_blocking(move || client.update_event(u)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 

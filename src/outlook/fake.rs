@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use crate::error::ToolError;
 use super::types::*;
-use super::{CreateEventInput, EmailQuery, EmailUpdate, EventQuery, OutlookClient};
+use super::{CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient};
 
 pub const EMAIL_ID: &str = "entry-1|store-1";
 pub const EVENT_ID: &str = "entry-2|store-1";
@@ -188,6 +188,33 @@ impl OutlookClient for FakeOutlookClient {
         self.record("respond_to_meeting",
             json!({"event_id": event_id, "response": response, "comment": comment, "send": send}))?;
         Ok(json!({"status": format!("{response}_sent")}))
+    }
+
+    fn update_event(&self, u: EventUpdate) -> Result<Value, ToolError> {
+        self.record("update_event", json!({
+            "event_id": u.event_id, "subject": u.subject, "start": u.start, "end": u.end,
+            "location": u.location, "body": u.body, "all_day": u.all_day,
+            "reminder_minutes": u.reminder_minutes, "show_as": u.show_as,
+            "add_categories": u.add_categories, "remove_categories": u.remove_categories,
+            "add_required_attendees": u.add_required_attendees,
+            "add_optional_attendees": u.add_optional_attendees,
+            "remove_attendees": u.remove_attendees, "send_update": u.send_update,
+        }))?;
+        let mut changed: Vec<&str> = Vec::new();
+        if u.subject.is_some() { changed.push("subject"); }
+        if u.start.is_some() { changed.push("start"); }
+        if u.end.is_some() { changed.push("end"); }
+        if u.location.is_some() { changed.push("location"); }
+        if u.body.is_some() { changed.push("body"); }
+        if u.all_day.is_some() { changed.push("all_day"); }
+        if u.reminder_minutes.is_some() { changed.push("reminder_minutes"); }
+        if u.show_as.is_some() { changed.push("show_as"); }
+        if u.add_categories.is_some() { changed.push("add_categories"); }
+        if u.remove_categories.is_some() { changed.push("remove_categories"); }
+        if u.add_required_attendees.is_some() { changed.push("add_required_attendees"); }
+        if u.add_optional_attendees.is_some() { changed.push("add_optional_attendees"); }
+        if u.remove_attendees.is_some() { changed.push("remove_attendees"); }
+        Ok(json!({"status": "updated", "id": u.event_id, "changed": changed}))
     }
 
     fn list_attachments(&self, email_id: String)

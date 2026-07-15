@@ -81,6 +81,34 @@ pub struct CreateEventInput {
     pub send: bool,
 }
 
+/// All changes `update_event` can apply to one existing calendar event. Every
+/// field except `event_id` is optional; supplying several applies all of
+/// them. There is no `move_to` — events don't change folders in this API —
+/// so, unlike `EmailUpdate`, field application order is cosmetic, not a
+/// correctness constraint. Adding either attendee tier converts a personal
+/// appointment into a meeting. `send_update` (no default here — the tool
+/// layer defaults it to `true`) controls whether a meeting's edits are
+/// delivered to attendees or applied quietly to your own copy only; a
+/// personal (non-meeting) appointment always just saves, regardless.
+#[derive(Debug, Clone)]
+pub struct EventUpdate {
+    pub event_id: String,
+    pub subject: Option<String>,
+    pub start: Option<String>,
+    pub end: Option<String>,
+    pub location: Option<String>,
+    pub body: Option<String>,
+    pub all_day: Option<bool>,
+    pub reminder_minutes: Option<i32>,
+    pub show_as: Option<String>,
+    pub add_categories: Option<Vec<String>>,
+    pub remove_categories: Option<Vec<String>>,
+    pub add_required_attendees: Option<Vec<String>>,
+    pub add_optional_attendees: Option<Vec<String>>,
+    pub remove_attendees: Option<Vec<String>>,
+    pub send_update: bool,
+}
+
 pub trait OutlookClient: Send + Sync {
     fn list_folders(&self) -> Result<Vec<FolderInfo>, ToolError>;
     fn list_emails(&self, q: EmailQuery) -> Result<Vec<EmailSummary>, ToolError>;
@@ -103,6 +131,7 @@ pub trait OutlookClient: Send + Sync {
     fn create_event(&self, input: CreateEventInput) -> Result<Value, ToolError>;
     fn respond_to_meeting(&self, event_id: String, response: String,
         comment: Option<String>, send: bool) -> Result<Value, ToolError>;
+    fn update_event(&self, u: EventUpdate) -> Result<Value, ToolError>;
 
     fn list_attachments(&self, email_id: String)
         -> Result<Vec<AttachmentInfo>, ToolError>;
