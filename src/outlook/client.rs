@@ -1054,9 +1054,73 @@ impl OutlookClient for WindowsOutlookClient {
         })
     }
 
-    fn update_event(&self, _u: EventUpdate) -> Result<Value, ToolError> {
-        // Real COM implementation added in Plan 8 Tasks 2-3.
-        todo!("update_event real COM impl — Plan 8 Tasks 2-3")
+    fn update_event(&self, u: EventUpdate) -> Result<Value, ToolError> {
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let item = get_item(&ns, &u.event_id)?;
+            let mut changed: Vec<&str> = Vec::new();
+
+            if let Some(subject) = &u.subject {
+                put_property(&item, "Subject", variant_from_str(subject))?;
+                changed.push("subject");
+            }
+            if let Some(start) = &u.start {
+                put_property(&item, "Start", variant_from_datetime(&parse_dt(start, "start")?)?)?;
+                changed.push("start");
+            }
+            if let Some(end) = &u.end {
+                put_property(&item, "End", variant_from_datetime(&parse_dt(end, "end")?)?)?;
+                changed.push("end");
+            }
+            if let Some(location) = &u.location {
+                put_property(&item, "Location", variant_from_str(location))?;
+                changed.push("location");
+            }
+            if let Some(body) = &u.body {
+                put_property(&item, "Body", variant_from_str(body))?;
+                changed.push("body");
+            }
+            if let Some(all_day) = u.all_day {
+                put_property(&item, "AllDayEvent", variant_from_bool(all_day))?;
+                changed.push("all_day");
+            }
+            if let Some(minutes) = u.reminder_minutes {
+                put_property(&item, "ReminderSet", variant_from_bool(true))?;
+                put_property(&item, "ReminderMinutesBeforeStart", variant_from_i32(minutes))?;
+                changed.push("reminder_minutes");
+            }
+            if let Some(show_as) = u.show_as.as_deref().filter(|s| !s.is_empty()) {
+                let busy_status = crate::friendly::busy_status_to_id(show_as).ok_or_else(|| {
+                    ToolError::new(format!(
+                        "invalid show_as {show_as:?}: expected \"free\", \"tentative\", \"busy\", \"out_of_office\", or \"working_elsewhere\""
+                    ))
+                })?;
+                put_property(&item, "BusyStatus", variant_from_i32(busy_status))?;
+                changed.push("show_as");
+            }
+            if u.add_categories.is_some() || u.remove_categories.is_some() {
+                let mut cats = get_item_categories(&item);
+                if let Some(add) = &u.add_categories {
+                    for a in add {
+                        if !cats.iter().any(|c| c.eq_ignore_ascii_case(a)) {
+                            cats.push(a.clone());
+                        }
+                    }
+                    changed.push("add_categories");
+                }
+                if let Some(remove) = &u.remove_categories {
+                    cats.retain(|c| !remove.iter().any(|r| r.eq_ignore_ascii_case(c)));
+                    changed.push("remove_categories");
+                }
+                set_item_categories(&item, &cats)?;
+            }
+
+            // Attendee add/remove and the Save-vs-Send decision land in Task 3.
+            // Interim: always just Save (matches pre-attendee-support behavior).
+            call_method(&item, "Save", &mut [])?;
+
+            Ok(json!({"status": "updated", "id": u.event_id, "changed": changed}))
+        })
     }
 
     // ---- Attachments (Task 14) -----------------------------------------
