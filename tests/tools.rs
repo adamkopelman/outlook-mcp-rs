@@ -436,7 +436,10 @@ async fn check_availability_forwards_params() {
     let (name, args) = &fake.calls()[0];
     assert_eq!(name, "check_availability");
     assert_eq!(args["people"], json!(["alice@example.com", "bob@example.com"]));
+    assert_eq!(args["start"], "2099-01-01T09:00");
+    assert_eq!(args["end"], "2099-01-01T17:00");
     assert_eq!(args["interval_minutes"], 30);
+    assert_eq!(args["treat_as_free"], json!(["free"]));
 }
 
 #[tokio::test]

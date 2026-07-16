@@ -1423,6 +1423,12 @@ impl OutlookClient for WindowsOutlookClient {
             let (_app, ns) = mapi()?;
             let start = parse_dt(&input.start, "start")?;
             let end = parse_dt(&input.end, "end")?;
+            if end <= start {
+                return Err(ToolError::new(format!(
+                    "check_availability: end ({}) must be after start ({})",
+                    input.end, input.start
+                )));
+            }
             let interval = input.interval_minutes.max(1);
             // FreeBusy has no "end" parameter — it returns a string covering a
             // fixed range from `start`. Compute how many of its slots fall

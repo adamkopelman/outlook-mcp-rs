@@ -582,8 +582,15 @@ fn check_availability_against_own_mailbox_returns_free_slots() {
     // the developer's own mailbox where possible; the cross-user sharing
     // path (someone else's calendar) depends on another account having
     // granted access, which can't be set up from a test — see TESTING.md.
-    let ns_person = std::env::var("OUTLOOK_TEST_SELF_EMAIL")
-        .unwrap_or_else(|_| "adamkopelman@outlook.com".to_string());
+    // Set OUTLOOK_MCP_TEST_EMAIL to your SMTP address to run this (same
+    // convention as list_events_calendar_of_self_opens_own_calendar above).
+    let ns_person = match std::env::var("OUTLOOK_MCP_TEST_EMAIL") {
+        Ok(v) if !v.is_empty() => v,
+        _ => {
+            eprintln!("skipping: set OUTLOOK_MCP_TEST_EMAIL to your address");
+            return;
+        }
+    };
     let result = c.check_availability(CheckAvailabilityInput {
         people: vec![ns_person.clone()],
         start: "2099-07-01T09:00".to_string(),
