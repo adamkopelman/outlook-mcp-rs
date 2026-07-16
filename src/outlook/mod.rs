@@ -45,7 +45,12 @@ pub struct EmailUpdate {
 /// `mark_complete: Some(true)` replaces the retired standalone
 /// `complete_task` tool (`= update_task` with `mark_complete: true`);
 /// `Some(false)` reopens a completed task, filling the "can't reopen" gap
-/// the old `complete_task` had no way to close.
+/// the old `complete_task` had no way to close. `mark_complete` is applied
+/// *last*, after every other field write (`MarkComplete()`/reopen both set
+/// `PercentComplete` themselves) — so combining `percent_complete` with
+/// `mark_complete: Some(false)` in one call silently resets
+/// `percent_complete` to 0 regardless of the value supplied; set it in a
+/// separate call afterward if a specific non-zero value should stick.
 #[derive(Debug, Clone, Default)]
 pub struct TaskUpdate {
     pub task_id: String,
