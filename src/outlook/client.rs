@@ -1908,6 +1908,15 @@ impl OutlookClient for WindowsOutlookClient {
             Ok(json!({"status": "updated", "id": u.note_id, "changed": changed}))
         })
     }
+
+    fn delete_note(&self, note_id: String) -> Result<Value, ToolError> {
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let item = get_item(&ns, &note_id)?;
+            call_method(&item, "Delete", &mut [])?;
+            Ok(json!({"status": "deleted", "note": "Moved to Deleted Items."}))
+        })
+    }
 }
 
 #[cfg(test)]

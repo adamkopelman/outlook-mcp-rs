@@ -231,6 +231,7 @@ pub trait OutlookClient: Send + Sync {
     fn get_note(&self, note_id: String) -> Result<NoteDetail, ToolError>;
     fn create_note(&self, body: String, categories: Option<Vec<String>>, color: Option<String>) -> Result<Value, ToolError>;
     fn update_note(&self, u: NoteUpdate) -> Result<Value, ToolError>;
+    fn delete_note(&self, note_id: String) -> Result<Value, ToolError>;
 }
 
 /// The status string `create_event` returns: `"meeting_sent"` (attendees +

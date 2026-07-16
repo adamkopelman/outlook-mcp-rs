@@ -452,6 +452,11 @@ pub struct UpdateNoteParams {
     pub color: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteNoteParams {
+    pub note_id: String,
+}
+
 #[tool_router]
 impl OutlookMcpServer {
     #[tool(description = "List Outlook mail folders (name, path, item counts).")]
@@ -776,6 +781,16 @@ impl OutlookMcpServer {
             remove_categories: p.remove_categories, color: p.color,
         };
         let result = run_blocking(move || client.update_note(u)).await?;
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    #[tool(description = "Delete a note (moves it to Deleted Items).")]
+    pub async fn delete_note(
+        &self,
+        Parameters(DeleteNoteParams { note_id }): Parameters<DeleteNoteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.clone();
+        let result = run_blocking(move || client.delete_note(note_id)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 }

@@ -356,6 +356,11 @@ impl OutlookClient for FakeOutlookClient {
         if u.color.is_some() { changed.push("color"); }
         Ok(json!({"status": "updated", "id": u.note_id, "changed": changed}))
     }
+
+    fn delete_note(&self, note_id: String) -> Result<Value, ToolError> {
+        self.record("delete_note", json!({"note_id": note_id}))?;
+        Ok(json!({"status": "deleted", "note": "Moved to Deleted Items."}))
+    }
 }
 
 #[cfg(test)]

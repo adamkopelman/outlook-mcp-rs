@@ -3,7 +3,7 @@ use std::sync::Arc;
 use outlook_mcp_rs::outlook::fake::{FakeOutlookClient, EMAIL_ID};
 use outlook_mcp_rs::server::{
     CheckAvailabilityParams, CreateDraftParams, CreateEventParams, CreateNoteParams, CreateTaskParams,
-    DeleteEmailParams, DeleteEventParams, DeleteTaskParams, GetEmailParams, GetEventParams, GetNoteParams, ListAttachmentsParams,
+    DeleteEmailParams, DeleteEventParams, DeleteNoteParams, DeleteTaskParams, GetEmailParams, GetEventParams, GetNoteParams, ListAttachmentsParams,
     ListEmailsParams, ListEventsParams, ListNotesParams, ListTasksParams, OutlookMcpServer,
     RecurrenceParams, ReplyEmailParams, RespondToMeetingParams, SaveAttachmentsParams,
     SendEmailParams, UpdateEmailParams, UpdateEventParams, UpdateNoteParams, UpdateTaskParams,
@@ -952,4 +952,20 @@ async fn update_note_manages_categories() {
         .unwrap();
     let v = result_json(&result);
     assert!(v["changed"].as_array().unwrap().iter().any(|c| c == "add_categories"));
+}
+
+#[tokio::test]
+async fn delete_note_records_call() {
+    use outlook_mcp_rs::outlook::fake::NOTE_ID;
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let result = server
+        .delete_note(Parameters(DeleteNoteParams { note_id: NOTE_ID.to_string() }))
+        .await
+        .unwrap();
+    let json = result_json(&result);
+    assert_eq!(json["status"], "deleted");
+    let (name, args) = &fake.calls()[0];
+    assert_eq!(name, "delete_note");
+    assert_eq!(args["note_id"], NOTE_ID);
 }
