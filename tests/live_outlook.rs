@@ -65,8 +65,7 @@ fn create_task_update_task_marks_complete() {
     let tasks = c.list_tasks(TaskQuery { include_completed: true, ..Default::default() })
         .expect("list_tasks should succeed");
     assert!(tasks.iter().any(|t| t.id == id && t.complete));
-    // Outlook has no direct "delete task" in our trait yet — deleting the
-    // completed test task manually is fine (it's clearly labeled).
+    c.delete_task(id).expect("cleanup delete_task");
 }
 
 #[test]
@@ -633,4 +632,76 @@ fn check_availability_marks_unresolvable_person_without_failing() {
     assert!(!result.people[0].resolved);
     assert!(result.people[0].slots.is_empty());
     assert!(result.common_free.is_empty());
+}
+
+#[test]
+#[ignore]
+fn list_tasks_filters_and_create_task_additions_round_trip() {
+    let c = client();
+    let created = c.create_task(
+        "[outlook-mcp-rs P11 live] filtered task".to_string(),
+        None,
+        None,
+        "high".to_string(),
+        Some(vec!["Red Category".to_string()]),
+        Some("2099-01-01".to_string()),
+        Some("2099-01-01T09:00".to_string()),
+    ).expect("create_task with additions should succeed");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let found = c.list_tasks(TaskQuery {
+        include_completed: false,
+        category: Some("Red Category".to_string()),
+        importance: Some("high".to_string()),
+        query: Some("filtered task".to_string()),
+    }).expect("list_tasks should succeed");
+    assert!(found.iter().any(|t| t.id == id), "filtered list_tasks should find the new task");
+
+    c.delete_task(id).expect("cleanup delete_task");
+}
+
+#[test]
+#[ignore]
+fn update_task_marks_complete_then_reopens() {
+    let c = client();
+    let created = c.create_task(
+        "[outlook-mcp-rs P11 live] update probe".to_string(),
+        None, None, "normal".to_string(), None, None, None,
+    ).expect("create_task should succeed");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let updated = c.update_task(TaskUpdate {
+        task_id: id.clone(),
+        mark_complete: Some(true),
+        ..Default::default()
+    }).expect("update_task mark_complete should succeed");
+    assert!(updated["changed"].as_array().unwrap().iter().any(|v| v == "mark_complete"));
+
+    let after_complete = c.list_tasks(TaskQuery { include_completed: true, ..Default::default() })
+        .expect("list_tasks should succeed");
+    let task = after_complete.iter().find(|t| t.id == id).expect("task should still exist");
+    assert!(task.complete);
+
+    let reopened = c.update_task(TaskUpdate {
+        task_id: id.clone(),
+        mark_complete: Some(false),
+        ..Default::default()
+    }).expect("update_task reopen should succeed");
+    assert!(reopened["changed"].as_array().unwrap().iter().any(|v| v == "mark_complete"));
+
+    c.delete_task(id).expect("cleanup delete_task");
+}
+
+#[test]
+#[ignore]
+fn delete_task_removes_it() {
+    let c = client();
+    let created = c.create_task(
+        "[outlook-mcp-rs P11 live] delete probe".to_string(),
+        None, None, "normal".to_string(), None, None, None,
+    ).expect("create_task should succeed");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let deleted = c.delete_task(id).expect("delete_task should succeed");
+    assert_eq!(deleted["status"], "deleted");
 }

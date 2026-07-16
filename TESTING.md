@@ -75,6 +75,13 @@ calendar; to verify cross-user sharing works, call `list_events` with a
 colleague's email address in `calendar_of` (one who has shared their
 calendar with you) and confirm it returns their events without error.
 
+`list_tasks` filters (`category`, `importance`, `query`, `include_completed`),
+`create_task`'s additions (`categories`, `start_date`, `reminder_time`), and
+`update_task`/`delete_task` (which retired the standalone `complete_task`
+tool — `mark_complete: true`/`false` on `update_task` now covers completing
+*and* reopening a task) are covered by the live suite:
+`cargo test --test live_outlook -- --ignored list_tasks_filters_and_create_task_additions_round_trip update_task_marks_complete_then_reopens delete_task_removes_it`.
+
 `check_availability`'s single-mailbox path (resolving your own address and
 reading its free/busy slots, plus the graceful-failure path for an address
 that can't provide free/busy data) is covered by the live suite:
