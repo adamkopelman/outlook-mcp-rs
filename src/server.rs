@@ -9,7 +9,7 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::error::ToolError;
-use crate::outlook::{CheckAvailabilityInput, CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient, RecurrenceInput, TaskQuery, TaskUpdate};
+use crate::outlook::{CheckAvailabilityInput, CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, NoteQuery, OutlookClient, RecurrenceInput, TaskQuery, TaskUpdate};
 
 /// Runs a blocking `OutlookClient` call on a dedicated blocking thread so the
 /// tokio scheduler never migrates it mid-call (COM apartment-threading
@@ -413,6 +413,16 @@ pub struct DeleteTaskParams {
 // ---- Notes ----
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListNotesParams {
+    /// Filter to a color category.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Text match on the note's body.
+    #[serde(default)]
+    pub query: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetNoteParams {
     pub note_id: String,
 }
@@ -704,10 +714,14 @@ impl OutlookMcpServer {
 
     // ---- Notes ----
 
-    #[tool(description = "List Outlook notes.")]
-    pub async fn list_notes(&self) -> Result<CallToolResult, McpError> {
+    #[tool(description = "List Outlook notes. Filter by category or a text query matching the note's body.")]
+    pub async fn list_notes(
+        &self,
+        Parameters(ListNotesParams { category, query }): Parameters<ListNotesParams>,
+    ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let result = run_blocking(move || client.list_notes()).await?;
+        let q = NoteQuery { category, query };
+        let result = run_blocking(move || client.list_notes(q)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 

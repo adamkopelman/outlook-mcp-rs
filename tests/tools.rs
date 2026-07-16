@@ -4,7 +4,7 @@ use outlook_mcp_rs::outlook::fake::{FakeOutlookClient, EMAIL_ID};
 use outlook_mcp_rs::server::{
     CheckAvailabilityParams, CreateDraftParams, CreateEventParams, CreateNoteParams, CreateTaskParams,
     DeleteEmailParams, DeleteEventParams, DeleteTaskParams, GetEmailParams, GetEventParams, GetNoteParams, ListAttachmentsParams,
-    ListEmailsParams, ListEventsParams, ListTasksParams, OutlookMcpServer,
+    ListEmailsParams, ListEventsParams, ListNotesParams, ListTasksParams, OutlookMcpServer,
     RecurrenceParams, ReplyEmailParams, RespondToMeetingParams, SaveAttachmentsParams,
     SendEmailParams, UpdateEmailParams, UpdateEventParams, UpdateTaskParams,
 };
@@ -827,8 +827,36 @@ async fn delete_task_records_call() {
 async fn list_notes_records_call() {
     let fake = Arc::new(FakeOutlookClient::new());
     let server = OutlookMcpServer::new(fake.clone());
-    server.list_notes().await.unwrap();
-    assert_eq!(fake.calls(), vec![("list_notes".to_string(), json!({}))]);
+    server.list_notes(Parameters(ListNotesParams { category: None, query: None })).await.unwrap();
+    assert_eq!(fake.calls(), vec![("list_notes".to_string(), json!({"category": null, "query": null}))]);
+}
+
+#[tokio::test]
+async fn list_notes_forwards_filters() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    server
+        .list_notes(Parameters(ListNotesParams {
+            category: Some("Green Category".to_string()),
+            query: Some("renew".to_string()),
+        }))
+        .await
+        .unwrap();
+    let (name, args) = &fake.calls()[0];
+    assert_eq!(name, "list_notes");
+    assert_eq!(args["category"], "Green Category");
+    assert_eq!(args["query"], "renew");
+}
+
+#[tokio::test]
+async fn list_notes_defaults_filters_to_none() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let params: ListNotesParams = serde_json::from_value(json!({})).unwrap();
+    server.list_notes(Parameters(params)).await.unwrap();
+    let (_, args) = &fake.calls()[0];
+    assert!(args["category"].is_null());
+    assert!(args["query"].is_null());
 }
 
 #[tokio::test]

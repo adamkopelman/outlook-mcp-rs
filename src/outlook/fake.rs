@@ -6,7 +6,7 @@ use crate::error::ToolError;
 use super::types::*;
 use super::{
     validate_recurrence_update, CheckAvailabilityInput, CreateEventInput, EmailQuery, EmailUpdate,
-    EventQuery, EventUpdate, OutlookClient, TaskQuery, TaskUpdate,
+    EventQuery, EventUpdate, NoteQuery, OutlookClient, TaskQuery, TaskUpdate,
 };
 
 pub const EMAIL_ID: &str = "entry-1|store-1";
@@ -325,8 +325,8 @@ impl OutlookClient for FakeOutlookClient {
         Ok(json!({"status": "deleted", "note": "Moved to Deleted Items."}))
     }
 
-    fn list_notes(&self) -> Result<Vec<NoteSummary>, ToolError> {
-        self.record("list_notes", json!({}))?;
+    fn list_notes(&self, q: NoteQuery) -> Result<Vec<NoteSummary>, ToolError> {
+        self.record("list_notes", json!({"category": q.category, "query": q.query}))?;
         Ok(vec![NoteSummary { id: NOTE_ID.into(), subject: "Ideas".into(), created: None, categories: vec![] }])
     }
 

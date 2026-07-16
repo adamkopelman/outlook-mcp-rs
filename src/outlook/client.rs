@@ -25,7 +25,7 @@ use chrono::Datelike;
 use crate::outlook::{
     com_recurrence_interval, common_free, create_event_status, friendly_recurrence_interval,
     parse_freebusy_slots, validate_recurrence, validate_recurrence_update, CheckAvailabilityInput,
-    CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient,
+    CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, NoteQuery, OutlookClient,
     RecurrenceInput, TaskQuery, TaskUpdate,
 };
 
@@ -473,6 +473,25 @@ fn task_matches(summary: &TaskSummary, q: &TaskQuery) -> bool {
     }
     if let Some(imp) = q.importance.as_deref().filter(|s| !s.is_empty()) {
         if !summary.importance.eq_ignore_ascii_case(imp) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Client-side filter for `list_notes`'s `category`/`query`. `body` is the
+/// note's real, untruncated body text (read once per item by the caller —
+/// see `list_notes` below) — unlike `task_matches`, this genuinely searches
+/// content, since a note's body IS its content.
+fn note_matches(body: &str, summary: &NoteSummary, q: &NoteQuery) -> bool {
+    if let Some(query) = q.query.as_deref().filter(|s| !s.is_empty()) {
+        if !body.to_lowercase().contains(&query.to_lowercase()) {
+            return false;
+        }
+    }
+    if let Some(cat) = q.category.as_deref().filter(|s| !s.is_empty()) {
+        let want = cat.to_lowercase();
+        if !summary.categories.iter().any(|c| c.to_lowercase() == want) {
             return false;
         }
     }
@@ -1776,7 +1795,7 @@ impl OutlookClient for WindowsOutlookClient {
 
     // ---- Notes (Task 16) -----------------------------------------------
 
-    fn list_notes(&self) -> Result<Vec<NoteSummary>, ToolError> {
+    fn list_notes(&self, q: NoteQuery) -> Result<Vec<NoteSummary>, ToolError> {
         self.with_com(|| {
             let (_app, ns) = mapi()?;
             let notes = to_disp(call_method(
@@ -1789,7 +1808,16 @@ impl OutlookClient for WindowsOutlookClient {
             let mut results = Vec::new();
             for i in 1..=count {
                 let item = to_disp(call_method(&items, "Item", &mut [variant_from_i32(i)])?)?;
-                results.push(note_summary(&item)?);
+                let summary = note_summary(&item)?;
+                // Read the real body directly for query matching — `note_summary`
+                // only exposes the derived (120-char-truncated) subject, not the
+                // full body, so this is a second, deliberate property read (same
+                // pattern `get_note` already uses: it re-reads `Body` outside
+                // `note_summary` too, for its own untruncated-body purpose).
+                let body = variant_to_string(&get_property(&item, "Body").unwrap_or_default());
+                if note_matches(&body, &summary, &q) {
+                    results.push(summary);
+                }
             }
             Ok(results)
         })

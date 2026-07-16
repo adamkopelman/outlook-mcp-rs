@@ -99,6 +99,16 @@ pub struct TaskQuery {
     pub query: Option<String>, // text match on subject (TaskSummary has no body field to match)
 }
 
+/// All filters for `list_notes`. Both fields optional; supplying both ANDs
+/// them. Unlike `TaskQuery`'s `query` (subject-only, since tasks have a
+/// separate subject), a note's *only* content is its body — `note_matches`
+/// reads the real body text to match `query`, not just the derived subject.
+#[derive(Debug, Clone, Default)]
+pub struct NoteQuery {
+    pub category: Option<String>,
+    pub query: Option<String>,
+}
+
 /// All inputs for `create_event`. `required_attendees`/`optional_attendees`
 /// are the two invite tiers Outlook shows a meeting organizer; any attendee
 /// in either tier makes the item a meeting. `send` (default true in the
@@ -206,7 +216,7 @@ pub trait OutlookClient: Send + Sync {
     fn update_task(&self, u: TaskUpdate) -> Result<Value, ToolError>;
     fn delete_task(&self, task_id: String) -> Result<Value, ToolError>;
 
-    fn list_notes(&self) -> Result<Vec<NoteSummary>, ToolError>;
+    fn list_notes(&self, q: NoteQuery) -> Result<Vec<NoteSummary>, ToolError>;
     fn get_note(&self, note_id: String) -> Result<NoteDetail, ToolError>;
     fn create_note(&self, body: String) -> Result<Value, ToolError>;
 }
