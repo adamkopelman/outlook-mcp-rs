@@ -550,6 +550,30 @@ async fn update_event_forwards_clear_recurrence() {
 }
 
 #[tokio::test]
+async fn update_event_rejects_recurrence_and_clear_recurrence_together() {
+    use outlook_mcp_rs::outlook::fake::EVENT_ID;
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let err = server
+        .update_event(Parameters(UpdateEventParams {
+            event_id: EVENT_ID.to_string(),
+            subject: None, start: None, end: None, location: None, body: None,
+            all_day: None, reminder_minutes: None, show_as: None,
+            add_categories: None, remove_categories: None,
+            add_required_attendees: None, add_optional_attendees: None, remove_attendees: None,
+            send_update: false,
+            recurrence: Some(RecurrenceParams {
+                pattern: "daily".to_string(), interval: None, days_of_week: None,
+                day_of_month: None, until: None, occurrences: None,
+            }),
+            clear_recurrence: true,
+        }))
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("cannot set recurrence and clear_recurrence"));
+}
+
+#[tokio::test]
 async fn delete_event_returns_deleted_status() {
     use outlook_mcp_rs::outlook::fake::EVENT_ID;
     let fake = Arc::new(FakeOutlookClient::new());

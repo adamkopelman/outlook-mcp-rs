@@ -227,6 +227,19 @@ pub fn com_recurrence_interval(r: &RecurrenceInput) -> i32 {
     }
 }
 
+/// Rejects an `EventUpdate` that sets both `recurrence` and `clear_recurrence`
+/// — Outlook has no single COM call that means "replace recurrence and clear
+/// it," so exactly one (or neither) must be set. Called by both
+/// `update_event` implementors before any other update logic runs.
+pub fn validate_recurrence_update(u: &EventUpdate) -> Result<(), ToolError> {
+    if u.recurrence.is_some() && u.clear_recurrence {
+        return Err(ToolError::new(
+            "cannot set recurrence and clear_recurrence in the same update_event call",
+        ));
+    }
+    Ok(())
+}
+
 /// Inverse of [`com_recurrence_interval`]: converts a COM `Interval` value
 /// read back from `RecurrencePattern` into the user-facing "every N
 /// years/months/..." value. Only `olRecursYearly` (`OL_RECURS_YEARLY`) needs
@@ -244,7 +257,7 @@ pub fn friendly_recurrence_interval(recurrence_type: i32, com_interval: i32) -> 
 mod tests {
     use super::{
         com_recurrence_interval, create_event_status, friendly_recurrence_interval,
-        validate_recurrence, RecurrenceInput,
+        validate_recurrence, validate_recurrence_update, EventUpdate, RecurrenceInput,
     };
 
     #[test]
@@ -327,5 +340,44 @@ mod tests {
             friendly_recurrence_interval(crate::constants::OL_RECURS_WEEKLY, 3),
             3
         );
+    }
+
+    fn event_update() -> EventUpdate {
+        EventUpdate {
+            event_id: "event-1".to_string(),
+            subject: None, start: None, end: None, location: None, body: None,
+            all_day: None, reminder_minutes: None, show_as: None,
+            add_categories: None, remove_categories: None,
+            add_required_attendees: None, add_optional_attendees: None, remove_attendees: None,
+            send_update: false,
+            recurrence: None, clear_recurrence: false,
+        }
+    }
+
+    #[test]
+    fn validate_recurrence_update_rejects_recurrence_and_clear_recurrence_together() {
+        let mut u = event_update();
+        u.recurrence = Some(recurrence("daily"));
+        u.clear_recurrence = true;
+        assert!(validate_recurrence_update(&u).is_err());
+    }
+
+    #[test]
+    fn validate_recurrence_update_accepts_recurrence_only() {
+        let mut u = event_update();
+        u.recurrence = Some(recurrence("daily"));
+        assert!(validate_recurrence_update(&u).is_ok());
+    }
+
+    #[test]
+    fn validate_recurrence_update_accepts_clear_recurrence_only() {
+        let mut u = event_update();
+        u.clear_recurrence = true;
+        assert!(validate_recurrence_update(&u).is_ok());
+    }
+
+    #[test]
+    fn validate_recurrence_update_accepts_neither() {
+        assert!(validate_recurrence_update(&event_update()).is_ok());
     }
 }

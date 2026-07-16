@@ -4,7 +4,10 @@ use serde_json::{json, Value};
 
 use crate::error::ToolError;
 use super::types::*;
-use super::{CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient};
+use super::{
+    validate_recurrence_update, CreateEventInput, EmailQuery, EmailUpdate, EventQuery,
+    EventUpdate, OutlookClient,
+};
 
 pub const EMAIL_ID: &str = "entry-1|store-1";
 pub const EVENT_ID: &str = "entry-2|store-1";
@@ -196,6 +199,7 @@ impl OutlookClient for FakeOutlookClient {
     }
 
     fn update_event(&self, u: EventUpdate) -> Result<Value, ToolError> {
+        validate_recurrence_update(&u)?;
         self.record("update_event", json!({
             "event_id": u.event_id, "subject": u.subject, "start": u.start, "end": u.end,
             "location": u.location, "body": u.body, "all_day": u.all_day,

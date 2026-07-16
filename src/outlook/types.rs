@@ -79,9 +79,20 @@ pub struct EventDetail {
 
 /// The recurrence pattern of a recurring event, read back via
 /// `AppointmentItem.GetRecurrencePattern()`. `None` on `EventDetail` when the
-/// event isn't recurring. `until`/`occurrences` are mutually exclusive with
-/// each other and with `no_end: true` (exactly one of the three end
-/// conditions is populated).
+/// event isn't recurring.
+///
+/// On the *write* side, `RecurrenceInput`'s `until`/`occurrences` are
+/// mutually exclusive (`validate_recurrence` rejects both being set), and a
+/// series with neither set is unbounded (`no_end`). On this *read-back*
+/// side, `no_end: true` still means the other two are `None`, but when the
+/// series has a finite end (`no_end: false`), `until` and `occurrences` are
+/// populated *together* — confirmed live: Outlook's `RecurrencePattern`
+/// keeps `Occurrences` and `PatternEndDate` mutually consistent regardless
+/// of which one the series was originally created with (e.g. a series
+/// created with only `until` still reports a correct, auto-computed
+/// `Occurrences`, and vice versa). There is no COM-level signal for which
+/// field the caller originally specified, so this struct does not attempt
+/// to suppress either one.
 #[derive(Debug, Clone, Serialize)]
 pub struct RecurrenceInfo {
     /// "daily" | "weekly" | "monthly" | "yearly".
@@ -91,9 +102,11 @@ pub struct RecurrenceInfo {
     pub days_of_week: Vec<String>,
     /// Populated only for "monthly"/"yearly".
     pub day_of_month: Option<i32>,
-    /// ISO end date, if the series ends on a date.
+    /// ISO end date, if the series has a finite end (`no_end: false`).
     pub until: Option<String>,
-    /// Total occurrence count, if the series ends after N occurrences.
+    /// Outlook's auto-computed occurrence count, if the series has a finite
+    /// end (`no_end: false`) — populated alongside `until`, not only when
+    /// the series was created via `occurrences`; see struct doc comment.
     pub occurrences: Option<i32>,
     /// True if the series never ends.
     pub no_end: bool,

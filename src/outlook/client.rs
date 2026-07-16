@@ -24,8 +24,8 @@ use crate::outlook::types::*;
 use chrono::Datelike;
 use crate::outlook::{
     com_recurrence_interval, create_event_status, friendly_recurrence_interval,
-    validate_recurrence, CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate,
-    OutlookClient, RecurrenceInput,
+    validate_recurrence, validate_recurrence_update, CreateEventInput, EmailQuery, EmailUpdate,
+    EventQuery, EventUpdate, OutlookClient, RecurrenceInput,
 };
 
 /// Matches `MAX_EMAIL_COUNT` in `client.py`.
@@ -345,11 +345,24 @@ fn recurrence_info(item: &IDispatch) -> Result<Option<RecurrenceInfo>, ToolError
     let day_of_month = variant_to_i32(&get_property(&pattern, "DayOfMonth").unwrap_or_default());
     let no_end =
         variant_to_bool(&get_property(&pattern, "NoEndDate").unwrap_or_default()).unwrap_or(false);
-    let occurrences = variant_to_i32(&get_property(&pattern, "Occurrences").unwrap_or_default());
     let until = if no_end {
         None
     } else {
         variant_to_iso_string(&get_property(&pattern, "PatternEndDate").unwrap_or_default())
+    };
+    // Confirmed live (see RecurrenceInfo's doc comment): once a series has a
+    // finite end (`no_end` false), Outlook keeps `Occurrences` and
+    // `PatternEndDate` mutually *consistent*, auto-computing whichever one
+    // wasn't the caller's original input — e.g. an `until`-terminated series
+    // still reports a real, correct `Occurrences` count, and vice versa.
+    // There is no COM-level signal for which field the series was originally
+    // created with, so both are reported together rather than one being
+    // arbitrarily suppressed (suppressing either one on read-back was tried
+    // and breaks the other, legitimately-populated direction).
+    let occurrences = if no_end {
+        None
+    } else {
+        variant_to_i32(&get_property(&pattern, "Occurrences").unwrap_or_default())
     };
     Ok(Some(RecurrenceInfo {
         pattern: crate::friendly::recurrence_pattern_word(recurrence_type).to_string(),
@@ -357,7 +370,7 @@ fn recurrence_info(item: &IDispatch) -> Result<Option<RecurrenceInfo>, ToolError
         days_of_week: crate::friendly::day_of_week_mask_to_words(day_mask),
         day_of_month: day_of_month.filter(|d| *d > 0),
         until,
-        occurrences: if no_end { None } else { occurrences },
+        occurrences,
         no_end,
     }))
 }
@@ -1256,11 +1269,7 @@ impl OutlookClient for WindowsOutlookClient {
                 changed.push("remove_attendees");
             }
 
-            if u.recurrence.is_some() && u.clear_recurrence {
-                return Err(ToolError::new(
-                    "cannot set recurrence and clear_recurrence in the same update_event call",
-                ));
-            }
+            validate_recurrence_update(&u)?;
             if let Some(recurrence) = u.recurrence.as_ref() {
                 apply_recurrence(&item, recurrence)?;
                 changed.push("recurrence");

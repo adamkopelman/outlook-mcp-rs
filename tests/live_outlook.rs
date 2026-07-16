@@ -470,6 +470,12 @@ fn create_event_monthly_recurrence_with_until_round_trips() {
     assert_eq!(recurrence.day_of_month, Some(15));
     assert!(recurrence.until.is_some());
     assert!(!recurrence.no_end);
+    // Confirmed live: Outlook auto-computes a correct `Occurrences` (here 6:
+    // Feb/Apr/Jun/Aug/Oct/Dec 15) for a series that was created via `until`,
+    // not just for one created via `occurrences` — see RecurrenceInfo's doc
+    // comment. This is populated Outlook state, not a bug, so it's pinned
+    // here rather than asserted absent.
+    assert_eq!(recurrence.occurrences, Some(6));
 
     c.delete_event(id, false).expect("cleanup delete_event");
 }
@@ -499,6 +505,7 @@ fn create_event_yearly_recurrence_with_no_end_round_trips() {
     let detail = c.get_event(id.clone()).expect("get_event should succeed");
     let recurrence = detail.recurrence.expect("recurring event should have a recurrence block");
     assert_eq!(recurrence.pattern, "yearly");
+    assert_eq!(recurrence.interval, 1);
     assert_eq!(recurrence.day_of_month, Some(10)); // derived from the March 10 start date
     assert!(recurrence.no_end);
     assert!(recurrence.until.is_none());
