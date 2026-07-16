@@ -74,3 +74,13 @@ recipient-resolve + GetSharedDefaultFolder path by opening your own
 calendar; to verify cross-user sharing works, call `list_events` with a
 colleague's email address in `calendar_of` (one who has shared their
 calendar with you) and confirm it returns their events without error.
+
+`check_availability`'s single-mailbox path (resolving your own address and
+reading its free/busy slots, plus the graceful-failure path for an address
+that can't provide free/busy data) is covered by the live suite:
+`cargo test --test live_outlook -- --ignored check_availability`. Checking
+a real second person's free/busy (someone outside this mailbox) is a manual
+check, since Outlook must actually have published free/busy for that
+account, which can't be arranged from an automated test. To verify by hand,
+call `check_availability` with a colleague's email address in `people` and
+confirm their slots reflect their real calendar.

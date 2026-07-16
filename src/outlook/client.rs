@@ -1441,7 +1441,15 @@ impl OutlookClient for WindowsOutlookClient {
                     people.push(PersonAvailability { person: person.clone(), resolved: false, slots: Vec::new() });
                     continue;
                 }
-                let raw = variant_to_string(&call_method(
+                // `Resolve()` succeeds trivially for any syntactically valid SMTP
+                // address — Outlook does no existence/deliverability check at that
+                // point, only format/GAL-lookup. A made-up-but-well-formed address
+                // (or a real address with no free/busy published) resolves fine but
+                // then fails here, in `FreeBusy()` itself. Treat that failure the
+                // same as an unresolved person — record it and move on — rather
+                // than letting `?` abort the whole multi-person call over one bad
+                // address.
+                let raw = match call_method(
                     &recipient,
                     "FreeBusy",
                     &mut [
@@ -1449,7 +1457,13 @@ impl OutlookClient for WindowsOutlookClient {
                         variant_from_i32(interval),
                         variant_from_bool(true),
                     ],
-                )?);
+                ) {
+                    Ok(v) => variant_to_string(&v),
+                    Err(_) => {
+                        people.push(PersonAvailability { person: person.clone(), resolved: false, slots: Vec::new() });
+                        continue;
+                    }
+                };
                 let slots = parse_freebusy_slots(&raw, &start, interval, max_slots);
                 people.push(PersonAvailability { person: person.clone(), resolved: true, slots });
             }

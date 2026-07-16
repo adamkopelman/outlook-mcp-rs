@@ -9,7 +9,7 @@
 //! can't be undone — see TESTING.md for how to test those by hand.
 
 use outlook_mcp_rs::outlook::client::WindowsOutlookClient;
-use outlook_mcp_rs::outlook::{CreateEventInput, EmailQuery, EventQuery, OutlookClient, EmailUpdate, EventUpdate, RecurrenceInput};
+use outlook_mcp_rs::outlook::{CheckAvailabilityInput, CreateEventInput, EmailQuery, EventQuery, OutlookClient, EmailUpdate, EventUpdate, RecurrenceInput};
 
 fn client() -> WindowsOutlookClient {
     WindowsOutlookClient::new()
@@ -572,4 +572,55 @@ fn update_event_changes_then_clears_recurrence() {
     assert!(detail.recurrence.is_none());
 
     c.delete_event(id, false).expect("cleanup delete_event");
+}
+
+#[test]
+#[ignore]
+fn check_availability_against_own_mailbox_returns_free_slots() {
+    let c = client();
+    // Per the spec's testing strategy: check_availability is tested against
+    // the developer's own mailbox where possible; the cross-user sharing
+    // path (someone else's calendar) depends on another account having
+    // granted access, which can't be set up from a test — see TESTING.md.
+    let ns_person = std::env::var("OUTLOOK_TEST_SELF_EMAIL")
+        .unwrap_or_else(|_| "adamkopelman@outlook.com".to_string());
+    let result = c.check_availability(CheckAvailabilityInput {
+        people: vec![ns_person.clone()],
+        start: "2099-07-01T09:00".to_string(),
+        end: "2099-07-01T11:00".to_string(),
+        interval_minutes: 30,
+        treat_as_free: vec!["free".to_string()],
+    }).expect("check_availability should succeed against a resolvable address");
+
+    assert_eq!(result.people.len(), 1);
+    let person = &result.people[0];
+    assert_eq!(person.person, ns_person);
+    assert!(person.resolved, "self address should always resolve");
+    // 2 hours / 30-minute slots = 4 slots.
+    assert_eq!(person.slots.len(), 4);
+    for slot in &person.slots {
+        assert!(["free", "tentative", "busy", "out_of_office", "working_elsewhere"]
+            .contains(&slot.status.as_str()));
+    }
+    // Far-future date with nothing scheduled should read back as free
+    // end-to-end (proves common_free's intersection logic against a real
+    // FreeBusy string, not just the fake's canned response).
+    assert!(!result.common_free.is_empty());
+}
+
+#[test]
+#[ignore]
+fn check_availability_marks_unresolvable_person_without_failing() {
+    let c = client();
+    let result = c.check_availability(CheckAvailabilityInput {
+        people: vec!["this-address-does-not-exist-outlook-mcp-rs-p10@nonexistent-domain-xyz.invalid".to_string()],
+        start: "2099-07-01T09:00".to_string(),
+        end: "2099-07-01T10:00".to_string(),
+        interval_minutes: 30,
+        treat_as_free: vec!["free".to_string()],
+    }).expect("an unresolvable person should not fail the whole call");
+    assert_eq!(result.people.len(), 1);
+    assert!(!result.people[0].resolved);
+    assert!(result.people[0].slots.is_empty());
+    assert!(result.common_free.is_empty());
 }
