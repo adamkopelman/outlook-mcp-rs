@@ -44,7 +44,7 @@ your MCP client at it directly — no install step.
 **Tasks**
 - `list_tasks` — list Outlook tasks
 - `create_task` — create a new Outlook task
-- `complete_task` — mark a task as complete
+- `update_task` — change an existing task: mark complete/reopen, subject, body, due_date, start_date, importance, add/remove categories, percent_complete, reminder_time
 
 **Notes**
 - `list_notes` — list Outlook notes

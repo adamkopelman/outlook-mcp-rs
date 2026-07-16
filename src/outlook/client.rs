@@ -26,7 +26,7 @@ use crate::outlook::{
     com_recurrence_interval, common_free, create_event_status, friendly_recurrence_interval,
     parse_freebusy_slots, validate_recurrence, validate_recurrence_update, CheckAvailabilityInput,
     CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient,
-    RecurrenceInput, TaskQuery,
+    RecurrenceInput, TaskQuery, TaskUpdate,
 };
 
 /// Matches `MAX_EMAIL_COUNT` in `client.py`.
@@ -1688,13 +1688,79 @@ impl OutlookClient for WindowsOutlookClient {
         })
     }
 
-    fn complete_task(&self, task_id: String) -> Result<Value, ToolError> {
+    fn update_task(&self, u: TaskUpdate) -> Result<Value, ToolError> {
         self.with_com(|| {
             let (_app, ns) = mapi()?;
-            let task = get_item(&ns, &task_id)?;
-            call_method(&task, "MarkComplete", &mut [])?;
-            let subject = variant_to_string(&get_property(&task, "Subject")?);
-            Ok(json!({"status": "completed", "subject": subject}))
+            let task = get_item(&ns, &u.task_id)?;
+            let mut changed: Vec<&str> = Vec::new();
+
+            if let Some(subject) = &u.subject {
+                put_property(&task, "Subject", variant_from_str(subject))?;
+                changed.push("subject");
+            }
+            if let Some(body) = &u.body {
+                put_property(&task, "Body", variant_from_str(body))?;
+                changed.push("body");
+            }
+            if let Some(due) = &u.due_date {
+                put_property(&task, "DueDate", variant_from_datetime(&parse_dt(due, "due_date")?)?)?;
+                changed.push("due_date");
+            }
+            if let Some(start) = &u.start_date {
+                put_property(&task, "StartDate", variant_from_datetime(&parse_dt(start, "start_date")?)?)?;
+                changed.push("start_date");
+            }
+            if let Some(imp) = &u.importance {
+                let id = c::importance_name_to_id(imp).ok_or_else(|| {
+                    ToolError::new(format!(
+                        "invalid importance {imp:?}: expected \"low\", \"normal\", or \"high\""
+                    ))
+                })?;
+                put_property(&task, "Importance", variant_from_i32(id))?;
+                changed.push("importance");
+            }
+            if u.add_categories.is_some() || u.remove_categories.is_some() {
+                let mut cats = get_item_categories(&task);
+                if let Some(add) = &u.add_categories {
+                    for a in add {
+                        if !cats.iter().any(|c| c.eq_ignore_ascii_case(a)) {
+                            cats.push(a.clone());
+                        }
+                    }
+                    changed.push("add_categories");
+                }
+                if let Some(remove) = &u.remove_categories {
+                    cats.retain(|c| !remove.iter().any(|r| r.eq_ignore_ascii_case(c)));
+                    changed.push("remove_categories");
+                }
+                set_item_categories(&task, &cats)?;
+            }
+            if let Some(pct) = u.percent_complete {
+                put_property(&task, "PercentComplete", variant_from_i32(pct))?;
+                changed.push("percent_complete");
+            }
+            if let Some(reminder) = &u.reminder_time {
+                put_property(&task, "ReminderSet", variant_from_bool(true))?;
+                put_property(&task, "ReminderTime", variant_from_datetime(&parse_dt(reminder, "reminder_time")?)?)?;
+                changed.push("reminder_time");
+            }
+            // mark_complete last: MarkComplete() is Outlook's dedicated
+            // "finish this task" method (it also sets PercentComplete=100
+            // and Status=olTaskComplete), so apply any field edits above
+            // to the task's live state first, then finish/reopen it.
+            if let Some(complete) = u.mark_complete {
+                if complete {
+                    call_method(&task, "MarkComplete", &mut [])?;
+                } else {
+                    put_property(&task, "Complete", variant_from_bool(false))?;
+                    put_property(&task, "Status", variant_from_i32(c::OL_TASK_NOT_STARTED))?;
+                    put_property(&task, "PercentComplete", variant_from_i32(0))?;
+                }
+                changed.push("mark_complete");
+            }
+
+            call_method(&task, "Save", &mut [])?;
+            Ok(json!({"status": "updated", "id": u.task_id, "changed": changed}))
         })
     }
 

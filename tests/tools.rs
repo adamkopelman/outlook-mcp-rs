@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use outlook_mcp_rs::outlook::fake::{FakeOutlookClient, EMAIL_ID};
 use outlook_mcp_rs::server::{
-    CheckAvailabilityParams, CompleteTaskParams, CreateDraftParams, CreateEventParams, CreateNoteParams, CreateTaskParams,
+    CheckAvailabilityParams, CreateDraftParams, CreateEventParams, CreateNoteParams, CreateTaskParams,
     DeleteEmailParams, DeleteEventParams, GetEmailParams, GetEventParams, GetNoteParams, ListAttachmentsParams,
     ListEmailsParams, ListEventsParams, ListTasksParams, OutlookMcpServer,
     RecurrenceParams, ReplyEmailParams, RespondToMeetingParams, SaveAttachmentsParams,
-    SendEmailParams, UpdateEmailParams, UpdateEventParams,
+    SendEmailParams, UpdateEmailParams, UpdateEventParams, UpdateTaskParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -748,17 +748,61 @@ async fn create_task_forwards_categories_start_date_and_reminder() {
 }
 
 #[tokio::test]
-async fn complete_task_records_call() {
-    use outlook_mcp_rs::outlook::fake::TASK_ID;
+async fn update_task_marks_complete() {
     let fake = Arc::new(FakeOutlookClient::new());
     let server = OutlookMcpServer::new(fake.clone());
+    use outlook_mcp_rs::outlook::fake::TASK_ID;
     server
-        .complete_task(Parameters(CompleteTaskParams { task_id: TASK_ID.to_string() }))
+        .update_task(Parameters(UpdateTaskParams {
+            task_id: TASK_ID.to_string(), mark_complete: Some(true),
+            subject: None, body: None, due_date: None, start_date: None,
+            importance: None, add_categories: None, remove_categories: None,
+            percent_complete: None, reminder_time: None,
+        }))
         .await
         .unwrap();
-    assert_eq!(fake.calls(), vec![
-        ("complete_task".to_string(), json!({"task_id": TASK_ID})),
-    ]);
+    let (_, args) = &fake.calls()[0];
+    assert_eq!(args["mark_complete"], true);
+}
+
+#[tokio::test]
+async fn update_task_reopens_with_mark_complete_false() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    use outlook_mcp_rs::outlook::fake::TASK_ID;
+    let result = server
+        .update_task(Parameters(UpdateTaskParams {
+            task_id: TASK_ID.to_string(), mark_complete: Some(false),
+            subject: None, body: None, due_date: None, start_date: None,
+            importance: None, add_categories: None, remove_categories: None,
+            percent_complete: None, reminder_time: None,
+        }))
+        .await
+        .unwrap();
+    let json = result_json(&result);
+    assert!(json["changed"].as_array().unwrap().iter().any(|v| v == "mark_complete"));
+}
+
+#[tokio::test]
+async fn update_task_forwards_field_edits() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    use outlook_mcp_rs::outlook::fake::TASK_ID;
+    server
+        .update_task(Parameters(UpdateTaskParams {
+            task_id: TASK_ID.to_string(), mark_complete: None,
+            subject: Some("Renamed".to_string()), body: None,
+            due_date: None, start_date: None, importance: Some("high".to_string()),
+            add_categories: Some(vec!["Red Category".to_string()]), remove_categories: None,
+            percent_complete: Some(50), reminder_time: None,
+        }))
+        .await
+        .unwrap();
+    let (_, args) = &fake.calls()[0];
+    assert_eq!(args["subject"], "Renamed");
+    assert_eq!(args["importance"], "high");
+    assert_eq!(args["add_categories"], json!(["Red Category"]));
+    assert_eq!(args["percent_complete"], 50);
 }
 
 // ---- Notes ----

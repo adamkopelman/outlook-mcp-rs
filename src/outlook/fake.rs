@@ -6,7 +6,7 @@ use crate::error::ToolError;
 use super::types::*;
 use super::{
     validate_recurrence_update, CheckAvailabilityInput, CreateEventInput, EmailQuery, EmailUpdate,
-    EventQuery, EventUpdate, OutlookClient, TaskQuery,
+    EventQuery, EventUpdate, OutlookClient, TaskQuery, TaskUpdate,
 };
 
 pub const EMAIL_ID: &str = "entry-1|store-1";
@@ -298,9 +298,26 @@ impl OutlookClient for FakeOutlookClient {
         Ok(json!({"status": "created", "id": TASK_ID, "subject": subject}))
     }
 
-    fn complete_task(&self, task_id: String) -> Result<Value, ToolError> {
-        self.record("complete_task", json!({"task_id": task_id}))?;
-        Ok(json!({"status": "completed"}))
+    fn update_task(&self, u: TaskUpdate) -> Result<Value, ToolError> {
+        self.record("update_task", json!({
+            "task_id": u.task_id, "mark_complete": u.mark_complete, "subject": u.subject,
+            "body": u.body, "due_date": u.due_date, "start_date": u.start_date,
+            "importance": u.importance, "add_categories": u.add_categories,
+            "remove_categories": u.remove_categories, "percent_complete": u.percent_complete,
+            "reminder_time": u.reminder_time,
+        }))?;
+        let mut changed: Vec<&str> = Vec::new();
+        if u.mark_complete.is_some() { changed.push("mark_complete"); }
+        if u.subject.is_some() { changed.push("subject"); }
+        if u.body.is_some() { changed.push("body"); }
+        if u.due_date.is_some() { changed.push("due_date"); }
+        if u.start_date.is_some() { changed.push("start_date"); }
+        if u.importance.is_some() { changed.push("importance"); }
+        if u.add_categories.is_some() { changed.push("add_categories"); }
+        if u.remove_categories.is_some() { changed.push("remove_categories"); }
+        if u.percent_complete.is_some() { changed.push("percent_complete"); }
+        if u.reminder_time.is_some() { changed.push("reminder_time"); }
+        Ok(json!({"status": "updated", "id": u.task_id, "changed": changed}))
     }
 
     fn list_notes(&self) -> Result<Vec<NoteSummary>, ToolError> {

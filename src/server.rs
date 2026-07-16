@@ -9,7 +9,7 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::error::ToolError;
-use crate::outlook::{CheckAvailabilityInput, CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient, RecurrenceInput, TaskQuery};
+use crate::outlook::{CheckAvailabilityInput, CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient, RecurrenceInput, TaskQuery, TaskUpdate};
 
 /// Runs a blocking `OutlookClient` call on a dedicated blocking thread so the
 /// tokio scheduler never migrates it mid-call (COM apartment-threading
@@ -379,8 +379,30 @@ pub struct CreateTaskParams {
 fn default_importance() -> String { "normal".to_string() }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct CompleteTaskParams {
+pub struct UpdateTaskParams {
     pub task_id: String,
+    /// true = mark complete (100%), false = reopen.
+    #[serde(default)]
+    pub mark_complete: Option<bool>,
+    #[serde(default)]
+    pub subject: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub due_date: Option<String>,
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub importance: Option<String>,
+    #[serde(default)]
+    pub add_categories: Option<Vec<String>>,
+    #[serde(default)]
+    pub remove_categories: Option<Vec<String>>,
+    /// 0-100.
+    #[serde(default)]
+    pub percent_complete: Option<i32>,
+    #[serde(default)]
+    pub reminder_time: Option<String>,
 }
 
 // ---- Notes ----
@@ -648,13 +670,20 @@ impl OutlookMcpServer {
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
-    #[tool(description = "Mark a task complete.")]
-    pub async fn complete_task(
+    #[tool(description = "Update an existing task: mark_complete (true=complete, false=reopen), subject, body, due_date, start_date, importance, add/remove categories, percent_complete, reminder_time. Combine any of these in one call.")]
+    pub async fn update_task(
         &self,
-        Parameters(CompleteTaskParams { task_id }): Parameters<CompleteTaskParams>,
+        Parameters(p): Parameters<UpdateTaskParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let result = run_blocking(move || client.complete_task(task_id)).await?;
+        let u = TaskUpdate {
+            task_id: p.task_id, mark_complete: p.mark_complete, subject: p.subject,
+            body: p.body, due_date: p.due_date, start_date: p.start_date,
+            importance: p.importance, add_categories: p.add_categories,
+            remove_categories: p.remove_categories, percent_complete: p.percent_complete,
+            reminder_time: p.reminder_time,
+        };
+        let result = run_blocking(move || client.update_task(u)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 

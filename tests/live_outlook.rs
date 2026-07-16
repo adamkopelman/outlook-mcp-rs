@@ -9,7 +9,7 @@
 //! can't be undone — see TESTING.md for how to test those by hand.
 
 use outlook_mcp_rs::outlook::client::WindowsOutlookClient;
-use outlook_mcp_rs::outlook::{CheckAvailabilityInput, CreateEventInput, EmailQuery, EventQuery, OutlookClient, EmailUpdate, EventUpdate, RecurrenceInput, TaskQuery};
+use outlook_mcp_rs::outlook::{CheckAvailabilityInput, CreateEventInput, EmailQuery, EventQuery, OutlookClient, EmailUpdate, EventUpdate, RecurrenceInput, TaskQuery, TaskUpdate};
 
 fn client() -> WindowsOutlookClient {
     WindowsOutlookClient::new()
@@ -53,14 +53,15 @@ fn create_draft_then_delete_round_trips() {
 
 #[test]
 #[ignore]
-fn create_task_complete_then_it_is_marked_complete() {
+fn create_task_update_task_marks_complete() {
     let c = client();
     let created = c.create_task(
         "outlook-mcp-rs live test task".to_string(), None, None, "normal".to_string(),
         None, None, None,
     ).expect("create_task should succeed");
     let id = created["id"].as_str().unwrap().to_string();
-    c.complete_task(id.clone()).expect("complete_task should succeed");
+    c.update_task(TaskUpdate { task_id: id.clone(), mark_complete: Some(true), ..Default::default() })
+        .expect("update_task should succeed");
     let tasks = c.list_tasks(TaskQuery { include_completed: true, ..Default::default() })
         .expect("list_tasks should succeed");
     assert!(tasks.iter().any(|t| t.id == id && t.complete));

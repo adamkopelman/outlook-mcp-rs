@@ -40,6 +40,27 @@ pub struct EmailUpdate {
     pub importance: Option<String>,         // "low" | "normal" | "high"
 }
 
+/// All changes `update_task` can apply to one existing task. Every field
+/// except `task_id` is optional; supplying several applies all of them.
+/// `mark_complete: Some(true)` replaces the retired standalone
+/// `complete_task` tool (`= update_task` with `mark_complete: true`);
+/// `Some(false)` reopens a completed task, filling the "can't reopen" gap
+/// the old `complete_task` had no way to close.
+#[derive(Debug, Clone, Default)]
+pub struct TaskUpdate {
+    pub task_id: String,
+    pub mark_complete: Option<bool>,
+    pub subject: Option<String>,
+    pub body: Option<String>,
+    pub due_date: Option<String>,
+    pub start_date: Option<String>,
+    pub importance: Option<String>,
+    pub add_categories: Option<Vec<String>>,
+    pub remove_categories: Option<Vec<String>>,
+    pub percent_complete: Option<i32>,
+    pub reminder_time: Option<String>,
+}
+
 /// All filters for `list_events`. Every field is optional; supplying several
 /// ANDs them. `start_date`/`end_date` bound the (recurrence-expanded) scan;
 /// the rest filter the streamed events client-side. `calendar_of` (an
@@ -177,7 +198,7 @@ pub trait OutlookClient: Send + Sync {
     fn create_task(&self, subject: String, body: Option<String>,
         due_date: Option<String>, importance: String, categories: Option<Vec<String>>,
         start_date: Option<String>, reminder_time: Option<String>) -> Result<Value, ToolError>;
-    fn complete_task(&self, task_id: String) -> Result<Value, ToolError>;
+    fn update_task(&self, u: TaskUpdate) -> Result<Value, ToolError>;
 
     fn list_notes(&self) -> Result<Vec<NoteSummary>, ToolError>;
     fn get_note(&self, note_id: String) -> Result<NoteDetail, ToolError>;
