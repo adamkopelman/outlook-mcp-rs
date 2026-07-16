@@ -70,7 +70,7 @@ pub struct TaskQuery {
     pub include_completed: bool,
     pub category: Option<String>,
     pub importance: Option<String>,
-    pub query: Option<String>, // text match on subject + body
+    pub query: Option<String>, // text match on subject (TaskSummary has no body field to match)
 }
 
 /// All inputs for `create_event`. `required_attendees`/`optional_attendees`
