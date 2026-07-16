@@ -9,7 +9,7 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::error::ToolError;
-use crate::outlook::{CheckAvailabilityInput, CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, NoteQuery, OutlookClient, RecurrenceInput, TaskQuery, TaskUpdate};
+use crate::outlook::{CheckAvailabilityInput, CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, NoteQuery, NoteUpdate, OutlookClient, RecurrenceInput, TaskQuery, TaskUpdate};
 
 /// Runs a blocking `OutlookClient` call on a dedicated blocking thread so the
 /// tokio scheduler never migrates it mid-call (COM apartment-threading
@@ -438,6 +438,20 @@ pub struct CreateNoteParams {
     pub color: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateNoteParams {
+    pub note_id: String,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub add_categories: Option<Vec<String>>,
+    #[serde(default)]
+    pub remove_categories: Option<Vec<String>>,
+    /// "blue" | "green" | "pink" | "yellow" | "white".
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
 #[tool_router]
 impl OutlookMcpServer {
     #[tool(description = "List Outlook mail folders (name, path, item counts).")]
@@ -748,6 +762,20 @@ impl OutlookMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
         let result = run_blocking(move || client.create_note(body, categories, color)).await?;
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    #[tool(description = "Update an existing note: body, add/remove categories, color. Combine any of these in one call.")]
+    pub async fn update_note(
+        &self,
+        Parameters(p): Parameters<UpdateNoteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.clone();
+        let u = NoteUpdate {
+            note_id: p.note_id, body: p.body, add_categories: p.add_categories,
+            remove_categories: p.remove_categories, color: p.color,
+        };
+        let result = run_blocking(move || client.update_note(u)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 }

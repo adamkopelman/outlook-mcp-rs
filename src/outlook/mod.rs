@@ -66,6 +66,17 @@ pub struct TaskUpdate {
     pub reminder_time: Option<String>,
 }
 
+/// All changes `update_note` can apply to one existing note. Every field
+/// except `note_id` is optional; supplying several applies all of them.
+#[derive(Debug, Clone, Default)]
+pub struct NoteUpdate {
+    pub note_id: String,
+    pub body: Option<String>,
+    pub add_categories: Option<Vec<String>>,
+    pub remove_categories: Option<Vec<String>>,
+    pub color: Option<String>,
+}
+
 /// All filters for `list_events`. Every field is optional; supplying several
 /// ANDs them. `start_date`/`end_date` bound the (recurrence-expanded) scan;
 /// the rest filter the streamed events client-side. `calendar_of` (an
@@ -219,6 +230,7 @@ pub trait OutlookClient: Send + Sync {
     fn list_notes(&self, q: NoteQuery) -> Result<Vec<NoteSummary>, ToolError>;
     fn get_note(&self, note_id: String) -> Result<NoteDetail, ToolError>;
     fn create_note(&self, body: String, categories: Option<Vec<String>>, color: Option<String>) -> Result<Value, ToolError>;
+    fn update_note(&self, u: NoteUpdate) -> Result<Value, ToolError>;
 }
 
 /// The status string `create_event` returns: `"meeting_sent"` (attendees +

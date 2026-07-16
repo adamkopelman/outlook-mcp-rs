@@ -25,8 +25,8 @@ use chrono::Datelike;
 use crate::outlook::{
     com_recurrence_interval, common_free, create_event_status, friendly_recurrence_interval,
     parse_freebusy_slots, validate_recurrence, validate_recurrence_update, CheckAvailabilityInput,
-    CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, NoteQuery, OutlookClient,
-    RecurrenceInput, TaskQuery, TaskUpdate,
+    CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, NoteQuery, NoteUpdate,
+    OutlookClient, RecurrenceInput, TaskQuery, TaskUpdate,
 };
 
 /// Matches `MAX_EMAIL_COUNT` in `client.py`.
@@ -1865,6 +1865,47 @@ impl OutlookClient for WindowsOutlookClient {
                 call_method(&note, "Save", &mut [])?;
             }
             Ok(json!({"status": "created", "id": make_id(&note)?}))
+        })
+    }
+
+    fn update_note(&self, u: NoteUpdate) -> Result<Value, ToolError> {
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let note = get_item(&ns, &u.note_id)?;
+            let mut changed: Vec<&str> = Vec::new();
+
+            if let Some(body) = &u.body {
+                put_property(&note, "Body", variant_from_str(body))?;
+                changed.push("body");
+            }
+            if u.add_categories.is_some() || u.remove_categories.is_some() {
+                let mut cats = get_item_categories(&note);
+                if let Some(add) = &u.add_categories {
+                    for a in add {
+                        if !cats.iter().any(|c| c.eq_ignore_ascii_case(a)) {
+                            cats.push(a.clone());
+                        }
+                    }
+                    changed.push("add_categories");
+                }
+                if let Some(remove) = &u.remove_categories {
+                    cats.retain(|c| !remove.iter().any(|r| r.eq_ignore_ascii_case(c)));
+                    changed.push("remove_categories");
+                }
+                set_item_categories(&note, &cats)?;
+            }
+            if let Some(color) = &u.color {
+                let id = c::note_color_to_id(color).ok_or_else(|| {
+                    ToolError::new(format!(
+                        "invalid color {color:?}: expected \"blue\", \"green\", \"pink\", \"yellow\", or \"white\""
+                    ))
+                })?;
+                put_property(&note, "Color", variant_from_i32(id))?;
+                changed.push("color");
+            }
+
+            call_method(&note, "Save", &mut [])?;
+            Ok(json!({"status": "updated", "id": u.note_id, "changed": changed}))
         })
     }
 }

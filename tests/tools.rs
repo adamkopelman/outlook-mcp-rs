@@ -6,7 +6,7 @@ use outlook_mcp_rs::server::{
     DeleteEmailParams, DeleteEventParams, DeleteTaskParams, GetEmailParams, GetEventParams, GetNoteParams, ListAttachmentsParams,
     ListEmailsParams, ListEventsParams, ListNotesParams, ListTasksParams, OutlookMcpServer,
     RecurrenceParams, ReplyEmailParams, RespondToMeetingParams, SaveAttachmentsParams,
-    SendEmailParams, UpdateEmailParams, UpdateEventParams, UpdateTaskParams,
+    SendEmailParams, UpdateEmailParams, UpdateEventParams, UpdateNoteParams, UpdateTaskParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -914,4 +914,42 @@ async fn get_note_includes_modified() {
     // The fake may return null for a note that was never "modified" —
     // assert the key exists in the JSON shape, not a specific non-null value.
     assert!(v.as_object().unwrap().contains_key("modified"));
+}
+
+#[tokio::test]
+async fn update_note_forwards_body_and_color() {
+    use outlook_mcp_rs::outlook::fake::NOTE_ID;
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    server
+        .update_note(Parameters(UpdateNoteParams {
+            note_id: NOTE_ID.to_string(),
+            body: Some("Updated body".to_string()),
+            add_categories: None, remove_categories: None,
+            color: Some("pink".to_string()),
+        }))
+        .await
+        .unwrap();
+    let (_, args) = &fake.calls()[0];
+    assert_eq!(args["body"], "Updated body");
+    assert_eq!(args["color"], "pink");
+}
+
+#[tokio::test]
+async fn update_note_manages_categories() {
+    use outlook_mcp_rs::outlook::fake::NOTE_ID;
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let result = server
+        .update_note(Parameters(UpdateNoteParams {
+            note_id: NOTE_ID.to_string(),
+            body: None,
+            add_categories: Some(vec!["Blue Category".to_string()]),
+            remove_categories: None,
+            color: None,
+        }))
+        .await
+        .unwrap();
+    let v = result_json(&result);
+    assert!(v["changed"].as_array().unwrap().iter().any(|c| c == "add_categories"));
 }

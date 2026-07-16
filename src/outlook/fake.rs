@@ -6,7 +6,7 @@ use crate::error::ToolError;
 use super::types::*;
 use super::{
     validate_recurrence_update, CheckAvailabilityInput, CreateEventInput, EmailQuery, EmailUpdate,
-    EventQuery, EventUpdate, NoteQuery, OutlookClient, TaskQuery, TaskUpdate,
+    EventQuery, EventUpdate, NoteQuery, NoteUpdate, OutlookClient, TaskQuery, TaskUpdate,
 };
 
 pub const EMAIL_ID: &str = "entry-1|store-1";
@@ -342,6 +342,19 @@ impl OutlookClient for FakeOutlookClient {
     fn create_note(&self, body: String, categories: Option<Vec<String>>, color: Option<String>) -> Result<Value, ToolError> {
         self.record("create_note", json!({"body": body, "categories": categories, "color": color}))?;
         Ok(json!({"status": "created", "id": NOTE_ID}))
+    }
+
+    fn update_note(&self, u: NoteUpdate) -> Result<Value, ToolError> {
+        self.record("update_note", json!({
+            "note_id": u.note_id, "body": u.body, "add_categories": u.add_categories,
+            "remove_categories": u.remove_categories, "color": u.color,
+        }))?;
+        let mut changed: Vec<&str> = Vec::new();
+        if u.body.is_some() { changed.push("body"); }
+        if u.add_categories.is_some() { changed.push("add_categories"); }
+        if u.remove_categories.is_some() { changed.push("remove_categories"); }
+        if u.color.is_some() { changed.push("color"); }
+        Ok(json!({"status": "updated", "id": u.note_id, "changed": changed}))
     }
 }
 
