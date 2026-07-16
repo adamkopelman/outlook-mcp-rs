@@ -6,7 +6,7 @@ use crate::error::ToolError;
 use super::types::*;
 use super::{
     validate_recurrence_update, CheckAvailabilityInput, CreateEventInput, EmailQuery, EmailUpdate,
-    EventQuery, EventUpdate, OutlookClient,
+    EventQuery, EventUpdate, OutlookClient, TaskQuery,
 };
 
 pub const EMAIL_ID: &str = "entry-1|store-1";
@@ -277,8 +277,11 @@ impl OutlookClient for FakeOutlookClient {
         Ok(vec![json!({"filename": "report.pdf", "saved_to": save_dir, "status": "saved"})])
     }
 
-    fn list_tasks(&self, include_completed: bool) -> Result<Vec<TaskSummary>, ToolError> {
-        self.record("list_tasks", json!({"include_completed": include_completed}))?;
+    fn list_tasks(&self, q: TaskQuery) -> Result<Vec<TaskSummary>, ToolError> {
+        self.record("list_tasks", json!({
+            "include_completed": q.include_completed, "category": q.category,
+            "importance": q.importance, "query": q.query,
+        }))?;
         Ok(vec![TaskSummary {
             id: TASK_ID.into(), subject: "Buy milk".into(), due_date: None,
             complete: false, status: "not_started".to_string(), importance: "normal".to_string(), categories: vec![],

@@ -9,7 +9,7 @@
 //! can't be undone — see TESTING.md for how to test those by hand.
 
 use outlook_mcp_rs::outlook::client::WindowsOutlookClient;
-use outlook_mcp_rs::outlook::{CheckAvailabilityInput, CreateEventInput, EmailQuery, EventQuery, OutlookClient, EmailUpdate, EventUpdate, RecurrenceInput};
+use outlook_mcp_rs::outlook::{CheckAvailabilityInput, CreateEventInput, EmailQuery, EventQuery, OutlookClient, EmailUpdate, EventUpdate, RecurrenceInput, TaskQuery};
 
 fn client() -> WindowsOutlookClient {
     WindowsOutlookClient::new()
@@ -60,7 +60,8 @@ fn create_task_complete_then_it_is_marked_complete() {
     ).expect("create_task should succeed");
     let id = created["id"].as_str().unwrap().to_string();
     c.complete_task(id.clone()).expect("complete_task should succeed");
-    let tasks = c.list_tasks(true).expect("list_tasks should succeed");
+    let tasks = c.list_tasks(TaskQuery { include_completed: true, ..Default::default() })
+        .expect("list_tasks should succeed");
     assert!(tasks.iter().any(|t| t.id == id && t.complete));
     // Outlook has no direct "delete task" in our trait yet — deleting the
     // completed test task manually is fine (it's clearly labeled).

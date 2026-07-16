@@ -669,12 +669,53 @@ async fn list_tasks_passes_include_completed() {
     let fake = Arc::new(FakeOutlookClient::new());
     let server = OutlookMcpServer::new(fake.clone());
     server
-        .list_tasks(Parameters(ListTasksParams { include_completed: true }))
+        .list_tasks(Parameters(ListTasksParams {
+            include_completed: true,
+            category: None,
+            importance: None,
+            query: None,
+        }))
         .await
         .unwrap();
     assert_eq!(fake.calls(), vec![
-        ("list_tasks".to_string(), json!({"include_completed": true})),
+        ("list_tasks".to_string(), json!({
+            "include_completed": true, "category": null, "importance": null, "query": null,
+        })),
     ]);
+}
+
+#[tokio::test]
+async fn list_tasks_forwards_filters() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    server
+        .list_tasks(Parameters(ListTasksParams {
+            include_completed: true,
+            category: Some("Red Category".to_string()),
+            importance: Some("high".to_string()),
+            query: Some("milk".to_string()),
+        }))
+        .await
+        .unwrap();
+    let (name, args) = &fake.calls()[0];
+    assert_eq!(name, "list_tasks");
+    assert_eq!(args["include_completed"], true);
+    assert_eq!(args["category"], "Red Category");
+    assert_eq!(args["importance"], "high");
+    assert_eq!(args["query"], "milk");
+}
+
+#[tokio::test]
+async fn list_tasks_defaults_all_filters_to_none() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let params: ListTasksParams = serde_json::from_value(json!({})).unwrap();
+    server.list_tasks(Parameters(params)).await.unwrap();
+    let (_, args) = &fake.calls()[0];
+    assert_eq!(args["include_completed"], false);
+    assert!(args["category"].is_null());
+    assert!(args["importance"].is_null());
+    assert!(args["query"].is_null());
 }
 
 #[tokio::test]

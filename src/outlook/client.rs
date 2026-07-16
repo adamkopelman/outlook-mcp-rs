@@ -26,7 +26,7 @@ use crate::outlook::{
     com_recurrence_interval, common_free, create_event_status, friendly_recurrence_interval,
     parse_freebusy_slots, validate_recurrence, validate_recurrence_update, CheckAvailabilityInput,
     CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient,
-    RecurrenceInput,
+    RecurrenceInput, TaskQuery,
 };
 
 /// Matches `MAX_EMAIL_COUNT` in `client.py`.
@@ -450,6 +450,29 @@ fn event_matches(summary: &EventSummary, q: &EventQuery) -> bool {
             .iter()
             .any(|p| !p.is_empty() && haystack.contains(&p.to_lowercase()))
         {
+            return false;
+        }
+    }
+    true
+}
+
+/// Client-side filter for `list_tasks`'s `category`/`importance`/`query`.
+/// `include_completed` is applied earlier via `Restrict`, not here.
+fn task_matches(summary: &TaskSummary, q: &TaskQuery) -> bool {
+    if let Some(query) = q.query.as_deref().filter(|s| !s.is_empty()) {
+        let needle = query.to_lowercase();
+        if !summary.subject.to_lowercase().contains(&needle) {
+            return false;
+        }
+    }
+    if let Some(cat) = q.category.as_deref().filter(|s| !s.is_empty()) {
+        let want = cat.to_lowercase();
+        if !summary.categories.iter().any(|c| c.to_lowercase() == want) {
+            return false;
+        }
+    }
+    if let Some(imp) = q.importance.as_deref().filter(|s| !s.is_empty()) {
+        if !summary.importance.eq_ignore_ascii_case(imp) {
             return false;
         }
     }
@@ -1578,7 +1601,7 @@ impl OutlookClient for WindowsOutlookClient {
 
     // ---- Tasks (Task 15) -----------------------------------------------
 
-    fn list_tasks(&self, include_completed: bool) -> Result<Vec<TaskSummary>, ToolError> {
+    fn list_tasks(&self, q: TaskQuery) -> Result<Vec<TaskSummary>, ToolError> {
         self.with_com(|| {
             let (_app, ns) = mapi()?;
             let tasks = to_disp(call_method(
@@ -1587,7 +1610,7 @@ impl OutlookClient for WindowsOutlookClient {
                 &mut [variant_from_i32(c::OL_FOLDER_TASKS)],
             )?)?;
             let mut items = to_disp(get_property(&tasks, "Items")?)?;
-            if !include_completed {
+            if !q.include_completed {
                 items = to_disp(call_method(
                     &items,
                     "Restrict",
@@ -1598,7 +1621,10 @@ impl OutlookClient for WindowsOutlookClient {
             let mut results = Vec::new();
             for i in 1..=count {
                 let item = to_disp(call_method(&items, "Item", &mut [variant_from_i32(i)])?)?;
-                results.push(task_summary(&item)?);
+                let summary = task_summary(&item)?;
+                if task_matches(&summary, &q) {
+                    results.push(summary);
+                }
             }
             Ok(results)
         })

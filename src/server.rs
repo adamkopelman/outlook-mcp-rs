@@ -9,7 +9,7 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::error::ToolError;
-use crate::outlook::{CheckAvailabilityInput, CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient, RecurrenceInput};
+use crate::outlook::{CheckAvailabilityInput, CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient, RecurrenceInput, TaskQuery};
 
 /// Runs a blocking `OutlookClient` call on a dedicated blocking thread so the
 /// tokio scheduler never migrates it mid-call (COM apartment-threading
@@ -346,6 +346,15 @@ pub struct SaveAttachmentsParams {
 pub struct ListTasksParams {
     #[serde(default)]
     pub include_completed: bool,
+    /// Filter to a color category.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// "low" | "normal" | "high".
+    #[serde(default)]
+    pub importance: Option<String>,
+    /// Text match on the task's subject.
+    #[serde(default)]
+    pub query: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -603,13 +612,17 @@ impl OutlookMcpServer {
 
     // ---- Tasks ----
 
-    #[tool(description = "List Outlook tasks (default: not-yet-completed only).")]
+    #[tool(description = "List Outlook tasks (default: not-yet-completed only). Filter by category, importance, or a text query matching the subject.")]
     pub async fn list_tasks(
         &self,
-        Parameters(ListTasksParams { include_completed }): Parameters<ListTasksParams>,
+        Parameters(p): Parameters<ListTasksParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let result = run_blocking(move || client.list_tasks(include_completed)).await?;
+        let q = TaskQuery {
+            include_completed: p.include_completed, category: p.category,
+            importance: p.importance, query: p.query,
+        };
+        let result = run_blocking(move || client.list_tasks(q)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 

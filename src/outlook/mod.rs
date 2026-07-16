@@ -59,6 +59,20 @@ pub struct EventQuery {
     pub calendar_of: Option<String>,
 }
 
+/// All filters for `list_tasks`. Every field is optional except
+/// `include_completed`; supplying several ANDs them. `include_completed`
+/// drives a server-side `Restrict`; the rest filter the streamed tasks
+/// client-side (there's no established DASL text-search path for the Tasks
+/// folder in this codebase, unlike email's `@SQL` queries — same approach
+/// `EventQuery`'s `query`/`category` already use).
+#[derive(Debug, Clone, Default)]
+pub struct TaskQuery {
+    pub include_completed: bool,
+    pub category: Option<String>,
+    pub importance: Option<String>,
+    pub query: Option<String>, // text match on subject + body
+}
+
 /// All inputs for `create_event`. `required_attendees`/`optional_attendees`
 /// are the two invite tiers Outlook shows a meeting organizer; any attendee
 /// in either tier makes the item a meeting. `send` (default true in the
@@ -159,8 +173,7 @@ pub trait OutlookClient: Send + Sync {
     fn save_attachments(&self, email_id: String, save_dir: String,
         attachment_names: Option<Vec<String>>) -> Result<Vec<Value>, ToolError>;
 
-    fn list_tasks(&self, include_completed: bool)
-        -> Result<Vec<TaskSummary>, ToolError>;
+    fn list_tasks(&self, q: TaskQuery) -> Result<Vec<TaskSummary>, ToolError>;
     fn create_task(&self, subject: String, body: Option<String>,
         due_date: Option<String>, importance: String) -> Result<Value, ToolError>;
     fn complete_task(&self, task_id: String) -> Result<Value, ToolError>;
