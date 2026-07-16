@@ -735,14 +735,25 @@ fn get_note_includes_modified_after_update() {
     ).expect("create_note should succeed");
     let id = created["id"].as_str().unwrap().to_string();
 
+    // Outlook already sets LastModificationTime on the initial Save() inside
+    // create_note, so `modified.is_some()` alone (checked only after the
+    // update) would pass even if update_note were a no-op. Capture the
+    // baseline first and assert it's still populated and non-decreasing
+    // after the edit — a strict "must be later" check would risk flaking on
+    // same-second saves if Outlook's timestamp resolution is coarse.
+    let before = c.get_note(id.clone()).expect("get_note (baseline) should succeed");
+    let before_modified = before.modified.expect("modified should be populated right after create_note's own Save()");
+
     c.update_note(NoteUpdate {
         note_id: id.clone(),
         body: Some("outlook-mcp-rs P12 live modified probe (edited)".to_string()),
         ..Default::default()
     }).expect("update_note should succeed");
 
-    let note = c.get_note(id.clone()).expect("get_note should succeed");
-    assert!(note.modified.is_some(), "modified should be populated after an edit");
+    let note = c.get_note(id.clone()).expect("get_note (after update) should succeed");
+    let after_modified = note.modified.expect("modified should still be populated after an edit");
+    assert!(after_modified >= before_modified,
+        "modified ({after_modified}) should not go backwards after update_note ({before_modified})");
     assert!(note.body.starts_with("outlook-mcp-rs P12 live modified probe (edited)"));
 
     c.delete_note(id).expect("cleanup delete_note");
