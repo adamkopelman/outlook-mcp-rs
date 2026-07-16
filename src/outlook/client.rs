@@ -23,9 +23,10 @@ use crate::outlook::com::{
 use crate::outlook::types::*;
 use chrono::Datelike;
 use crate::outlook::{
-    com_recurrence_interval, create_event_status, friendly_recurrence_interval,
-    validate_recurrence, validate_recurrence_update, CreateEventInput, EmailQuery, EmailUpdate,
-    EventQuery, EventUpdate, OutlookClient, RecurrenceInput,
+    com_recurrence_interval, common_free, create_event_status, friendly_recurrence_interval,
+    parse_freebusy_slots, validate_recurrence, validate_recurrence_update, CheckAvailabilityInput,
+    CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient,
+    RecurrenceInput,
 };
 
 /// Matches `MAX_EMAIL_COUNT` in `client.py`.
@@ -1414,6 +1415,46 @@ impl OutlookClient for WindowsOutlookClient {
             };
             call_method(&item, "Delete", &mut [])?;
             Ok(json!({"status": "deleted", "subject": subject, "note": note}))
+        })
+    }
+
+    fn check_availability(&self, input: CheckAvailabilityInput) -> Result<AvailabilityResult, ToolError> {
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let start = parse_dt(&input.start, "start")?;
+            let end = parse_dt(&input.end, "end")?;
+            let interval = input.interval_minutes.max(1);
+            // FreeBusy has no "end" parameter — it returns a string covering a
+            // fixed range from `start`. Compute how many of its slots fall
+            // within [start, end) and truncate to that.
+            let total_minutes = (end - start).num_minutes().max(0);
+            let max_slots = ((total_minutes + interval as i64 - 1) / interval as i64) as usize;
+
+            let mut people = Vec::new();
+            for person in &input.people {
+                let recipient = to_disp(call_method(
+                    &ns, "CreateRecipient", &mut [variant_from_str(person)],
+                )?)?;
+                let resolved = variant_to_bool(&call_method(&recipient, "Resolve", &mut [])?)
+                    .unwrap_or(false);
+                if !resolved {
+                    people.push(PersonAvailability { person: person.clone(), resolved: false, slots: Vec::new() });
+                    continue;
+                }
+                let raw = variant_to_string(&call_method(
+                    &recipient,
+                    "FreeBusy",
+                    &mut [
+                        variant_from_datetime(&start)?,
+                        variant_from_i32(interval),
+                        variant_from_bool(true),
+                    ],
+                )?);
+                let slots = parse_freebusy_slots(&raw, &start, interval, max_slots);
+                people.push(PersonAvailability { person: person.clone(), resolved: true, slots });
+            }
+            let common = common_free(&people, &input.treat_as_free);
+            Ok(AvailabilityResult { people, common_free: common })
         })
     }
 

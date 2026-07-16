@@ -9,7 +9,7 @@ use rmcp::{
 use serde::Deserialize;
 
 use crate::error::ToolError;
-use crate::outlook::{CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient, RecurrenceInput};
+use crate::outlook::{CheckAvailabilityInput, CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient, RecurrenceInput};
 
 /// Runs a blocking `OutlookClient` call on a dedicated blocking thread so the
 /// tokio scheduler never migrates it mid-call (COM apartment-threading
@@ -312,6 +312,19 @@ pub struct DeleteEventParams {
     pub send_cancellation: bool,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CheckAvailabilityParams {
+    pub people: Vec<String>,
+    pub start: String,
+    pub end: String,
+    #[serde(default = "default_interval_minutes")]
+    pub interval_minutes: i32,
+    #[serde(default = "default_treat_as_free")]
+    pub treat_as_free: Vec<String>,
+}
+fn default_interval_minutes() -> i32 { 30 }
+fn default_treat_as_free() -> Vec<String> { vec!["free".to_string()] }
+
 // ---- Attachments ----
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -551,6 +564,18 @@ impl OutlookMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
         let result = run_blocking(move || client.delete_event(event_id, send_cancellation)).await?;
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    #[tool(description = "Check free/busy availability for one or more people over a time window. Returns each person's raw status per time slot (never event details) plus common_free: the windows where everyone is available. treat_as_free (default [\"free\"]) controls which statuses count as available when computing common_free; a person who can't be resolved is marked resolved:false and doesn't fail the call.")]
+    pub async fn check_availability(
+        &self,
+        Parameters(CheckAvailabilityParams { people, start, end, interval_minutes, treat_as_free }):
+            Parameters<CheckAvailabilityParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.clone();
+        let input = CheckAvailabilityInput { people, start, end, interval_minutes, treat_as_free };
+        let result = run_blocking(move || client.check_availability(input)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 

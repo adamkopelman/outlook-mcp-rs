@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use outlook_mcp_rs::outlook::fake::{FakeOutlookClient, EMAIL_ID};
 use outlook_mcp_rs::server::{
-    CompleteTaskParams, CreateDraftParams, CreateEventParams, CreateNoteParams, CreateTaskParams,
+    CheckAvailabilityParams, CompleteTaskParams, CreateDraftParams, CreateEventParams, CreateNoteParams, CreateTaskParams,
     DeleteEmailParams, DeleteEventParams, GetEmailParams, GetEventParams, GetNoteParams, ListAttachmentsParams,
     ListEmailsParams, ListEventsParams, ListTasksParams, OutlookMcpServer,
     RecurrenceParams, ReplyEmailParams, RespondToMeetingParams, SaveAttachmentsParams,
@@ -417,6 +417,46 @@ async fn create_event_forwards_recurrence() {
     assert_eq!(args["recurrence"]["pattern"], "weekly");
     assert_eq!(args["recurrence"]["days_of_week"], json!(["monday", "wednesday"]));
     assert_eq!(args["recurrence"]["occurrences"], 10);
+}
+
+#[tokio::test]
+async fn check_availability_forwards_params() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    server
+        .check_availability(Parameters(CheckAvailabilityParams {
+            people: vec!["alice@example.com".to_string(), "bob@example.com".to_string()],
+            start: "2099-01-01T09:00".to_string(),
+            end: "2099-01-01T17:00".to_string(),
+            interval_minutes: 30,
+            treat_as_free: vec!["free".to_string()],
+        }))
+        .await
+        .unwrap();
+    let (name, args) = &fake.calls()[0];
+    assert_eq!(name, "check_availability");
+    assert_eq!(args["people"], json!(["alice@example.com", "bob@example.com"]));
+    assert_eq!(args["interval_minutes"], 30);
+}
+
+#[tokio::test]
+async fn check_availability_returns_people_and_common_free() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let result = server
+        .check_availability(Parameters(CheckAvailabilityParams {
+            people: vec!["alice@example.com".to_string()],
+            start: "2099-01-01T09:00".to_string(),
+            end: "2099-01-01T09:30".to_string(),
+            interval_minutes: 30,
+            treat_as_free: vec!["free".to_string()],
+        }))
+        .await
+        .unwrap();
+    let v = result_json(&result);
+    assert_eq!(v["people"][0]["person"], "alice@example.com");
+    assert_eq!(v["people"][0]["resolved"], true);
+    assert_eq!(v["common_free"][0]["start"], "2099-01-01T09:00");
 }
 
 #[tokio::test]

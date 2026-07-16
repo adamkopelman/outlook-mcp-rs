@@ -152,6 +152,7 @@ pub trait OutlookClient: Send + Sync {
         comment: Option<String>, send: bool) -> Result<Value, ToolError>;
     fn update_event(&self, u: EventUpdate) -> Result<Value, ToolError>;
     fn delete_event(&self, event_id: String, send_cancellation: bool) -> Result<Value, ToolError>;
+    fn check_availability(&self, input: CheckAvailabilityInput) -> Result<AvailabilityResult, ToolError>;
 
     fn list_attachments(&self, email_id: String)
         -> Result<Vec<AttachmentInfo>, ToolError>;

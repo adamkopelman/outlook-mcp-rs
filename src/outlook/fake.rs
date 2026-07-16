@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 use crate::error::ToolError;
 use super::types::*;
 use super::{
-    validate_recurrence_update, CreateEventInput, EmailQuery, EmailUpdate, EventQuery,
-    EventUpdate, OutlookClient,
+    validate_recurrence_update, CheckAvailabilityInput, CreateEventInput, EmailQuery, EmailUpdate,
+    EventQuery, EventUpdate, OutlookClient,
 };
 
 pub const EMAIL_ID: &str = "entry-1|store-1";
@@ -236,6 +236,32 @@ impl OutlookClient for FakeOutlookClient {
     fn delete_event(&self, event_id: String, send_cancellation: bool) -> Result<Value, ToolError> {
         self.record("delete_event", json!({"event_id": event_id, "send_cancellation": send_cancellation}))?;
         Ok(json!({"status": "deleted", "note": "Moved to Deleted Items."}))
+    }
+
+    fn check_availability(&self, input: CheckAvailabilityInput) -> Result<AvailabilityResult, ToolError> {
+        self.record("check_availability", json!({
+            "people": input.people, "start": input.start, "end": input.end,
+            "interval_minutes": input.interval_minutes, "treat_as_free": input.treat_as_free,
+        }))?;
+        // Deterministic fake: every person resolves and is free for the
+        // whole requested window (one slot spanning [start, end)), so
+        // common_free tests can assert a single window without needing
+        // real FreeBusy parsing in the fake.
+        let people = input.people.iter().map(|p| PersonAvailability {
+            person: p.clone(),
+            resolved: true,
+            slots: vec![AvailabilitySlot {
+                start: input.start.clone(),
+                end: input.end.clone(),
+                status: "free".to_string(),
+            }],
+        }).collect::<Vec<_>>();
+        let common_free = if people.is_empty() {
+            Vec::new()
+        } else {
+            vec![FreeWindow { start: input.start.clone(), end: input.end.clone() }]
+        };
+        Ok(AvailabilityResult { people, common_free })
     }
 
     fn list_attachments(&self, email_id: String)
