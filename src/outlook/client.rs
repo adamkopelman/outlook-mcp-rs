@@ -23,8 +23,9 @@ use crate::outlook::com::{
 use crate::outlook::types::*;
 use chrono::Datelike;
 use crate::outlook::{
-    com_recurrence_interval, create_event_status, validate_recurrence, CreateEventInput,
-    EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient, RecurrenceInput,
+    com_recurrence_interval, create_event_status, friendly_recurrence_interval,
+    validate_recurrence, CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate,
+    OutlookClient, RecurrenceInput,
 };
 
 /// Matches `MAX_EMAIL_COUNT` in `client.py`.
@@ -335,8 +336,10 @@ fn recurrence_info(item: &IDispatch) -> Result<Option<RecurrenceInfo>, ToolError
     let recurrence_type =
         variant_to_i32(&get_property(&pattern, "RecurrenceType").unwrap_or_default())
             .unwrap_or(c::OL_RECURS_DAILY);
-    let interval =
-        variant_to_i32(&get_property(&pattern, "Interval").unwrap_or_default()).unwrap_or(1);
+    let interval = friendly_recurrence_interval(
+        recurrence_type,
+        variant_to_i32(&get_property(&pattern, "Interval").unwrap_or_default()).unwrap_or(1),
+    );
     let day_mask =
         variant_to_i32(&get_property(&pattern, "DayOfWeekMask").unwrap_or_default()).unwrap_or(0);
     let day_of_month = variant_to_i32(&get_property(&pattern, "DayOfMonth").unwrap_or_default());

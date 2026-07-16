@@ -227,9 +227,25 @@ pub fn com_recurrence_interval(r: &RecurrenceInput) -> i32 {
     }
 }
 
+/// Inverse of [`com_recurrence_interval`]: converts a COM `Interval` value
+/// read back from `RecurrencePattern` into the user-facing "every N
+/// years/months/..." value. Only `olRecursYearly` (`OL_RECURS_YEARLY`) needs
+/// unwinding, since it's the only pattern `com_recurrence_interval` scales.
+/// Called by `recurrence_info` (`client.rs`) right after reading `Interval`.
+pub fn friendly_recurrence_interval(recurrence_type: i32, com_interval: i32) -> i32 {
+    if recurrence_type == crate::constants::OL_RECURS_YEARLY {
+        com_interval / 12
+    } else {
+        com_interval
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{com_recurrence_interval, create_event_status, validate_recurrence, RecurrenceInput};
+    use super::{
+        com_recurrence_interval, create_event_status, friendly_recurrence_interval,
+        validate_recurrence, RecurrenceInput,
+    };
 
     #[test]
     fn create_event_status_covers_all_three_outcomes() {
@@ -291,5 +307,25 @@ mod tests {
         let mut r = recurrence("weekly");
         r.interval = Some(3);
         assert_eq!(com_recurrence_interval(&r), 3); // unchanged for non-yearly
+    }
+
+    #[test]
+    fn friendly_recurrence_interval_divides_yearly_by_12() {
+        assert_eq!(
+            friendly_recurrence_interval(crate::constants::OL_RECURS_YEARLY, 12),
+            1
+        );
+        assert_eq!(
+            friendly_recurrence_interval(crate::constants::OL_RECURS_YEARLY, 24),
+            2
+        );
+        assert_eq!(
+            friendly_recurrence_interval(crate::constants::OL_RECURS_DAILY, 1),
+            1
+        );
+        assert_eq!(
+            friendly_recurrence_interval(crate::constants::OL_RECURS_WEEKLY, 3),
+            3
+        );
     }
 }
