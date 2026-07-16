@@ -43,32 +43,38 @@ One new `#[ignore]`d test function in `tests/system_test.rs` (or a dated sibling
 3. A final summary table, printed last.
 4. A real `assert!` only as the literal last line, after cleanup has already run, so the process exit code reflects overall success.
 
-### 3. Execute, then root-cause every failure for real
+### 3. Write assertions that can actually fail
+
+Before asserting a field changed as a result of an action, ask: could this field already hold a matching value for a reason unrelated to the action under test? If so, the assertion proves nothing — capture a baseline *before* the action and assert against that baseline afterward, not just "populated"/"non-null" after.
+
+Real example: a test asserting `get_note` reports `modified` (`LastModificationTime`) after `update_note` checked only `modified.is_some()` post-update. But the item's own `create_note` call already does a `Save()`, which populates `LastModificationTime` on creation — so the assertion passed identically even with the `update_note` call deleted from the test entirely. It looked like a real regression test but could never fail from the thing it claimed to test. Caught by a task reviewer, not by running it. Fix: read the field once before the action, assert non-decreasing after (a strict "must be later" check risks flaking on coarse/same-second timestamp resolution — pair it with a second assertion, like the actually-edited content, that doesn't depend on timestamp granularity at all).
+
+### 4. Execute, then root-cause every failure for real
 
 Never hand-wave a live failure as "probably flaky." For each failure:
 - Reproduce it with a **cheap, isolated, zero-write diagnostic** before spending another full run on it — a tiny throwaway `#[ignore]`d test hitting just the suspect call, or a raw PowerShell COM probe (`New-Object -ComObject Outlook.Application`) that bypasses this project's code entirely. This is how you tell a real code bug from an environment/account issue, and it's much cheaper than another 3-minute full run that sends more real mail.
 - If it looks like a transient timing issue, prove it: retry the *exact same* property read on the *exact same* already-obtained COM object several times with delays. If it fails 100% of retries even minutes later, it's not timing — it's structural (e.g. Plan 9's system-test found that items yielded by `GetFirst`/`GetNext` after `Restrict`+`IncludeRecurrences` carry a `.Parent` whose `.StoreID` never resolves, deterministically — a real object-model gap, not sync lag).
 - Delete all temporary diagnostic instrumentation (`eprintln!`s, throwaway test files) before committing — verify with `git status`/`git diff` that only the intended fix remains.
 
-### 4. Known Outlook/COM gremlins to check for before blaming your code
+### 5. Known Outlook/COM gremlins to check for before blaming your code
 
 - **"The operation failed" / every write fails, reads still work:** often an Outlook licensing/activation hiccup (window title may show "(Unlicensed Product)"). Confirm outside your code with a raw PowerShell `CreateItem`+`Save()` probe. Fix: **ask the user** before restarting Outlook (`$outlook.Quit()` then relaunch) — this is a real, moderately disruptive action (closes any open compose windows) and needs fresh authorization each time, not just because it was approved once earlier in the session.
 - **"Unknown name" (`0x80020006` / `DISP_E_UNKNOWNNAME`) on property access:** can be genuinely transient (Cached Exchange Mode sync lag under heavy write load) or structural (see above). Distinguish before "fixing" with a retry — a bounded retry band-aids a transient cause but does nothing for a structural one, and you'll waste a verification cycle finding that out the hard way.
 - **Cleanup silently falls behind after many repeated runs in one session:** if a cleanup sweep finds *what to delete* via a `count`-capped list query (e.g. `count: 25`), and the mailbox has accumulated more test debris than that cap from earlier incomplete runs, cleanup only ever touches the newest N and the rest compounds — run over run — until it looks like a mysterious, escalating "empty results" bug in an unrelated code path. If you've run the same live suite many times in one session and start seeing inexplicable empty-result failures, check the *raw* item count via COM before assuming a code regression; a capped cleanup sweep is a prime suspect. Recommended fix: give cleanup sweeps a much higher/uncapped limit than regular tool-facing queries.
 - **A COM restart doesn't fix everything:** if identical failures persist across an Outlook restart, don't conclude "must be a code bug" — first rule out accumulated mailbox state (see above) with a raw COM item count, since a restart clears process-level state but not mailbox contents.
 
-### 5. Cleanup discipline
+### 6. Cleanup discipline
 
 - Sweep every folder you touched (Inbox, Drafts, Sent Items, Archive, Calendar, wherever items may have moved to), matching only your session's exact tag.
 - Loop the sweep-and-delete until a pass finds 0 matches — a single pass over a live COM collection while deleting from it can skip items (index shifting mid-iteration).
 - **Never touch anything that doesn't match your tag.** If you find other test debris (from older sessions, other tools, or ambiguous-looking real data), stop and ask the user rather than guessing — don't fold unrelated cleanup into your task.
 - Confirm final state via a raw COM count/subject sweep, independent of this project's own (possibly-buggy) list_* code — that's your ground truth, not a self-reported "cleanup: PASS."
 
-### 6. Fixing what you find
+### 7. Fixing what you find
 
 This skill covers testing and root-causing, not hasty inline fixes. Once a real code bug is confirmed and root-caused, fix it with the same rigor as any other change to this codebase: TDD where feasible, live re-verification of the specific broken behavior, and independent review of the diff (see `superpowers:subagent-driven-development`) before considering it done — a live-COM bug fix has real blast radius and deserves the same scrutiny as any other shipped change.
 
-### 7. Report
+### 8. Report
 
 Write a results doc (`SYSTEM_TEST_RESULTS_<date>.md`) with: a pass/fail table per test id, a root-caused writeup for every failure (not just "flaky"), confirmed final cleanup state, and any non-code findings worth flagging separately (e.g. a real mail-delivery bounce discovered along the way, unrelated to the tools themselves).
 
