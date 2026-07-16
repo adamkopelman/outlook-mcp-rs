@@ -47,9 +47,11 @@ your MCP client at it directly — no install step.
 - `update_task` — change an existing task: mark complete/reopen, subject, body, due_date, start_date, importance, add/remove categories, percent_complete, reminder_time
 
 **Notes**
-- `list_notes` — list Outlook notes
+- `list_notes` — list Outlook notes (filter by category or a text query on the body)
 - `get_note` — get the full body of one note by id
-- `create_note` — create a new Outlook note
+- `create_note` — create a new Outlook note (optional categories, color)
+- `update_note` — change an existing note: body, add/remove categories, color
+- `delete_note` — delete a note
 
 ## Development
 

@@ -9,7 +9,7 @@
 //! can't be undone — see TESTING.md for how to test those by hand.
 
 use outlook_mcp_rs::outlook::client::WindowsOutlookClient;
-use outlook_mcp_rs::outlook::{CheckAvailabilityInput, CreateEventInput, EmailQuery, EventQuery, OutlookClient, EmailUpdate, EventUpdate, RecurrenceInput, TaskQuery, TaskUpdate};
+use outlook_mcp_rs::outlook::{CheckAvailabilityInput, CreateEventInput, EmailQuery, EventQuery, OutlookClient, EmailUpdate, EventUpdate, NoteQuery, NoteUpdate, RecurrenceInput, TaskQuery, TaskUpdate};
 
 fn client() -> WindowsOutlookClient {
     WindowsOutlookClient::new()
@@ -703,5 +703,84 @@ fn delete_task_removes_it() {
     let id = created["id"].as_str().unwrap().to_string();
 
     let deleted = c.delete_task(id).expect("delete_task should succeed");
+    assert_eq!(deleted["status"], "deleted");
+}
+
+#[test]
+#[ignore]
+fn list_notes_filters_and_create_note_additions_round_trip() {
+    let c = client();
+    let created = c.create_note(
+        "outlook-mcp-rs P12 live filtered note - remember to renew".to_string(),
+        Some(vec!["Green Category".to_string()]),
+        Some("green".to_string()),
+    ).expect("create_note with additions should succeed");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let found = c.list_notes(NoteQuery {
+        category: Some("Green Category".to_string()),
+        query: Some("renew".to_string()),
+    }).expect("list_notes should succeed");
+    assert!(found.iter().any(|n| n.id == id), "filtered list_notes should find the new note");
+
+    c.delete_note(id).expect("cleanup delete_note");
+}
+
+#[test]
+#[ignore]
+fn get_note_includes_modified_after_update() {
+    let c = client();
+    let created = c.create_note(
+        "outlook-mcp-rs P12 live modified probe".to_string(), None, None,
+    ).expect("create_note should succeed");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    c.update_note(NoteUpdate {
+        note_id: id.clone(),
+        body: Some("outlook-mcp-rs P12 live modified probe (edited)".to_string()),
+        ..Default::default()
+    }).expect("update_note should succeed");
+
+    let note = c.get_note(id.clone()).expect("get_note should succeed");
+    assert!(note.modified.is_some(), "modified should be populated after an edit");
+    assert!(note.body.starts_with("outlook-mcp-rs P12 live modified probe (edited)"));
+
+    c.delete_note(id).expect("cleanup delete_note");
+}
+
+#[test]
+#[ignore]
+fn update_note_manages_categories_and_color() {
+    let c = client();
+    let created = c.create_note(
+        "outlook-mcp-rs P12 live category probe".to_string(), None, None,
+    ).expect("create_note should succeed");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let updated = c.update_note(NoteUpdate {
+        note_id: id.clone(),
+        add_categories: Some(vec!["Blue Category".to_string()]),
+        color: Some("blue".to_string()),
+        ..Default::default()
+    }).expect("update_note should succeed");
+    assert!(updated["changed"].as_array().unwrap().iter().any(|v| v == "add_categories"));
+    assert!(updated["changed"].as_array().unwrap().iter().any(|v| v == "color"));
+
+    let note = c.get_note(id.clone()).expect("get_note should succeed");
+    assert!(note.summary.categories.iter().any(|cat| cat == "Blue Category"));
+
+    c.delete_note(id).expect("cleanup delete_note");
+}
+
+#[test]
+#[ignore]
+fn delete_note_removes_it() {
+    let c = client();
+    let created = c.create_note(
+        "outlook-mcp-rs P12 live delete probe".to_string(), None, None,
+    ).expect("create_note should succeed");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let deleted = c.delete_note(id).expect("delete_note should succeed");
     assert_eq!(deleted["status"], "deleted");
 }

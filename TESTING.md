@@ -82,6 +82,12 @@ tool — `mark_complete: true`/`false` on `update_task` now covers completing
 *and* reopening a task) are covered by the live suite:
 `cargo test --test live_outlook -- --ignored list_tasks_filters_and_create_task_additions_round_trip update_task_marks_complete_then_reopens delete_task_removes_it`.
 
+`list_notes` filters (`category`, `query` — the latter matching the note's
+real body text, not just a derived subject), `create_note`'s additions
+(`categories`, `color`), `get_note`'s `modified` field, and
+`update_note`/`delete_note` are covered by the live suite:
+`cargo test --test live_outlook -- --ignored list_notes_filters_and_create_note_additions_round_trip get_note_includes_modified_after_update update_note_manages_categories_and_color delete_note_removes_it`.
+
 `check_availability`'s single-mailbox path (resolving your own address and
 reading its free/busy slots, plus the graceful-failure path for an address
 that can't provide free/busy data) is covered by the live suite:
