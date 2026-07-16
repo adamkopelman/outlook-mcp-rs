@@ -1764,6 +1764,16 @@ impl OutlookClient for WindowsOutlookClient {
         })
     }
 
+    fn delete_task(&self, task_id: String) -> Result<Value, ToolError> {
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            let item = get_item(&ns, &task_id)?;
+            let subject = variant_to_string(&get_property(&item, "Subject")?);
+            call_method(&item, "Delete", &mut [])?;
+            Ok(json!({"status": "deleted", "subject": subject, "note": "Moved to Deleted Items."}))
+        })
+    }
+
     // ---- Notes (Task 16) -----------------------------------------------
 
     fn list_notes(&self) -> Result<Vec<NoteSummary>, ToolError> {

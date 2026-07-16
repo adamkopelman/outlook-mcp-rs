@@ -405,6 +405,11 @@ pub struct UpdateTaskParams {
     pub reminder_time: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteTaskParams {
+    pub task_id: String,
+}
+
 // ---- Notes ----
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -684,6 +689,16 @@ impl OutlookMcpServer {
             reminder_time: p.reminder_time,
         };
         let result = run_blocking(move || client.update_task(u)).await?;
+        Ok(CallToolResult::success(vec![json_content(&result)?]))
+    }
+
+    #[tool(description = "Delete a task (moves it to Deleted Items).")]
+    pub async fn delete_task(
+        &self,
+        Parameters(DeleteTaskParams { task_id }): Parameters<DeleteTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.clone();
+        let result = run_blocking(move || client.delete_task(task_id)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 

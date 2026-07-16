@@ -320,6 +320,11 @@ impl OutlookClient for FakeOutlookClient {
         Ok(json!({"status": "updated", "id": u.task_id, "changed": changed}))
     }
 
+    fn delete_task(&self, task_id: String) -> Result<Value, ToolError> {
+        self.record("delete_task", json!({"task_id": task_id}))?;
+        Ok(json!({"status": "deleted", "note": "Moved to Deleted Items."}))
+    }
+
     fn list_notes(&self) -> Result<Vec<NoteSummary>, ToolError> {
         self.record("list_notes", json!({}))?;
         Ok(vec![NoteSummary { id: NOTE_ID.into(), subject: "Ideas".into(), created: None, categories: vec![] }])

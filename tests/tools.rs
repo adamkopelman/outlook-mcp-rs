@@ -3,7 +3,7 @@ use std::sync::Arc;
 use outlook_mcp_rs::outlook::fake::{FakeOutlookClient, EMAIL_ID};
 use outlook_mcp_rs::server::{
     CheckAvailabilityParams, CreateDraftParams, CreateEventParams, CreateNoteParams, CreateTaskParams,
-    DeleteEmailParams, DeleteEventParams, GetEmailParams, GetEventParams, GetNoteParams, ListAttachmentsParams,
+    DeleteEmailParams, DeleteEventParams, DeleteTaskParams, GetEmailParams, GetEventParams, GetNoteParams, ListAttachmentsParams,
     ListEmailsParams, ListEventsParams, ListTasksParams, OutlookMcpServer,
     RecurrenceParams, ReplyEmailParams, RespondToMeetingParams, SaveAttachmentsParams,
     SendEmailParams, UpdateEmailParams, UpdateEventParams, UpdateTaskParams,
@@ -803,6 +803,22 @@ async fn update_task_forwards_field_edits() {
     assert_eq!(args["importance"], "high");
     assert_eq!(args["add_categories"], json!(["Red Category"]));
     assert_eq!(args["percent_complete"], 50);
+}
+
+#[tokio::test]
+async fn delete_task_records_call() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    use outlook_mcp_rs::outlook::fake::TASK_ID;
+    let result = server
+        .delete_task(Parameters(DeleteTaskParams { task_id: TASK_ID.to_string() }))
+        .await
+        .unwrap();
+    let json = result_json(&result);
+    assert_eq!(json["status"], "deleted");
+    let (name, args) = &fake.calls()[0];
+    assert_eq!(name, "delete_task");
+    assert_eq!(args["task_id"], TASK_ID);
 }
 
 // ---- Notes ----

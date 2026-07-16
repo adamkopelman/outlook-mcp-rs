@@ -199,6 +199,7 @@ pub trait OutlookClient: Send + Sync {
         due_date: Option<String>, importance: String, categories: Option<Vec<String>>,
         start_date: Option<String>, reminder_time: Option<String>) -> Result<Value, ToolError>;
     fn update_task(&self, u: TaskUpdate) -> Result<Value, ToolError>;
+    fn delete_task(&self, task_id: String) -> Result<Value, ToolError>;
 
     fn list_notes(&self) -> Result<Vec<NoteSummary>, ToolError>;
     fn get_note(&self, note_id: String) -> Result<NoteDetail, ToolError>;
