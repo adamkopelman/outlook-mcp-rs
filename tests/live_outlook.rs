@@ -57,6 +57,7 @@ fn create_task_complete_then_it_is_marked_complete() {
     let c = client();
     let created = c.create_task(
         "outlook-mcp-rs live test task".to_string(), None, None, "normal".to_string(),
+        None, None, None,
     ).expect("create_task should succeed");
     let id = created["id"].as_str().unwrap().to_string();
     c.complete_task(id.clone()).expect("complete_task should succeed");

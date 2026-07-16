@@ -731,6 +731,23 @@ async fn create_task_passes_importance() {
 }
 
 #[tokio::test]
+async fn create_task_forwards_categories_start_date_and_reminder() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let params: CreateTaskParams = serde_json::from_value(json!({
+        "subject": "Ship it",
+        "categories": ["Blue Category"],
+        "start_date": "2099-01-01",
+        "reminder_time": "2099-01-01T09:00"
+    })).unwrap();
+    server.create_task(Parameters(params)).await.unwrap();
+    let (_, args) = &fake.calls()[0];
+    assert_eq!(args["categories"], json!(["Blue Category"]));
+    assert_eq!(args["start_date"], "2099-01-01");
+    assert_eq!(args["reminder_time"], "2099-01-01T09:00");
+}
+
+#[tokio::test]
 async fn complete_task_records_call() {
     use outlook_mcp_rs::outlook::fake::TASK_ID;
     let fake = Arc::new(FakeOutlookClient::new());

@@ -175,7 +175,8 @@ pub trait OutlookClient: Send + Sync {
 
     fn list_tasks(&self, q: TaskQuery) -> Result<Vec<TaskSummary>, ToolError>;
     fn create_task(&self, subject: String, body: Option<String>,
-        due_date: Option<String>, importance: String) -> Result<Value, ToolError>;
+        due_date: Option<String>, importance: String, categories: Option<Vec<String>>,
+        start_date: Option<String>, reminder_time: Option<String>) -> Result<Value, ToolError>;
     fn complete_task(&self, task_id: String) -> Result<Value, ToolError>;
 
     fn list_notes(&self) -> Result<Vec<NoteSummary>, ToolError>;

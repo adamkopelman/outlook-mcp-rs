@@ -289,9 +289,12 @@ impl OutlookClient for FakeOutlookClient {
     }
 
     fn create_task(&self, subject: String, body: Option<String>,
-        due_date: Option<String>, importance: String) -> Result<Value, ToolError> {
-        self.record("create_task",
-            json!({"subject": subject, "body": body, "due_date": due_date, "importance": importance}))?;
+        due_date: Option<String>, importance: String, categories: Option<Vec<String>>,
+        start_date: Option<String>, reminder_time: Option<String>) -> Result<Value, ToolError> {
+        self.record("create_task", json!({
+            "subject": subject, "body": body, "due_date": due_date, "importance": importance,
+            "categories": categories, "start_date": start_date, "reminder_time": reminder_time,
+        }))?;
         Ok(json!({"status": "created", "id": TASK_ID, "subject": subject}))
     }
 

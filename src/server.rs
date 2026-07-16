@@ -366,6 +366,15 @@ pub struct CreateTaskParams {
     pub due_date: Option<String>,
     #[serde(default = "default_importance")]
     pub importance: String,
+    /// Category names to assign on creation.
+    #[serde(default)]
+    pub categories: Option<Vec<String>>,
+    #[serde(default)]
+    pub start_date: Option<String>,
+    /// ISO datetime — an absolute reminder time (unlike appointment
+    /// reminders, which are minutes-before-start).
+    #[serde(default)]
+    pub reminder_time: Option<String>,
 }
 fn default_importance() -> String { "normal".to_string() }
 
@@ -626,13 +635,16 @@ impl OutlookMcpServer {
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
-    #[tool(description = "Create a new task.")]
+    #[tool(description = "Create a new task. reminder_time (ISO datetime) is an absolute reminder time, unlike appointment reminders which are minutes-before-start.")]
     pub async fn create_task(
         &self,
-        Parameters(CreateTaskParams { subject, body, due_date, importance }): Parameters<CreateTaskParams>,
+        Parameters(CreateTaskParams { subject, body, due_date, importance, categories, start_date, reminder_time }):
+            Parameters<CreateTaskParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let result = run_blocking(move || client.create_task(subject, body, due_date, importance)).await?;
+        let result = run_blocking(move ||
+            client.create_task(subject, body, due_date, importance, categories, start_date, reminder_time)
+        ).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 

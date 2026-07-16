@@ -1636,6 +1636,9 @@ impl OutlookClient for WindowsOutlookClient {
         body: Option<String>,
         due_date: Option<String>,
         importance: String,
+        categories: Option<Vec<String>>,
+        start_date: Option<String>,
+        reminder_time: Option<String>,
     ) -> Result<Value, ToolError> {
         let importance_key = importance.trim().to_lowercase();
         let importance_id = c::importance_name_to_id(&importance_key).ok_or_else(|| {
@@ -1661,7 +1664,25 @@ impl OutlookClient for WindowsOutlookClient {
                     variant_from_datetime(&parse_dt(due, "due_date")?)?,
                 )?;
             }
+            if let Some(start) = start_date.as_deref().filter(|d| !d.is_empty()) {
+                put_property(
+                    &task,
+                    "StartDate",
+                    variant_from_datetime(&parse_dt(start, "start_date")?)?,
+                )?;
+            }
+            if let Some(reminder) = reminder_time.as_deref().filter(|d| !d.is_empty()) {
+                put_property(&task, "ReminderSet", variant_from_bool(true))?;
+                put_property(
+                    &task,
+                    "ReminderTime",
+                    variant_from_datetime(&parse_dt(reminder, "reminder_time")?)?,
+                )?;
+            }
             put_property(&task, "Importance", variant_from_i32(importance_id))?;
+            if let Some(cats) = categories.as_ref().filter(|c| !c.is_empty()) {
+                set_item_categories(&task, cats)?;
+            }
             call_method(&task, "Save", &mut [])?;
             Ok(json!({"status": "created", "id": make_id(&task)?, "subject": subject}))
         })
