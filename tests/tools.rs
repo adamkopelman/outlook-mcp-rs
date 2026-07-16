@@ -876,10 +876,42 @@ async fn create_note_records_body() {
     let fake = Arc::new(FakeOutlookClient::new());
     let server = OutlookMcpServer::new(fake.clone());
     server
-        .create_note(Parameters(CreateNoteParams { body: "Ideas\n- one".to_string() }))
+        .create_note(Parameters(CreateNoteParams {
+            body: "Ideas\n- one".to_string(), categories: None, color: None,
+        }))
         .await
         .unwrap();
     assert_eq!(fake.calls(), vec![
-        ("create_note".to_string(), json!({"body": "Ideas\n- one"})),
+        ("create_note".to_string(), json!({"body": "Ideas\n- one", "categories": null, "color": null})),
     ]);
+}
+
+#[tokio::test]
+async fn create_note_forwards_categories_and_color() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let params: CreateNoteParams = serde_json::from_value(json!({
+        "body": "Remember to renew the domain",
+        "categories": ["Yellow Category"],
+        "color": "yellow"
+    })).unwrap();
+    server.create_note(Parameters(params)).await.unwrap();
+    let (_, args) = &fake.calls()[0];
+    assert_eq!(args["categories"], json!(["Yellow Category"]));
+    assert_eq!(args["color"], "yellow");
+}
+
+#[tokio::test]
+async fn get_note_includes_modified() {
+    use outlook_mcp_rs::outlook::fake::NOTE_ID;
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let result = server
+        .get_note(Parameters(GetNoteParams { note_id: NOTE_ID.to_string() }))
+        .await
+        .unwrap();
+    let v = result_json(&result);
+    // The fake may return null for a note that was never "modified" —
+    // assert the key exists in the JSON shape, not a specific non-null value.
+    assert!(v.as_object().unwrap().contains_key("modified"));
 }

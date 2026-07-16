@@ -430,6 +430,12 @@ pub struct GetNoteParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CreateNoteParams {
     pub body: String,
+    /// Category names to assign on creation.
+    #[serde(default)]
+    pub categories: Option<Vec<String>>,
+    /// "blue" | "green" | "pink" | "yellow" | "white".
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 #[tool_router]
@@ -738,10 +744,10 @@ impl OutlookMcpServer {
     #[tool(description = "Create a new note.")]
     pub async fn create_note(
         &self,
-        Parameters(CreateNoteParams { body }): Parameters<CreateNoteParams>,
+        Parameters(CreateNoteParams { body, categories, color }): Parameters<CreateNoteParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let result = run_blocking(move || client.create_note(body)).await?;
+        let result = run_blocking(move || client.create_note(body, categories, color)).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 }

@@ -72,7 +72,7 @@ fn create_task_update_task_marks_complete() {
 #[ignore]
 fn create_note_then_get_it_back() {
     let c = client();
-    let created = c.create_note("outlook-mcp-rs live test note".to_string())
+    let created = c.create_note("outlook-mcp-rs live test note".to_string(), None, None)
         .expect("create_note should succeed");
     let id = created["id"].as_str().unwrap().to_string();
     let note = c.get_note(id).expect("get_note should succeed");

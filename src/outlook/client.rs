@@ -1831,15 +1831,23 @@ impl OutlookClient for WindowsOutlookClient {
             Ok(NoteDetail {
                 summary,
                 body: truncate(&variant_to_string(&get_property(&note, "Body")?)),
+                modified: variant_to_iso_string(&get_property(&note, "LastModificationTime").unwrap_or_default()),
             })
         })
     }
 
-    fn create_note(&self, body: String) -> Result<Value, ToolError> {
+    fn create_note(&self, body: String, categories: Option<Vec<String>>, color: Option<String>) -> Result<Value, ToolError> {
         // Validate before touching COM (fail-fast, like `create_task`).
         if body.is_empty() {
             return Err(ToolError::new("create_note requires a non-empty body."));
         }
+        let color_id = color.as_deref().map(|c| {
+            c::note_color_to_id(c).ok_or_else(|| {
+                ToolError::new(format!(
+                    "invalid color {c:?}: expected \"blue\", \"green\", \"pink\", \"yellow\", or \"white\""
+                ))
+            })
+        }).transpose()?;
         self.with_com(|| {
             let (app, _ns) = mapi()?;
             let note = to_disp(call_method(
@@ -1848,7 +1856,14 @@ impl OutlookClient for WindowsOutlookClient {
                 &mut [variant_from_i32(c::OL_NOTE_ITEM)],
             )?)?;
             put_property(&note, "Body", variant_from_str(&body))?;
+            if let Some(id) = color_id {
+                put_property(&note, "Color", variant_from_i32(id))?;
+            }
             call_method(&note, "Save", &mut [])?;
+            if let Some(cats) = categories.as_ref().filter(|c| !c.is_empty()) {
+                set_item_categories(&note, cats)?;
+                call_method(&note, "Save", &mut [])?;
+            }
             Ok(json!({"status": "created", "id": make_id(&note)?}))
         })
     }

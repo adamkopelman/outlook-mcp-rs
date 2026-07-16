@@ -86,6 +86,15 @@ pub const OL_THURSDAY: i32 = 16;
 pub const OL_FRIDAY: i32 = 32;
 pub const OL_SATURDAY: i32 = 64;
 
+// OlNoteColor (NoteItem.Color) — confirmed against Microsoft's official
+// enum reference; note the declared order (blue, green, pink, yellow,
+// white) is NOT alphabetical.
+pub const OL_NOTE_COLOR_BLUE: i32 = 0;
+pub const OL_NOTE_COLOR_GREEN: i32 = 1;
+pub const OL_NOTE_COLOR_PINK: i32 = 2;
+pub const OL_NOTE_COLOR_YELLOW: i32 = 3;
+pub const OL_NOTE_COLOR_WHITE: i32 = 4;
+
 pub fn folder_name_to_id(name: &str) -> Option<i32> {
     match name.to_lowercase().as_str() {
         "inbox" => Some(OL_FOLDER_INBOX),
@@ -102,6 +111,17 @@ pub fn importance_name_to_id(name: &str) -> Option<i32> {
         "low" => Some(OL_IMPORTANCE_LOW),
         "normal" => Some(OL_IMPORTANCE_NORMAL),
         "high" => Some(OL_IMPORTANCE_HIGH),
+        _ => None,
+    }
+}
+
+pub fn note_color_to_id(name: &str) -> Option<i32> {
+    match name.to_lowercase().as_str() {
+        "blue" => Some(OL_NOTE_COLOR_BLUE),
+        "green" => Some(OL_NOTE_COLOR_GREEN),
+        "pink" => Some(OL_NOTE_COLOR_PINK),
+        "yellow" => Some(OL_NOTE_COLOR_YELLOW),
+        "white" => Some(OL_NOTE_COLOR_WHITE),
         _ => None,
     }
 }
@@ -130,5 +150,12 @@ mod tests {
         assert_eq!(importance_name_to_id("HIGH"), Some(OL_IMPORTANCE_HIGH));
         assert_eq!(meeting_response_to_id("Accept"), Some(OL_MEETING_ACCEPTED));
         assert_eq!(meeting_response_to_id("maybe"), None);
+    }
+
+    #[test]
+    fn note_color_lookup_is_case_insensitive() {
+        assert_eq!(note_color_to_id("BLUE"), Some(OL_NOTE_COLOR_BLUE));
+        assert_eq!(note_color_to_id("Yellow"), Some(OL_NOTE_COLOR_YELLOW));
+        assert_eq!(note_color_to_id("purple"), None);
     }
 }

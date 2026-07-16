@@ -170,6 +170,7 @@ pub struct NoteDetail {
     #[serde(flatten)]
     pub summary: NoteSummary,
     pub body: String,
+    pub modified: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

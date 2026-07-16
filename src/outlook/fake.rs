@@ -335,11 +335,12 @@ impl OutlookClient for FakeOutlookClient {
         Ok(NoteDetail {
             summary: NoteSummary { id: note_id, subject: "Ideas".into(), created: None, categories: vec![] },
             body: "Ideas\n- one".into(),
+            modified: None,
         })
     }
 
-    fn create_note(&self, body: String) -> Result<Value, ToolError> {
-        self.record("create_note", json!({"body": body}))?;
+    fn create_note(&self, body: String, categories: Option<Vec<String>>, color: Option<String>) -> Result<Value, ToolError> {
+        self.record("create_note", json!({"body": body, "categories": categories, "color": color}))?;
         Ok(json!({"status": "created", "id": NOTE_ID}))
     }
 }
