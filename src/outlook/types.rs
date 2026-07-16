@@ -112,6 +112,32 @@ pub struct RecurrenceInfo {
     pub no_end: bool,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct AvailabilitySlot {
+    pub start: String,
+    pub end: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PersonAvailability {
+    pub person: String,
+    pub resolved: bool,
+    pub slots: Vec<AvailabilitySlot>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct FreeWindow {
+    pub start: String,
+    pub end: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AvailabilityResult {
+    pub people: Vec<PersonAvailability>,
+    pub common_free: Vec<FreeWindow>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskSummary {
     pub id: String,

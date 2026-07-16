@@ -253,12 +253,98 @@ pub fn friendly_recurrence_interval(recurrence_type: i32, com_interval: i32) -> 
     }
 }
 
+/// All inputs for `check_availability`. `treat_as_free` decides which raw
+/// statuses count as "free" when computing `common_free` — it never changes
+/// what a person's own `slots` report (those always show the true status).
+#[derive(Debug, Clone)]
+pub struct CheckAvailabilityInput {
+    pub people: Vec<String>,
+    pub start: String,
+    pub end: String,
+    pub interval_minutes: i32,
+    pub treat_as_free: Vec<String>,
+}
+
+/// Parses Outlook's raw `Recipient.FreeBusy` status-code string (one ASCII
+/// digit per `interval_minutes`-sized slot: `'0'` free, `'1'` tentative,
+/// `'2'` busy, `'3'` out-of-office, `'4'` working-elsewhere — the exact
+/// `OlBusyStatus` numbering `friendly::busy_status_word` already maps) into
+/// timestamped slots starting at `start`. `FreeBusy` returns a string
+/// covering a much longer range than the caller's `[start, end)` window (it
+/// has no `end` parameter), so callers must compute `max_slots` themselves
+/// — `(end - start) / interval_minutes`, rounded up — and this function
+/// truncates to it. Any digit outside 0-4 (Outlook shouldn't produce one,
+/// but the string could be malformed) falls back to `"busy"`, the same
+/// catch-all `busy_status_word` uses.
+pub fn parse_freebusy_slots(
+    raw: &str,
+    start: &chrono::NaiveDateTime,
+    interval_minutes: i32,
+    max_slots: usize,
+) -> Vec<AvailabilitySlot> {
+    raw.chars()
+        .take(max_slots)
+        .enumerate()
+        .map(|(i, ch)| {
+            let code = ch.to_digit(10).map(|d| d as i32).unwrap_or(crate::constants::OL_BUSY);
+            let slot_start = *start + chrono::Duration::minutes(i as i64 * interval_minutes as i64);
+            let slot_end = slot_start + chrono::Duration::minutes(interval_minutes as i64);
+            AvailabilitySlot {
+                start: slot_start.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                end: slot_end.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                status: crate::friendly::busy_status_word(code).to_string(),
+            }
+        })
+        .collect()
+}
+
+/// The windows where every **resolved** person's status is in
+/// `treat_as_free` (case-insensitive). Unresolved people are skipped
+/// entirely — they neither block nor contribute to a common-free window.
+/// Assumes all resolved people's `slots` share the same slot boundaries
+/// (true whenever they were built from the same `start`/`interval_minutes`,
+/// which `check_availability` always uses); intersects only over the
+/// shortest `slots` length present, so a person whose raw string was
+/// unexpectedly short doesn't panic the lookup.
+pub fn common_free(people: &[PersonAvailability], treat_as_free: &[String]) -> Vec<FreeWindow> {
+    let resolved: Vec<&PersonAvailability> = people.iter().filter(|p| p.resolved).collect();
+    if resolved.is_empty() {
+        return Vec::new();
+    }
+    let treat_lower: Vec<String> = treat_as_free.iter().map(|s| s.to_lowercase()).collect();
+    let min_len = resolved.iter().map(|p| p.slots.len()).min().unwrap_or(0);
+
+    let mut windows = Vec::new();
+    let mut run_start: Option<usize> = None;
+    for i in 0..min_len {
+        let all_free = resolved
+            .iter()
+            .all(|p| treat_lower.contains(&p.slots[i].status.to_lowercase()));
+        if all_free {
+            run_start.get_or_insert(i);
+        } else if let Some(s) = run_start.take() {
+            windows.push(FreeWindow {
+                start: resolved[0].slots[s].start.clone(),
+                end: resolved[0].slots[i - 1].end.clone(),
+            });
+        }
+    }
+    if let Some(s) = run_start {
+        windows.push(FreeWindow {
+            start: resolved[0].slots[s].start.clone(),
+            end: resolved[0].slots[min_len - 1].end.clone(),
+        });
+    }
+    windows
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        com_recurrence_interval, create_event_status, friendly_recurrence_interval,
-        validate_recurrence, validate_recurrence_update, EventUpdate, RecurrenceInput,
+        com_recurrence_interval, common_free, create_event_status, friendly_recurrence_interval,
+        parse_freebusy_slots, validate_recurrence, validate_recurrence_update, EventUpdate, RecurrenceInput,
     };
+    use crate::outlook::types::{AvailabilitySlot, FreeWindow, PersonAvailability};
 
     #[test]
     fn create_event_status_covers_all_three_outcomes() {
@@ -379,5 +465,102 @@ mod tests {
     #[test]
     fn validate_recurrence_update_accepts_neither() {
         assert!(validate_recurrence_update(&event_update()).is_ok());
+    }
+
+    fn dt(s: &str) -> chrono::NaiveDateTime {
+        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").unwrap()
+    }
+
+    #[test]
+    fn parse_freebusy_slots_maps_codes_to_words_and_times() {
+        // "02143" = free, busy, tentative, working_elsewhere, out_of_office
+        let slots = parse_freebusy_slots("02143", &dt("2099-01-01T09:00:00"), 30, 5);
+        assert_eq!(slots.len(), 5);
+        assert_eq!(slots[0], AvailabilitySlot {
+            start: "2099-01-01T09:00:00".to_string(),
+            end: "2099-01-01T09:30:00".to_string(),
+            status: "free".to_string(),
+        });
+        assert_eq!(slots[1].status, "busy");
+        assert_eq!(slots[1].start, "2099-01-01T09:30:00");
+        assert_eq!(slots[1].end, "2099-01-01T10:00:00");
+        assert_eq!(slots[2].status, "tentative");
+        assert_eq!(slots[3].status, "working_elsewhere");
+        assert_eq!(slots[4].status, "out_of_office");
+    }
+
+    #[test]
+    fn parse_freebusy_slots_truncates_to_max_slots() {
+        // Outlook's raw FreeBusy string commonly covers a much longer range
+        // than the caller's requested [start, end) window.
+        let slots = parse_freebusy_slots("000000000000", &dt("2099-01-01T09:00:00"), 30, 3);
+        assert_eq!(slots.len(), 3);
+    }
+
+    #[test]
+    fn parse_freebusy_slots_treats_unrecognized_digit_as_busy() {
+        let slots = parse_freebusy_slots("9", &dt("2099-01-01T09:00:00"), 30, 1);
+        assert_eq!(slots[0].status, "busy");
+    }
+
+    fn avail(person: &str, resolved: bool, statuses: &[&str]) -> PersonAvailability {
+        let mut slots = Vec::new();
+        for (i, s) in statuses.iter().enumerate() {
+            let start = dt("2099-01-01T09:00:00") + chrono::Duration::minutes(i as i64 * 30);
+            slots.push(AvailabilitySlot {
+                start: start.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                end: (start + chrono::Duration::minutes(30)).format("%Y-%m-%dT%H:%M:%S").to_string(),
+                status: s.to_string(),
+            });
+        }
+        PersonAvailability { person: person.to_string(), resolved, slots }
+    }
+
+    #[test]
+    fn common_free_intersects_only_where_everyone_is_free() {
+        let people = vec![
+            avail("alice", true, &["free", "free", "busy"]),
+            avail("bob", true, &["free", "busy", "busy"]),
+        ];
+        let windows = common_free(&people, &["free".to_string()]);
+        assert_eq!(windows, vec![FreeWindow {
+            start: "2099-01-01T09:00:00".to_string(),
+            end: "2099-01-01T09:30:00".to_string(),
+        }]);
+    }
+
+    #[test]
+    fn common_free_merges_contiguous_free_slots_into_one_window() {
+        let people = vec![avail("alice", true, &["free", "free", "busy", "free"])];
+        let windows = common_free(&people, &["free".to_string()]);
+        assert_eq!(windows, vec![
+            FreeWindow { start: "2099-01-01T09:00:00".to_string(), end: "2099-01-01T10:00:00".to_string() },
+            FreeWindow { start: "2099-01-01T10:30:00".to_string(), end: "2099-01-01T11:00:00".to_string() },
+        ]);
+    }
+
+    #[test]
+    fn common_free_respects_custom_treat_as_free() {
+        let people = vec![avail("alice", true, &["tentative"])];
+        assert_eq!(common_free(&people, &["free".to_string()]), vec![]);
+        assert_eq!(
+            common_free(&people, &["free".to_string(), "tentative".to_string()]).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn common_free_ignores_unresolved_people() {
+        let people = vec![
+            avail("alice", true, &["free"]),
+            avail("bob", false, &[]),
+        ];
+        assert_eq!(common_free(&people, &["free".to_string()]).len(), 1);
+    }
+
+    #[test]
+    fn common_free_empty_when_no_one_resolved() {
+        let people = vec![avail("alice", false, &[])];
+        assert_eq!(common_free(&people, &["free".to_string()]), vec![]);
     }
 }
