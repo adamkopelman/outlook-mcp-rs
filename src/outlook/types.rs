@@ -122,6 +122,14 @@ pub struct AvailabilitySlot {
 #[derive(Debug, Clone, Serialize)]
 pub struct PersonAvailability {
     pub person: String,
+    /// `false` covers two distinct COM outcomes that both degrade this one
+    /// person rather than failing the whole `check_availability` call:
+    /// the address itself couldn't be resolved (`Recipient.Resolve()`
+    /// returned `false`), or it resolved fine but no free/busy data could
+    /// be loaded for it (`Recipient.FreeBusy()` errored — e.g. a
+    /// syntactically valid but nonexistent/unpublished address). Callers
+    /// cannot distinguish the two from this field alone; `slots` is empty
+    /// either way.
     pub resolved: bool,
     pub slots: Vec<AvailabilitySlot>,
 }
