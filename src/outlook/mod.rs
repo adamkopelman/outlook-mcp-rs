@@ -230,7 +230,7 @@ pub fn com_recurrence_interval(r: &RecurrenceInput) -> i32 {
 /// Rejects an `EventUpdate` that sets both `recurrence` and `clear_recurrence`
 /// — Outlook has no single COM call that means "replace recurrence and clear
 /// it," so exactly one (or neither) must be set. Called by both
-/// `update_event` implementors before any other update logic runs.
+/// `update_event` implementors before either field is applied.
 pub fn validate_recurrence_update(u: &EventUpdate) -> Result<(), ToolError> {
     if u.recurrence.is_some() && u.clear_recurrence {
         return Err(ToolError::new(
