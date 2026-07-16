@@ -61,12 +61,27 @@ fn eq_default(folder: &str) -> EmailQuery {
 /// Polls `list_emails` in `folder` for an item whose subject contains
 /// `needle`, up to ~90s (real cross-mailbox delivery isn't instant).
 fn find_by_subject(c: &WindowsOutlookClient, folder: &str, needle: &str) -> Option<EmailSummary> {
+    find_by_subject_matching(c, folder, needle, |_| true)
+}
+
+/// Like `find_by_subject`, but only returns a match that also satisfies
+/// `extra` — needed by A8, where the bare "send_email self-loop" needle
+/// matches both the freshly-landed "RE:"-prefixed reply *and* the
+/// still-present (not yet cleaned up until A11), non-"RE:" original it
+/// replied to. Without this, the retry loop can return the wrong (already
+/// existing) item on its very first attempt, before the actual reply lands.
+fn find_by_subject_matching(
+    c: &WindowsOutlookClient,
+    folder: &str,
+    needle: &str,
+    extra: impl Fn(&EmailSummary) -> bool,
+) -> Option<EmailSummary> {
     for attempt in 0..30 {
         if attempt > 0 {
             std::thread::sleep(Duration::from_secs(3));
         }
         if let Ok(list) = c.list_emails(EmailQuery { query: Some(needle.to_string()), ..eq_default(folder) }) {
-            if let Some(found) = list.into_iter().find(|e| e.subject.contains(needle)) {
+            if let Some(found) = list.into_iter().find(|e| e.subject.contains(needle) && extra(e)) {
                 return Some(found);
             }
         }
@@ -402,13 +417,12 @@ fn system_test_plans_1_to_9() {
     if let Some(id) = a6_id.clone() {
         match c.reply_email(id, "Reply body.".to_string(), false, false, true, None) {
             Ok(_) => {
-                match find_by_subject(&c, "inbox", "send_email self-loop") {
-                    Some(found) if found.subject.starts_with("RE:") => {
+                match find_by_subject_matching(&c, "inbox", "send_email self-loop", |e| e.subject.starts_with("RE:")) {
+                    Some(found) => {
                         r.record("A8", true, format!("reply landed as {} with RE: prefix", found.id));
                         cleanup_emails.push(("A8".to_string(), found.id));
                     }
-                    Some(found) => r.record("A8", false, format!("landed item {} lacks RE: prefix: {}", found.id, found.subject)),
-                    None => r.record("A8", false, "reply never landed in inbox within 90s"),
+                    None => r.record("A8", false, "reply with RE: prefix never landed in inbox within 90s"),
                 }
             }
             Err(e) => r.record("A8", false, format!("reply_email failed: {e}")),

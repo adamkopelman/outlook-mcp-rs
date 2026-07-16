@@ -288,11 +288,35 @@ fn remove_meeting_recipients(recipients: &IDispatch, addresses: &[String]) -> Re
 
 /// `client.py::_event_summary`, enriched for v2 with show_as/my_response and the
 /// attendee strings so every calendar filter can operate on the built summary.
-fn event_summary(item: &IDispatch) -> Result<EventSummary, ToolError> {
+///
+/// `calendar_store_id`: when `Some`, build the id from `EntryID` + this
+/// caller-supplied store id instead of calling `make_id` (which reads
+/// `item.Parent.StoreID`). `list_events`' enumeration passes this: items
+/// returned by `Items.GetFirst()`/`GetNext()` after `Restrict()` with
+/// `IncludeRecurrences = True` carry a `Parent` whose `StoreID` never
+/// resolves (`DISP_E_UNKNOWNNAME`/"Unknown name", confirmed live —
+/// deterministic on every enumerated item, not cleared by retrying the same
+/// property read on the same object up to 5 times, nor by re-querying
+/// minutes later — so it is a real object-model gap for this enumeration
+/// path, not a Cached Exchange Mode sync-lag blip). The already-resolved
+/// calendar folder (from `GetDefaultFolder`/`GetSharedDefaultFolder`, a
+/// genuine `Folder` object, not a GetFirst/GetNext proxy) has a `StoreID`
+/// that always resolves, and every item `list_events` enumerates belongs to
+/// that same folder — so its `StoreID` is reused instead. `get_event`
+/// (items fetched via `GetItemFromID`, unaffected by this) still passes
+/// `None` and uses the normal `make_id` path.
+fn event_summary(item: &IDispatch, calendar_store_id: Option<&str>) -> Result<EventSummary, ToolError> {
     let meeting_status = variant_to_i32(&get_property(item, "MeetingStatus").unwrap_or_default())
         .unwrap_or(c::OL_NONMEETING);
+    let id = match calendar_store_id {
+        Some(store_id) => {
+            let entry_id = variant_to_string(&get_property(item, "EntryID")?);
+            make_item_id(&entry_id, store_id)
+        }
+        None => make_id(item)?,
+    };
     Ok(EventSummary {
-        id: make_id(item)?,
+        id,
         subject: variant_to_string(&get_property(item, "Subject").unwrap_or_default()),
         start: variant_to_iso_string(&get_property(item, "Start").unwrap_or_default()),
         end: variant_to_iso_string(&get_property(item, "End").unwrap_or_default()),
@@ -429,6 +453,73 @@ fn event_matches(summary: &EventSummary, q: &EventQuery) -> bool {
         }
     }
     true
+}
+
+/// `DISP_E_UNKNOWNNAME` ("Unknown name"), formatted the way `format_com_error`
+/// renders it (`{:#010x}` on the HRESULT). `ToolError` only carries a
+/// formatted string (no structured HRESULT), but `format_com_error` embeds
+/// the raw code deterministically, so matching this substring reliably
+/// isolates this one specific case from a genuine, differently-worded error
+/// (e.g. an unresolvable `calendar_of` person, which carries no HRESULT in
+/// its message at all and is raised earlier in `list_events` regardless).
+const DISP_E_UNKNOWNNAME_HEX: &str = "0x80020006";
+
+fn is_transient_unknown_name(err: &ToolError) -> bool {
+    err.0.contains(DISP_E_UNKNOWNNAME_HEX)
+}
+
+/// Runs the `Restrict` + `GetFirst`/`GetNext` enumeration sequence for
+/// `list_events`.
+///
+/// `calendar_store_id` is threaded through to `event_summary` to sidestep a
+/// confirmed-live, deterministic bug (see `event_summary`'s doc comment):
+/// every item this enumeration yields has a `Parent` whose `StoreID` never
+/// resolves, so ids are built from the calendar folder's own (reliable)
+/// `StoreID` instead of re-deriving it per item.
+///
+/// The whole sequence is also retried from scratch (never resumed
+/// mid-enumeration — a partial `results` list from a run that threw partway
+/// through isn't trustworthy) up to 3 attempts total, on the off chance a
+/// *different* property throws this same transient-looking HRESULT for a
+/// genuinely timing-related reason. Any other error propagates immediately,
+/// unretried.
+fn enumerate_events_with_retry(
+    items: &IDispatch,
+    flt: &str,
+    q: &EventQuery,
+    calendar_store_id: &str,
+) -> Result<Vec<EventSummary>, ToolError> {
+    const MAX_ATTEMPTS: u32 = 3;
+    for attempt in 1..=MAX_ATTEMPTS {
+        let outcome = (|| -> Result<Vec<EventSummary>, ToolError> {
+            let restricted =
+                to_disp(call_method(items, "Restrict", &mut [variant_from_str(flt)])?)?;
+            // Enumerate with GetFirst/GetNext (not Count/Item): under
+            // IncludeRecurrences the collection can expand without bound, so
+            // we must stream it and stop at MAX_CALENDAR_ITEMS.
+            let mut results = Vec::new();
+            let mut current = call_method(&restricted, "GetFirst", &mut [])?;
+            while let Ok(item) = IDispatch::try_from(&current) {
+                let summary = event_summary(&item, Some(calendar_store_id))?;
+                if event_matches(&summary, q) {
+                    results.push(summary);
+                    if results.len() >= MAX_CALENDAR_ITEMS {
+                        break;
+                    }
+                }
+                current = call_method(&restricted, "GetNext", &mut [])?;
+            }
+            Ok(results)
+        })();
+        match outcome {
+            Ok(results) => return Ok(results),
+            Err(err) if attempt < MAX_ATTEMPTS && is_transient_unknown_name(&err) => {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    unreachable!("loop always returns on the final attempt")
 }
 
 /// `client.py::_task_summary`. `status` and `importance` are read as raw
@@ -611,7 +702,8 @@ impl OutlookClient for WindowsOutlookClient {
     }
 
     // Cheap filters become sequential COM `Restrict` calls (they AND together);
-    // `category` and `has_attachments` are filtered client-side while iterating.
+    // `category`, `has_attachments`, and `flagged` are filtered client-side
+    // while iterating.
     fn list_emails(&self, q: EmailQuery) -> Result<Vec<EmailSummary>, ToolError> {
         self.with_com(|| {
             let (_app, ns) = mapi()?;
@@ -645,14 +737,15 @@ impl OutlookClient for WindowsOutlookClient {
                     &mut [variant_from_str("[UnRead] = True")],
                 )?)?;
             }
-            if q.flagged {
-                // FlagStatus 2 = flagged/marked.
-                items = to_disp(call_method(
-                    &items,
-                    "Restrict",
-                    &mut [variant_from_str("[FlagStatus] = 2")],
-                )?)?;
-            }
+            // `flagged` is deliberately NOT a Restrict call: confirmed via a
+            // raw PowerShell COM probe outside this codebase that
+            // `Items.Restrict("[FlagStatus] = 2")` doesn't reliably match on
+            // this account class, even though `Item.FlagStatus` reads
+            // correctly when read directly per-item (modern Outlook/M365
+            // flags sync through the To-Do integration rather than classic
+            // MAPI, and the legacy DASL bracket filter doesn't see that
+            // state reliably). Filtered client-side below instead, alongside
+            // category/has_attachments.
             if q.high_importance {
                 items = to_disp(call_method(
                     &items,
@@ -684,8 +777,8 @@ impl OutlookClient for WindowsOutlookClient {
                 &mut [variant_from_str("[ReceivedTime]"), variant_from_bool(true)],
             )?;
 
-            // Client-side fuzzy filters: category + has_attachments. Iterate,
-            // build each summary, keep it only if it passes, stop at count.
+            // Client-side fuzzy filters: category + has_attachments + flagged.
+            // Iterate, build each summary, keep it only if it passes, stop at count.
             let cat_want = q.category.as_deref().map(|c| c.to_lowercase());
             let total = variant_to_i32(&get_property(&items, "Count")?).unwrap_or(0);
             let mut results = Vec::new();
@@ -699,6 +792,17 @@ impl OutlookClient for WindowsOutlookClient {
                 }
                 if let Some(want_att) = q.has_attachments {
                     if summary.has_attachments != want_att {
+                        continue;
+                    }
+                }
+                if q.flagged {
+                    // "Flagged" means any non-zero FlagStatus: both a
+                    // follow-up flag (OL_FLAG_MARKED = 2) and a completed
+                    // flag (OL_FLAG_COMPLETE = 1) count; 0 = no flag/cleared.
+                    let flag_status =
+                        variant_to_i32(&get_property(&item, "FlagStatus").unwrap_or_default())
+                            .unwrap_or(0);
+                    if flag_status == 0 {
                         continue;
                     }
                 }
@@ -859,8 +963,14 @@ impl OutlookClient for WindowsOutlookClient {
                 attach_files(&reply, atts)?;
             }
             if send {
-                call_method(&reply, "Send", &mut [])?;
+                // Read Subject *before* Send() — Outlook invalidates the COM
+                // item once sent (a well-known lifecycle rule), so reading a
+                // property off `reply` afterward throws "The item has been
+                // moved or deleted." (0x80020009) even though the send itself
+                // succeeded. Mirrors send_email's pattern of never touching
+                // the item post-Send.
                 let subject = variant_to_string(&get_property(&reply, "Subject")?);
+                call_method(&reply, "Send", &mut [])?;
                 Ok(json!({"status": "sent", "subject": subject}))
             } else {
                 call_method(&reply, "Save", &mut [])?;
@@ -1026,6 +1136,11 @@ impl OutlookClient for WindowsOutlookClient {
                     &mut [variant_from_i32(c::OL_FOLDER_CALENDAR)],
                 )?)?,
             };
+            // Read once, up front, while `calendar` is still a genuine
+            // `Folder` object (not a GetFirst/GetNext-returned occurrence
+            // proxy) — see `event_summary`'s doc comment for why this is
+            // needed instead of reading `StoreID` per enumerated item.
+            let calendar_store_id = variant_to_string(&get_property(&calendar, "StoreID")?);
             let items = to_disp(get_property(&calendar, "Items")?)?;
             // Must precede Sort/Restrict — setting it afterwards has no effect.
             put_property(&items, "IncludeRecurrences", variant_from_bool(true))?;
@@ -1035,24 +1150,7 @@ impl OutlookClient for WindowsOutlookClient {
                 jet_datetime(&start),
                 jet_datetime(&end)
             );
-            let restricted =
-                to_disp(call_method(&items, "Restrict", &mut [variant_from_str(&flt)])?)?;
-            // Enumerate with GetFirst/GetNext (not Count/Item): under
-            // IncludeRecurrences the collection can expand without bound, so we
-            // must stream it and stop at MAX_CALENDAR_ITEMS.
-            let mut results = Vec::new();
-            let mut current = call_method(&restricted, "GetFirst", &mut [])?;
-            while let Ok(item) = IDispatch::try_from(&current) {
-                let summary = event_summary(&item)?;
-                if event_matches(&summary, &q) {
-                    results.push(summary);
-                    if results.len() >= MAX_CALENDAR_ITEMS {
-                        break;
-                    }
-                }
-                current = call_method(&restricted, "GetNext", &mut [])?;
-            }
-            Ok(results)
+            enumerate_events_with_retry(&items, &flt, &q, &calendar_store_id)
         })
     }
 
@@ -1060,7 +1158,7 @@ impl OutlookClient for WindowsOutlookClient {
         self.with_com(|| {
             let (_app, ns) = mapi()?;
             let item = get_item(&ns, &event_id)?;
-            let summary = event_summary(&item)?;
+            let summary = event_summary(&item, None)?;
             let recurrence = recurrence_info(&item)?;
             Ok(EventDetail {
                 summary,
