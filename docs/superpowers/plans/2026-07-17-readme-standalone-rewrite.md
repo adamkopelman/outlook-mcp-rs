@@ -1,3 +1,39 @@
+# Standalone README Rewrite Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Rewrite `README.md` so it (1) stands entirely on its own — no framing as a "counterpart" to the Python [outlook-mcp](https://github.com/adamkopelman/outlook-mcp) repo — and (2) actually documents the project a new reader needs: what it is, how to wire it into an MCP client, how to build it, what's safe vs. what sends real mail, and the *complete, correct* tool list.
+
+**Architecture:** The current `README.md` opens by defining the project *relative to* another repo ("This is the Rust counterpart to outlook-mcp (Python): same tools, same behavior") — so a reader can't understand it without leaving to a second project. It also undersells and under-documents the actual surface: it claims "20 MCP tools" but `src/server.rs` exposes **26** (`#[tool(...)]` count), missing `update_event`, `delete_event`, `check_availability`, and `delete_task` entirely. There is no MCP-client configuration example anywhere (the single most important thing a user needs), no build-from-source instructions, and no statement of which tools have real outbound side effects (a gap `TESTING.md` already documents in detail but the README never surfaces). This plan replaces the intro, adds the missing sections, and regenerates the tool list from `src/server.rs` as the source of truth.
+
+**Tech Stack:** Markdown only. No code changes. The tool list is verified against `src/server.rs`'s `#[tool(description = ...)]` attributes; the config snippet against `src/main.rs` (stdio transport, no args, no env).
+
+## Global Constraints
+
+- **Source of truth for the tool list is `src/server.rs`** — every bullet must correspond to a real `#[tool(...)]` method, and the stated count must equal the number of `#[tool(` attributes (26). Do not copy the stale "20" or the old category counts.
+- **No dependency on the Python `outlook-mcp` repo for comprehension.** The rewritten README must make sense with zero knowledge of that project. A single, optional "prior art / see also" mention is acceptable, but nothing in the intro, install, or usage path may require it.
+- **Don't invent behavior.** Tool one-liners are condensed from the real `#[tool(description=...)]` strings and the existing README; config/build facts come from `src/main.rs` and `Cargo.toml`. No speculative flags, platforms, or install methods.
+- **Keep the existing `## Development` → `TESTING.md` handoff.** Testing detail lives in `TESTING.md`; the README links to it rather than duplicating it.
+- **Windows-only framing stays accurate:** classic Outlook desktop, COM automation, `.exe`. Don't imply macOS/Linux/new-Outlook support.
+
+---
+
+### Task 1: Rewrite README.md as a standalone document
+
+Replace the whole file. The new structure: title + standalone tagline → Highlights → Requirements → Install → Configure your MCP client → Available tools (all 26) → How it works → Building from source → Safety and side effects → Development → License.
+
+**Files:**
+- Rewrite: `README.md` (entire file)
+
+**Interfaces:**
+- Consumes (as source of truth, read-only): `src/server.rs` (`#[tool(...)]` set), `src/main.rs` (stdio, no args/env), `Cargo.toml` (edition 2024, name `outlook-mcp-rs`), `LICENSE` (MIT, Adam Kopelman 2026).
+- Produces: nothing consumed by later tasks; this is the only content task.
+
+- [ ] **Step 1: Replace `README.md` with the new content**
+
+Write `README.md` in full as:
+
+````markdown
 # outlook-mcp-rs
 
 A single-binary [Model Context Protocol](https://modelcontextprotocol.io) server that
@@ -132,3 +168,47 @@ live-Outlook system tests.
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
+````
+
+- [ ] **Step 2: Verify the tool list is complete and the count is right**
+
+Cross-check every bullet against the real tool set and confirm the count:
+
+```bash
+grep -c '#\[tool(' src/server.rs        # expect 26
+grep -oP '(?<=pub async fn )\w+' src/server.rs | sort > /tmp/impl_tools.txt
+```
+
+Then confirm each of the 26 method names appears as a bullet in `README.md` and no bullet
+names a tool that isn't in `src/server.rs`. The five categories must total 26
+(Email 8, Calendar 7, Attachments 2, Tasks 4, Notes 5).
+
+- [ ] **Step 3: Sanity-check the rewrite for the two acceptance criteria**
+
+1. **Disconnected:** `grep -n 'outlook-mcp' README.md` returns nothing pointing at the Python
+   repo as a prerequisite — the file must read as self-contained. (A match on the project's
+   *own* name `outlook-mcp-rs` is fine; a "counterpart to outlook-mcp (Python)" framing is not.)
+2. **Renders:** headings, the JSON code fence, and the `#safety-and-side-effects` anchor link
+   all resolve.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add README.md docs/superpowers/plans/2026-07-17-readme-standalone-rewrite.md
+git commit -m "Rewrite README as a standalone document"
+```
+
+---
+
+## Self-Review Notes
+
+- **Spec coverage:** "disconnect it from the outlook-mcp repo" → new intro defines the project
+  on its own terms; Task 1 Step 3 asserts no Python-repo prerequisite remains. "more stuff that
+  would be good" → adds Highlights, an MCP-client **Configure** section (the biggest gap — a
+  copy-pasteable JSON snippet), How it works, Building from source, Safety and side effects, and
+  a License section, and corrects the tool list from a stale 20 to the real 26.
+- **Accuracy:** the tool list is regenerated from `src/server.rs` (the `#[tool]` source of
+  truth) rather than edited in place, and Step 2 verifies the count; the config snippet matches
+  `src/main.rs` (stdio, no args, no env).
+- **No placeholders:** Step 1 contains the complete literal README content, not a sketch.
+- **Scope:** README-only; no code, no behavior change, so nothing downstream depends on it.
