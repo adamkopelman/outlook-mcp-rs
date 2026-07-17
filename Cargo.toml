@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.103"
+clap = { version = "4", features = ["derive"] }
 chrono = "0.4.45"
 rmcp = { version = "2.1.0", features = ["server", "transport-io"] }
 schemars = "1.2.1"
