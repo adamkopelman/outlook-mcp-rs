@@ -486,8 +486,9 @@ fn task_matches(body: &str, summary: &TaskSummary, q: &TaskQuery) -> bool {
 
 /// Client-side filter for `list_notes`'s `category`/`query`. `body` is the
 /// note's real, untruncated body text (read once per item by the caller —
-/// see `list_notes` below) — unlike `task_matches`, this genuinely searches
-/// content, since a note's body IS its content.
+/// see `list_notes` below). A note has no separate subject, so `query`
+/// matches only this body, whereas `task_matches` also matches a task's
+/// subject.
 fn note_matches(body: &str, summary: &NoteSummary, q: &NoteQuery) -> bool {
     if let Some(query) = q.query.as_deref().filter(|s| !s.is_empty()) {
         if !body.to_lowercase().contains(&query.to_lowercase()) {
