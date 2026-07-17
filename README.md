@@ -42,7 +42,7 @@ your MCP client at it directly — no install step.
 - `save_attachments` — save an email's attachments to disk
 
 **Tasks**
-- `list_tasks` — list Outlook tasks
+- `list_tasks` — list Outlook tasks (filter by category, importance, or a text query matching subject or body)
 - `create_task` — create a new Outlook task
 - `update_task` — change an existing task: mark complete/reopen, subject, body, due_date, start_date, importance, add/remove categories, percent_complete, reminder_time
 

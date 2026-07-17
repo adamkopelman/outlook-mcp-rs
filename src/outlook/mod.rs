@@ -101,19 +101,21 @@ pub struct EventQuery {
 /// drives a server-side `Restrict`; the rest filter the streamed tasks
 /// client-side (there's no established DASL text-search path for the Tasks
 /// folder in this codebase, unlike email's `@SQL` queries — same approach
-/// `EventQuery`'s `query`/`category` already use).
+/// `EventQuery`'s `query`/`category` already use). `query` matches either
+/// the subject or the real task body, read per-item — same as `NoteQuery`'s
+/// `query` below.
 #[derive(Debug, Clone, Default)]
 pub struct TaskQuery {
     pub include_completed: bool,
     pub category: Option<String>,
     pub importance: Option<String>,
-    pub query: Option<String>, // text match on subject (TaskSummary has no body field to match)
+    pub query: Option<String>, // text match on subject OR body
 }
 
 /// All filters for `list_notes`. Both fields optional; supplying both ANDs
-/// them. Unlike `TaskQuery`'s `query` (subject-only, since tasks have a
-/// separate subject), a note's *only* content is its body — `note_matches`
-/// reads the real body text to match `query`, not just the derived subject.
+/// them. A note's *only* content is its body (it has no separate subject),
+/// so `note_matches` reads the real body text to match `query` — the same
+/// approach `TaskQuery`'s `query` above now uses alongside its subject.
 #[derive(Debug, Clone, Default)]
 pub struct NoteQuery {
     pub category: Option<String>,

@@ -457,11 +457,16 @@ fn event_matches(summary: &EventSummary, q: &EventQuery) -> bool {
 }
 
 /// Client-side filter for `list_tasks`'s `category`/`importance`/`query`.
-/// `include_completed` is applied earlier via `Restrict`, not here.
-fn task_matches(summary: &TaskSummary, q: &TaskQuery) -> bool {
+/// `include_completed` is applied earlier via `Restrict`, not here. `query`
+/// matches either the subject or the real task body — `body` is the task's
+/// real, untruncated body text, read once per item by the caller (see
+/// `list_tasks` below), the same pattern `note_matches` uses for notes.
+fn task_matches(body: &str, summary: &TaskSummary, q: &TaskQuery) -> bool {
     if let Some(query) = q.query.as_deref().filter(|s| !s.is_empty()) {
         let needle = query.to_lowercase();
-        if !summary.subject.to_lowercase().contains(&needle) {
+        if !summary.subject.to_lowercase().contains(&needle)
+            && !body.to_lowercase().contains(&needle)
+        {
             return false;
         }
     }
@@ -1641,7 +1646,11 @@ impl OutlookClient for WindowsOutlookClient {
             for i in 1..=count {
                 let item = to_disp(call_method(&items, "Item", &mut [variant_from_i32(i)])?)?;
                 let summary = task_summary(&item)?;
-                if task_matches(&summary, &q) {
+                // Read the real body directly for query matching — `task_summary`
+                // doesn't expose the body at all, so this is a second, deliberate
+                // property read (same pattern `list_notes` already uses).
+                let body = variant_to_string(&get_property(&item, "Body").unwrap_or_default());
+                if task_matches(&body, &summary, &q) {
                     results.push(summary);
                 }
             }
@@ -2338,5 +2347,86 @@ mod event_filter_tests {
             ..Default::default()
         };
         assert!(event_matches(&summary, &query));
+    }
+}
+
+#[cfg(test)]
+mod task_filter_tests {
+    use super::*;
+
+    fn base() -> TaskSummary {
+        TaskSummary {
+            id: "test-id|store-id".to_string(),
+            subject: "Quarterly Report".to_string(),
+            due_date: Some("2026-06-10T00:00:00".to_string()),
+            complete: false,
+            status: "not_started".to_string(),
+            importance: "normal".to_string(),
+            categories: vec!["Work".to_string()],
+        }
+    }
+
+    #[test]
+    fn empty_query_matches_any_summary() {
+        let summary = base();
+        let query = TaskQuery::default();
+        assert!(task_matches("some body text", &summary, &query));
+    }
+
+    #[test]
+    fn query_substring_matches_subject() {
+        let summary = base();
+        let query = TaskQuery { query: Some("quarterly".to_string()), ..Default::default() };
+        assert!(task_matches("unrelated body", &summary, &query));
+    }
+
+    #[test]
+    fn query_substring_matches_body() {
+        let summary = base();
+        let query = TaskQuery { query: Some("budget numbers".to_string()), ..Default::default() };
+        assert!(task_matches("here are the budget numbers for review", &summary, &query));
+    }
+
+    #[test]
+    fn query_substring_no_match_in_subject_or_body() {
+        let summary = base();
+        let query = TaskQuery { query: Some("nonexistent".to_string()), ..Default::default() };
+        assert!(!task_matches("also nothing here", &summary, &query));
+    }
+
+    #[test]
+    fn query_substring_case_insensitive_against_body() {
+        let summary = base();
+        let query = TaskQuery { query: Some("BUDGET NUMBERS".to_string()), ..Default::default() };
+        assert!(task_matches("here are the budget numbers", &summary, &query));
+    }
+
+    #[test]
+    fn empty_query_string_is_noop() {
+        let summary = base();
+        let query = TaskQuery { query: Some("".to_string()), ..Default::default() };
+        assert!(task_matches("anything", &summary, &query));
+    }
+
+    #[test]
+    fn category_filter_still_applies_alongside_body_query() {
+        let summary = base();
+        let query = TaskQuery {
+            query: Some("budget".to_string()),
+            category: Some("Personal".to_string()),
+            ..Default::default()
+        };
+        assert!(!task_matches("budget numbers", &summary, &query));
+    }
+
+    #[test]
+    fn importance_filter_still_applies_alongside_body_query() {
+        let summary = base();
+        let query = TaskQuery {
+            query: Some("budget".to_string()),
+            importance: Some("high".to_string()),
+            ..Default::default()
+        };
+        assert!(!task_matches("budget numbers", &summary, &query));
     }
 }
