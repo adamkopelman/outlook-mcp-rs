@@ -191,7 +191,7 @@ Expected: the `cli::tests` module compiles and all 8 tests pass. (If `clap` was 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add Cargo.toml Cargo.lock src/cli.rs src/lib.rs
+git add Cargo.toml src/cli.rs src/lib.rs
 git commit -m "Add clap CLI that resolves to stdio or http mode"
 ```
 
@@ -381,7 +381,7 @@ Expected: clean build. (`run_http`/`build_router` have no dedicated unit test â€
 - [ ] **Step 6: Commit**
 
 ```bash
-git add Cargo.toml Cargo.lock src/transport.rs src/lib.rs
+git add Cargo.toml src/transport.rs src/lib.rs
 git commit -m "Add streamable-HTTP transport with bearer-auth middleware"
 ```
 
@@ -570,7 +570,7 @@ Expected: all tests green (unit + `tools` + `http_transport`), no port conflicts
 - [ ] **Step 5: Commit**
 
 ```bash
-git add Cargo.toml Cargo.lock tests/http_transport.rs
+git add Cargo.toml tests/http_transport.rs
 git commit -m "Add end-to-end streamable-HTTP transport test with auth gating"
 ```
 
@@ -699,12 +699,12 @@ version = "0.3.0"
 - [ ] **Step 4: Confirm it all still builds and tests green**
 
 Run: `cargo test`
-Expected: full suite passes at the new version. (`cargo build` re-stamps `Cargo.lock` with `0.3.0`.)
+Expected: full suite passes at the new version.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add README.md Cargo.toml Cargo.lock
+git add README.md Cargo.toml
 git commit -m "Document network mode and bump version to 0.3.0"
 ```
 
