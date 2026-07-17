@@ -692,6 +692,34 @@ fn list_tasks_filters_and_create_task_additions_round_trip() {
 
 #[test]
 #[ignore]
+fn list_tasks_query_matches_real_body_text() {
+    let c = client();
+    let token = "zztaskbodytoken8842";
+    let created = c.create_task(
+        "[outlook-mcp-rs body-search live] task probe".to_string(),
+        Some(format!("this task's body contains {token} and the subject does not")),
+        None, "normal".to_string(), None, None, None,
+    ).expect("create_task should succeed");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let found = c.list_tasks(TaskQuery {
+        include_completed: false,
+        category: None,
+        importance: None,
+        query: Some(token.to_string()),
+    }).expect("list_tasks query should succeed");
+
+    c.delete_task(id.clone()).expect("cleanup: delete the task");
+
+    assert!(
+        found.iter().any(|t| t.id == id),
+        "list_tasks query {token:?} should find a task whose ONLY occurrence \
+         of that token is in the body"
+    );
+}
+
+#[test]
+#[ignore]
 fn update_task_marks_complete_then_reopens() {
     let c = client();
     let created = c.create_task(

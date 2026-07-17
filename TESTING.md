@@ -85,6 +85,9 @@ subject/sender) is covered by the live suite:
 tool — `mark_complete: true`/`false` on `update_task` now covers completing
 *and* reopening a task) are covered by the live suite:
 `cargo test --test live_outlook -- --ignored list_tasks_filters_and_create_task_additions_round_trip update_task_marks_complete_then_reopens delete_task_removes_it`.
+`list_tasks`'s `query` filter matching real task body text (not just
+subject) is covered separately by:
+`cargo test --test live_outlook -- --ignored list_tasks_query_matches_real_body_text`.
 
 `list_notes` filters (`category`, `query` — the latter matching the note's
 real body text, not just a derived subject), `create_note`'s additions
