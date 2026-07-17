@@ -75,6 +75,10 @@ calendar; to verify cross-user sharing works, call `list_events` with a
 colleague's email address in `calendar_of` (one who has shared their
 calendar with you) and confirm it returns their events without error.
 
+`list_emails`'s `query` filter matching real email body text (not just
+subject/sender) is covered by the live suite:
+`cargo test --test live_outlook -- --ignored list_emails_query_matches_real_body_text`.
+
 `list_tasks` filters (`category`, `importance`, `query`, `include_completed`),
 `create_task`'s additions (`categories`, `start_date`, `reminder_time`), and
 `update_task`/`delete_task` (which retired the standalone `complete_task`

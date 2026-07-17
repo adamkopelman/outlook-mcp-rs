@@ -290,6 +290,36 @@ fn list_emails_query_filter_narrows_results() {
 
 #[test]
 #[ignore]
+fn list_emails_query_matches_real_body_text() {
+    let c = client();
+    let token = "zzbodytoken8842";
+    let created = c.create_draft(
+        vec!["nobody@example.invalid".to_string()],
+        "[outlook-mcp-rs body-search live] draft probe".to_string(),
+        format!("this draft's body contains {token} and the subject does not"),
+        None, None, false, None,
+    ).expect("create_draft should succeed");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let found = c.list_emails(EmailQuery {
+        query: Some(token.to_string()), folder: "drafts".into(), count: 25,
+        unread_only: false, from: None, category: None, received_after: None,
+        received_before: None, since_days: None, has_attachments: None,
+        flagged: false, high_importance: false,
+    }).expect("list_emails query should succeed");
+
+    c.delete_email(id.clone()).expect("cleanup: delete the draft");
+
+    assert!(
+        found.iter().any(|e| e.id == id),
+        "list_emails query {token:?} should find a draft whose ONLY occurrence \
+         of that token is in the body, proving the existing @SQL textdescription \
+         clause matches body content and not just subject/sender"
+    );
+}
+
+#[test]
+#[ignore]
 fn create_draft_with_attachment_round_trips() {
     let dir = std::env::temp_dir();
     let path = dir.join("outlook-mcp-rs-live-attach.txt");
