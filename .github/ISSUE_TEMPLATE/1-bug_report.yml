@@ -1,0 +1,109 @@
+name: 🐞 Bug report
+description: Report something in outlook-mcp-rs that isn't working as expected.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report! Please fill in as much of the form
+        below as you can — the more detail you give, the faster we can reproduce and fix it.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight checklist
+      options:
+        - label: I searched [existing issues](https://github.com/adamkopelman/outlook-mcp-rs/issues) and did not find a duplicate.
+          required: true
+        - label: I am running the **classic** Outlook desktop app (not "new Outlook"), and it is running and signed in.
+          required: true
+        - label: I am on the latest release, or I have noted my version below.
+          required: false
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A clear and concise description of what the bug is.
+      placeholder: When I call the `send_email` tool, the server returns an error instead of sending.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Exact steps — including the MCP tool call and arguments — that trigger the bug.
+      placeholder: |
+        1. Start the server with '...'
+        2. From my MCP client, call the '...' tool with arguments '...'
+        3. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened? Include the full error message and any server logs or stack traces.
+      render: text
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      description: Which tool area is affected?
+      options:
+        - Email
+        - Calendar
+        - Attachments
+        - Tasks
+        - Notes
+        - Server startup / MCP protocol
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: outlook-mcp-rs version
+      description: Release tag, or the commit SHA if built from source (`git rev-parse --short HEAD`).
+      placeholder: v0.1.0 / 1a2b3c4
+    validations:
+      required: true
+
+  - type: input
+    id: outlook-version
+    attributes:
+      label: Outlook & Windows version
+      description: e.g. Outlook for Microsoft 365 (Version 2406), Windows 11 23H2.
+    validations:
+      required: true
+
+  - type: input
+    id: mcp-client
+    attributes:
+      label: MCP client
+      description: Which client is driving the server (e.g. Claude Desktop, Claude Code, custom)?
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Screenshots, logs, or anything else that might help. Please redact any private mailbox content.
+    validations:
+      required: false

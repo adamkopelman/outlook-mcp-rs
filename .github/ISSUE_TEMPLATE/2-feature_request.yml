@@ -1,0 +1,83 @@
+name: ✨ Feature request
+description: Suggest a new tool, capability, or improvement for outlook-mcp-rs.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement! Please describe the problem you're trying to
+        solve, not just the solution you have in mind — it helps us find the best fit.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight checklist
+      options:
+        - label: I searched [existing issues](https://github.com/adamkopelman/outlook-mcp-rs/issues) and did not find a duplicate request.
+          required: true
+        - label: This is achievable through Outlook's COM automation API (not the Graph / cloud API).
+          required: false
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What are you trying to do, and what makes it hard or impossible today?
+      placeholder: "As a user, I want to ... so that ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the tool, argument, or behavior you'd like. If it's a new tool, suggest a name and its inputs/outputs.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which area does this relate to?
+      options:
+        - Email
+        - Calendar
+        - Attachments
+        - Tasks
+        - Notes
+        - Server / MCP protocol
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: side-effects
+    attributes:
+      label: Does this send or modify data?
+      description: Tools that send mail or write to the mailbox are treated as explicit, opt-in side effects.
+      options:
+        - "No — read-only"
+        - "Yes — it writes to / modifies the mailbox"
+        - "Yes — it sends mail or meeting responses"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any workarounds you're using now, or other approaches you thought about.
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Links, screenshots, or examples that clarify the request.
+    validations:
+      required: false
