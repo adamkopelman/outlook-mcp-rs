@@ -38,8 +38,10 @@ executable — there's no install step and no runtime dependencies to add.
 
 ## Configure your MCP client
 
-`outlook-mcp-rs` speaks MCP over stdio, takes no arguments, and needs no environment
-variables. Point any MCP-capable client at the executable's path.
+By default, `outlook-mcp-rs` speaks MCP over stdio and takes no arguments — point any
+local MCP-capable client at the executable's path. (To connect from another machine on
+your network, see [Remote / network mode](#remote--network-mode-connect-from-another-machine)
+below.)
 
 For example, in Claude Desktop's `claude_desktop_config.json`:
 
@@ -55,6 +57,76 @@ For example, in Claude Desktop's `claude_desktop_config.json`:
 
 Restart the client after editing its config. The server connects to whatever Outlook is
 already running, and the 26 tools below become available.
+
+## Remote / network mode (connect from another machine)
+
+By default the server speaks MCP over **stdio**, which requires the MCP client
+to launch the binary as a local child process — so the client must run on the
+same Windows machine as Outlook.
+
+If your MCP client runs on a **different machine on the same LAN** (for example,
+Claude on a Linux box talking to Outlook on your Windows PC), run the server in
+**network mode** instead. It listens on a TCP port using MCP Streamable HTTP,
+and the remote client connects by URL.
+
+### On the Windows machine (where Outlook runs)
+
+Start the server in HTTP mode with a shared secret token:
+
+```
+outlook-mcp-rs.exe --http --port 8080 --token YOUR_SECRET
+```
+
+It prints `outlook-mcp-rs listening on http://0.0.0.0:8080/mcp` and serves the
+same 26 tools as stdio mode. Outlook must be running and signed in, as usual.
+
+Find this machine's name (the client connects to it):
+
+```
+hostname
+```
+
+Allow the port through Windows Firewall, scoped to your local subnet (adjust
+the port and subnet to match your network):
+
+```
+netsh advfirewall firewall add rule name="outlook-mcp-rs" dir=in action=allow ^
+  protocol=TCP localport=8080 remoteip=192.168.1.0/24
+```
+
+### On the client machine (e.g. Ubuntu running Claude Code)
+
+Point the client at `http://<WINDOWS-HOSTNAME>:8080/mcp`, sending the token as a
+bearer header. With Claude Code:
+
+```
+claude mcp add --transport http outlook http://WINDOWS-PC:8080/mcp \
+  --header "Authorization: Bearer YOUR_SECRET"
+```
+
+Replace `WINDOWS-PC` with the `hostname` from above (or the machine's LAN IP).
+The Outlook tools then appear in that client.
+
+### Options
+
+| Flag | Meaning |
+|---|---|
+| `--http` | Enable network (Streamable HTTP) mode instead of stdio. |
+| `--port <PORT>` | Listen on `0.0.0.0:<PORT>`. Mutually exclusive with `--bind`. |
+| `--bind <ADDR>` | Listen on an exact socket address, e.g. `127.0.0.1:8080`. |
+| `--token <SECRET>` | Require `Authorization: Bearer <SECRET>` on every request. |
+
+### Security
+
+- **Set a token.** Without `--token`, network mode accepts any request that
+  reaches the port — anyone on the network could read or send your mail. The
+  token is optional only to make first-run testing easy; use it for any real
+  setup.
+- **Scope the firewall** to the specific hosts/subnet that need access, as
+  shown above.
+- **Traffic is plain HTTP** (no TLS in this version). Keep it on a trusted LAN;
+  if you need encryption across untrusted networks, front it with a reverse
+  proxy or tunnel that terminates TLS.
 
 ## Available tools
 
