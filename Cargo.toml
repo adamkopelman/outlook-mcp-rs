@@ -5,9 +5,11 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.103"
+axum = "0.8"
 clap = { version = "4", features = ["derive"] }
 chrono = "0.4.45"
-rmcp = { version = "2.1.0", features = ["server", "transport-io"] }
+constant_time_eq = "0.3"
+rmcp = { version = "2.1.0", features = ["server", "transport-io", "transport-streamable-http-server"] }
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
