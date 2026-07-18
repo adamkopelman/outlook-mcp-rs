@@ -4,7 +4,10 @@ use std::sync::Arc;
 use axum::{
     body::Body,
     extract::State,
-    http::{header::AUTHORIZATION, Request, StatusCode},
+    http::{
+        header::{AUTHORIZATION, WWW_AUTHENTICATE},
+        Request, StatusCode,
+    },
     middleware::{self, Next},
     response::Response,
     Router,
@@ -32,7 +35,10 @@ pub fn is_authorized(configured: Option<&str>, header: Option<&str>) -> bool {
     let Some(presented) = header.strip_prefix("Bearer ") else {
         return false; // wrong scheme
     };
-    // Constant-time compare to avoid a timing side channel on the secret.
+    // Constant-time compare to avoid a timing side channel on the secret's
+    // *content*. `constant_time_eq` still short-circuits on a length
+    // mismatch, so token *length* is technically observable via timing —
+    // negligible against a reasonably long, high-entropy token.
     constant_time_eq::constant_time_eq(presented.as_bytes(), secret.as_bytes())
 }
 
@@ -51,6 +57,7 @@ async fn auth_middleware(
     } else {
         Response::builder()
             .status(StatusCode::UNAUTHORIZED)
+            .header(WWW_AUTHENTICATE, "Bearer")
             .body(Body::empty())
             .expect("static empty 401 response is always valid")
     }
