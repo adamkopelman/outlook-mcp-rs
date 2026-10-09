@@ -12,6 +12,8 @@
 //! `tests/system_test.rs` (Plans 1-9).
 
 use outlook_mcp_rs::outlook::client::WindowsOutlookClient;
+use outlook_mcp_rs::outlook::read::single;
+use outlook_mcp_rs::outlook::ReadOptions;
 use outlook_mcp_rs::outlook::{
     CheckAvailabilityInput, NoteQuery, NoteUpdate, OutlookClient, TaskQuery, TaskUpdate,
 };
@@ -141,12 +143,12 @@ fn system_test_plans_10_to_12() {
         }
 
         if t1a_id.is_some() && t1b_id.is_some() {
-            match c.list_tasks(TaskQuery { category: Some("Red Category".to_string()), ..Default::default() }) {
+            match c.list_tasks(TaskQuery { category: vec!["Red Category".to_string()], ..Default::default() }) {
                 Ok(list) => check_task_set(&mut r, "T1-category", tagged_task_suffixes(&list),
                     &["T1 quokkaTask"], "category:Red Category"),
                 Err(e) => r.record("T1-category", false, format!("failed: {e}")),
             }
-            match c.list_tasks(TaskQuery { importance: Some("high".to_string()), ..Default::default() }) {
+            match c.list_tasks(TaskQuery { importance: vec!["high".to_string()], ..Default::default() }) {
                 Ok(list) => check_task_set(&mut r, "T1-importance", tagged_task_suffixes(&list),
                     &["T1 quokkaTask"], "importance:high"),
                 Err(e) => r.record("T1-importance", false, format!("failed: {e}")),
@@ -164,7 +166,7 @@ fn system_test_plans_10_to_12() {
 
         for (label, id) in [("T1a", t1a_id), ("T1b", t1b_id)] {
             if let Some(id) = id {
-                match c.delete_task(id) {
+                match c.delete_task(id, false) {
                     Ok(_) => { cleanup_tasks.retain(|(l, _)| l != label); }
                     Err(e) => println!("T1 cleanup FAILED for {label}: {e}"),
                 }
@@ -188,7 +190,7 @@ fn system_test_plans_10_to_12() {
                         .unwrap_or(None);
                     let has_blue = found.as_ref().map(|cats| cats.iter().any(|c| c == "Blue Category")).unwrap_or(false);
                     r.record("T2", has_blue, format!("categories after create: {found:?}"));
-                    match c.delete_task(id) {
+                    match c.delete_task(id, false) {
                         Ok(_) => { cleanup_tasks.retain(|(l, _)| l != "T2"); }
                         Err(e) => println!("T2 cleanup FAILED: {e}"),
                     }
@@ -249,7 +251,7 @@ fn system_test_plans_10_to_12() {
                          is_reopened={is_reopened} edit_ok={edit_ok}"
                     ));
 
-                    match c.delete_task(id) {
+                    match c.delete_task(id, false) {
                         Ok(_) => { cleanup_tasks.retain(|(l, _)| l != "T3"); }
                         Err(e) => println!("T3 cleanup FAILED: {e}"),
                     }
@@ -270,7 +272,7 @@ fn system_test_plans_10_to_12() {
                 if let Some(id) = v["id"].as_str() {
                     let id = id.to_string();
                     cleanup_tasks.push(("T4".to_string(), id.clone()));
-                    match c.delete_task(id.clone()) {
+                    match c.delete_task(id.clone(), false) {
                         Ok(v) => {
                             r.record("T4", v["status"] == "deleted", format!("{v}"));
                             cleanup_tasks.retain(|(l, _)| l != "T4");
@@ -313,7 +315,7 @@ fn system_test_plans_10_to_12() {
         }
 
         if n1a_id.is_some() && n1b_id.is_some() {
-            match c.list_notes(NoteQuery { category: Some("Green Category".to_string()), ..Default::default() }) {
+            match c.list_notes(NoteQuery { category: vec!["Green Category".to_string()], ..Default::default() }) {
                 Ok(list) => check_task_set(&mut r, "N1-category", tagged_note_suffixes(&list),
                     &["N1 category note - remember zephyrling"], "category:Green Category"),
                 Err(e) => r.record("N1-category", false, format!("failed: {e}")),
@@ -330,7 +332,7 @@ fn system_test_plans_10_to_12() {
 
         for (label, id) in [("N1a", n1a_id), ("N1b", n1b_id)] {
             if let Some(id) = id {
-                match c.delete_note(id) {
+                match c.delete_note(id, false) {
                     Ok(_) => { cleanup_notes.retain(|(l, _)| l != label); }
                     Err(e) => println!("N1 cleanup FAILED for {label}: {e}"),
                 }
@@ -355,7 +357,7 @@ fn system_test_plans_10_to_12() {
                     // nothing (see skill doc / live_outlook.rs precedent) -
                     // capture the baseline and require non-decreasing after,
                     // paired with an assertion on the actually-changed body.
-                    let before = c.get_note(id.clone()).ok();
+                    let before = single(c.get_note(vec![id.clone()], &ReadOptions::default())).ok();
                     let has_yellow = before.as_ref()
                         .map(|d| d.summary.categories.iter().any(|cat| cat == "Yellow Category"))
                         .unwrap_or(false);
@@ -366,9 +368,9 @@ fn system_test_plans_10_to_12() {
                         note_id: id.clone(), body: Some(edited_body.clone()), ..Default::default()
                     }).is_ok();
 
-                    let after = c.get_note(id.clone()).ok();
+                    let after = single(c.get_note(vec![id.clone()], &ReadOptions::default())).ok();
                     let after_modified = after.as_ref().and_then(|d| d.modified.clone());
-                    let body_changed = after.as_ref().map(|d| d.body.starts_with(&edited_body)).unwrap_or(false);
+                    let body_changed = after.as_ref().map(|d| d.body.as_deref().unwrap_or_default().starts_with(&edited_body)).unwrap_or(false);
                     let modified_nondecreasing = match (&before_modified, &after_modified) {
                         (Some(b), Some(a)) => a >= b,
                         _ => false,
@@ -382,7 +384,7 @@ fn system_test_plans_10_to_12() {
                          nondecreasing={modified_nondecreasing}"
                     ));
 
-                    match c.delete_note(id) {
+                    match c.delete_note(id, false) {
                         Ok(_) => { cleanup_notes.retain(|(l, _)| l != "N2"); }
                         Err(e) => println!("N2 cleanup FAILED: {e}"),
                     }
@@ -416,7 +418,7 @@ fn system_test_plans_10_to_12() {
                         }
                         Err(e) => { println!("N3 add FAILED: {e}"); false }
                     };
-                    let has_pink = c.get_note(id.clone()).ok()
+                    let has_pink = single(c.get_note(vec![id.clone()], &ReadOptions::default())).ok()
                         .map(|d| d.summary.categories.iter().any(|cat| cat == "Pink Category"))
                         .unwrap_or(false);
 
@@ -427,7 +429,7 @@ fn system_test_plans_10_to_12() {
                         Ok(v) => v["changed"].as_array().map(|a| a.iter().any(|x| x == "remove_categories")).unwrap_or(false),
                         Err(e) => { println!("N3 remove FAILED: {e}"); false }
                     };
-                    let pink_gone = c.get_note(id.clone()).ok()
+                    let pink_gone = single(c.get_note(vec![id.clone()], &ReadOptions::default())).ok()
                         .map(|d| !d.summary.categories.iter().any(|cat| cat == "Pink Category"))
                         .unwrap_or(false);
 
@@ -436,7 +438,7 @@ fn system_test_plans_10_to_12() {
                         "add_ok={add_ok} has_pink={has_pink} remove_ok={remove_ok} pink_gone={pink_gone}"
                     ));
 
-                    match c.delete_note(id) {
+                    match c.delete_note(id, false) {
                         Ok(_) => { cleanup_notes.retain(|(l, _)| l != "N3"); }
                         Err(e) => println!("N3 cleanup FAILED: {e}"),
                     }
@@ -457,7 +459,7 @@ fn system_test_plans_10_to_12() {
                 if let Some(id) = v["id"].as_str() {
                     let id = id.to_string();
                     cleanup_notes.push(("N4".to_string(), id.clone()));
-                    match c.delete_note(id.clone()) {
+                    match c.delete_note(id.clone(), false) {
                         Ok(v) => {
                             r.record("N4", v["status"] == "deleted", format!("{v}"));
                             cleanup_notes.retain(|(l, _)| l != "N4");
@@ -476,7 +478,7 @@ fn system_test_plans_10_to_12() {
     println!("\n--- Cleanup ---");
     let mut leftovers: Vec<String> = Vec::new();
     for (label, id) in &cleanup_tasks {
-        match c.delete_task(id.clone()) {
+        match c.delete_task(id.clone(), false) {
             Ok(_) => println!("cleaned up leftover task {label} ({id})"),
             Err(e) => {
                 println!("FAILED to clean up task {label} ({id}): {e}");
@@ -485,7 +487,7 @@ fn system_test_plans_10_to_12() {
         }
     }
     for (label, id) in &cleanup_notes {
-        match c.delete_note(id.clone()) {
+        match c.delete_note(id.clone(), false) {
             Ok(_) => println!("cleaned up leftover note {label} ({id})"),
             Err(e) => {
                 println!("FAILED to clean up note {label} ({id}): {e}");
