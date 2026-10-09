@@ -1,6 +1,6 @@
 ---
 name: troubleshooting-outlook-mcp
-description: Use when an outlook-mcp-rs tool returns an error ("Outlook error: … (HRESULT 0x…)", "Item not found", "Folder not found", "Could not resolve", "only unsent drafts can be edited", "Content-ID … not found", "inline_images requires html=true") or a result that looks wrong — empty calendar or inbox that shouldn't be empty, events or emails from the wrong dates, a cut-off email body, fewer emails than expected.
+description: Use when an outlook-mcp-rs tool returns an error ("Outlook error: … (HRESULT 0x…)", "Item not found", "Folder not found", "Could not resolve", "only unsent drafts can be edited", "Content-ID … not found", "inline_images requires an HTML body", "payload too large") or a result that looks wrong — empty calendar or inbox that shouldn't be empty, events or emails from the wrong dates, a cut-off email body, fewer emails than expected.
 ---
 
 # Troubleshooting the Outlook MCP tools
@@ -24,9 +24,17 @@ may still have sent.
 | `Invalid … expected ISO format` | The date isn't in ISO format | Use `2026-06-10` or `2026-06-10T14:30` |
 | `attachment not found: …` / `inline image not found: …` | The local path doesn't exist (nothing was sent) | Fix the absolute path and retry |
 | `only unsent drafts can be edited` | `update_draft` was called on received or sent mail | Use `reply_email`, or `create_draft` for a new message |
-| `pass either 'body' or 'html_body', not both` / `update_draft needs at least one of…` | Invalid `update_draft` arguments (nothing was changed) | Send exactly one body field, and at least one change |
-| `inline_images requires html=true` | `inline_images` used with a plain-text body | Set `html: true` and reference each image as `<img src="cid:ID">` |
+| ``pass either `body` or `html_body`, not both`` (or any two of `body`, `html_body`, `body_file`, `html_body_file`) | More than one body source (nothing was changed) | Pass exactly one |
+| `… needs a body: pass one of …` | A mail tool or `create_note` got no body at all | Pass `body`, `html_body`, `body_file` or `html_body_file` |
+| `` `html: false` contradicts `html_body` `` | The deprecated `html` flag disagrees with `html_body` | Drop `html` |
+| `body_file: could not read …` / `… is not valid UTF-8 text` | A `*_file` path is wrong or the file isn't UTF-8 text (nothing was changed) | Use an absolute path to a UTF-8 file |
+| `update_draft needs at least one of…` | `update_draft` with nothing to change and no `send` | Pass at least one change, or `send: true` |
+| `the draft has no recipients, so it was saved but not sent` | `update_draft` with `send: true` on a draft with no To/CC/BCC | Add recipients (`to`/`cc`/`bcc`) in the same call |
+| `inline_images requires an HTML body` | `inline_images` used with a plain-text body | Use `html_body` and reference each image as `<img src="cid:ID">` |
 | `duplicate inline image content_id` / `data_base64 is not valid base64` | Bad `inline_images` entry (nothing was created) | Give each image a unique `content_id` and valid base64, or use a `path` |
+| `html_body: a image/… data: URI is not valid base64` / `has no data` / `unterminated` | A `data:` image in the HTML is broken (nothing was created) | Fix or remove that `<img src="data:...">` |
+| `payload too large` (HTTP 413) | The HTTP request body is over 64 MiB | Write the body to a file and pass `body_file` / `html_body_file` |
+| A large tool call fails while its JSON is being parsed, with no server error | The client cut the arguments short (often the model's output limit when it writes a very long body or base64 inline) | Write the content to a file and pass `html_body_file`/`body_file` |
 | `Content-ID '…' not found. Available Content-IDs: …` | Wrong `content_id` for `get_inline_image` | Use one of the listed ids. The `cid:` prefix and letter case don't matter |
 | `no attachments with a Content-ID` | The email has no inline images | `list_attachments` shows its regular attachments |
 | `exceeds the 10 MB limit for get_inline_image` | The attachment is too big to return inline | Use `save_attachments` to write it to disk |

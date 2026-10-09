@@ -7,7 +7,8 @@ use super::types::*;
 use super::{
     require_empty_confirm, validate_recurrence_update, CheckAvailabilityInput, CreateEventInput,
     EmailQuery, EmailUpdate, EventQuery, EventUpdate, NoteQuery, NoteUpdate, OutlookClient,
-    TaskQuery, TaskUpdate, draft_update_changes, validate_draft_update, DraftUpdate, InlineImage,
+    TaskQuery, TaskUpdate, draft_update_changes, validate_draft_update, DraftUpdate, NewEmail,
+    ReplyInput, parse_importance, prepare_html_images, prepare_mail_body, ValidatedInlineImage,
 };
 
 pub const EMAIL_ID: &str = "entry-1|store-1";
@@ -79,6 +80,26 @@ impl FakeOutlookClient {
     }
 }
 
+/// The Content-IDs of every inline image a mail tool would attach.
+fn content_ids(images: &[ValidatedInlineImage]) -> Vec<String> {
+    images.iter().map(|i| i.content_id.clone()).collect()
+}
+
+/// Validate a [`NewEmail`] like the real client does (body, inline images,
+/// `data:` URIs, importance) and build the recorded arguments: `body` is the
+/// final body (data URIs rewritten to `cid:`), `html` whether it's HTML, and
+/// `inline_content_ids` every inline image that would be attached.
+fn new_email_args(m: &NewEmail) -> Result<Value, ToolError> {
+    parse_importance(m.importance.as_deref())?;
+    let (body, images) = prepare_mail_body(&m.body, m.inline_images.as_deref().unwrap_or(&[]))?;
+    Ok(json!({
+        "to": m.to, "subject": m.subject, "body": body.as_str(), "html": body.is_html(),
+        "cc": m.cc, "bcc": m.bcc, "attachments": m.attachments,
+        "inline_images": m.inline_images, "inline_content_ids": content_ids(&images),
+        "categories": m.categories, "importance": m.importance,
+    }))
+}
+
 impl OutlookClient for FakeOutlookClient {
     fn list_folders(&self) -> Result<Vec<FolderInfo>, ToolError> {
         self.record("list_folders", json!({}))?;
@@ -128,29 +149,29 @@ impl OutlookClient for FakeOutlookClient {
         })
     }
 
-    fn send_email(&self, to: Vec<String>, subject: String, body: String,
-        cc: Option<Vec<String>>, bcc: Option<Vec<String>>, html: bool,
-        attachments: Option<Vec<String>>, inline_images: Option<Vec<InlineImage>>)
-        -> Result<Value, ToolError> {
-        self.record("send_email",
-            json!({"to": to, "subject": subject, "body": body, "cc": cc, "bcc": bcc, "html": html, "attachments": attachments, "inline_images": inline_images}))?;
-        Ok(json!({"status": "sent", "to": to.join("; "), "subject": subject}))
+    fn send_email(&self, m: NewEmail) -> Result<Value, ToolError> {
+        let args = new_email_args(&m)?;
+        self.record("send_email", args)?;
+        Ok(json!({"status": "sent", "to": m.to.join("; "), "subject": m.subject}))
     }
 
-    fn create_draft(&self, to: Vec<String>, subject: String, body: String,
-        cc: Option<Vec<String>>, bcc: Option<Vec<String>>, html: bool,
-        attachments: Option<Vec<String>>, inline_images: Option<Vec<InlineImage>>)
-        -> Result<Value, ToolError> {
-        self.record("create_draft",
-            json!({"to": to, "subject": subject, "body": body, "cc": cc, "bcc": bcc, "html": html, "attachments": attachments, "inline_images": inline_images}))?;
-        Ok(json!({"status": "draft_saved", "id": EMAIL_ID, "subject": subject}))
+    fn create_draft(&self, m: NewEmail) -> Result<Value, ToolError> {
+        let args = new_email_args(&m)?;
+        self.record("create_draft", args)?;
+        Ok(json!({"status": "draft_saved", "id": EMAIL_ID, "subject": m.subject}))
     }
 
-    fn reply_email(&self, email_id: String, body: String, reply_all: bool,
-        html: bool, send: bool, attachments: Option<Vec<String>>) -> Result<Value, ToolError> {
-        self.record("reply_email",
-            json!({"email_id": email_id, "body": body, "reply_all": reply_all, "html": html, "send": send, "attachments": attachments}))?;
-        Ok(json!({"status": if send { "sent" } else { "draft_saved" }}))
+    fn reply_email(&self, r: ReplyInput) -> Result<Value, ToolError> {
+        // Same up-front validation as the real client.
+        parse_importance(r.importance.as_deref())?;
+        let (body, images) = prepare_mail_body(&r.body, r.inline_images.as_deref().unwrap_or(&[]))?;
+        self.record("reply_email", json!({
+            "email_id": r.email_id, "body": body.as_str(), "html": body.is_html(),
+            "reply_all": r.reply_all, "send": r.send, "attachments": r.attachments,
+            "inline_images": r.inline_images, "inline_content_ids": content_ids(&images),
+            "categories": r.categories, "importance": r.importance,
+        }))?;
+        Ok(json!({"status": if r.send { "sent" } else { "draft_saved" }}))
     }
 
     fn update_email(&self, u: EmailUpdate) -> Result<Value, ToolError> {
@@ -179,12 +200,26 @@ impl OutlookClient for FakeOutlookClient {
     fn update_draft(&self, u: DraftUpdate) -> Result<Value, ToolError> {
         // Same up-front validation as the real client.
         validate_draft_update(&u)?;
+        let (html_body, images) = match &u.html_body {
+            Some(html) => {
+                let (html, images) = prepare_html_images(html, u.inline_images.as_deref().unwrap_or(&[]))?;
+                (Some(html), images)
+            }
+            None => (None, Vec::new()),
+        };
         self.record("update_draft", json!({
-            "draft_id": u.draft_id, "subject": u.subject, "body": u.body,
-            "html_body": u.html_body, "to": u.to, "cc": u.cc, "bcc": u.bcc,
-            "attachments": u.attachments,
+            "email_id": u.email_id, "subject": u.subject, "body": u.body,
+            "html_body": html_body, "to": u.to, "cc": u.cc, "bcc": u.bcc,
+            "attachments": u.attachments, "inline_images": u.inline_images,
+            "inline_content_ids": content_ids(&images),
+            "add_categories": u.add_categories, "remove_categories": u.remove_categories,
+            "importance": u.importance, "send": u.send,
         }))?;
-        Ok(json!({"status": "draft_updated", "id": u.draft_id, "changed": draft_update_changes(&u)}))
+        let changed = draft_update_changes(&u);
+        if u.send {
+            return Ok(json!({"status": "sent", "subject": u.subject.unwrap_or_default(), "changed": changed}));
+        }
+        Ok(json!({"status": "draft_updated", "id": u.email_id, "changed": changed}))
     }
 
     fn delete_email(&self, email_id: String, permanent: bool) -> Result<Value, ToolError> {

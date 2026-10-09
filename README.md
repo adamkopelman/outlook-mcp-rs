@@ -136,19 +136,19 @@ The Outlook tools then appear in that client.
 - `list_folders` — list mail folders (name, path, item counts)
 - `list_emails` — find emails in a folder with an optional text query (matches subject, sender, and body; non-ASCII queries such as Hebrew fall back to a client-side scan when Outlook's search finds nothing) and filters (sender via `from`, recipient via `to` — any To/CC name or address, category, date range, attachments, flagged, importance); newest first, `count` up to 200, page with `offset`
 - `get_email` — get the full body and attachment list of one email by id; reports `body_truncated`/`body_length` (and `html_truncated`/`html_length` with `prefer_html`), and `max_body_chars` (default 100,000, up to 5,000,000) fetches a larger body
-- `send_email` — send a new email immediately (to/cc/bcc, plain or HTML body, file attachments, inline images)
+- `send_email` — send a new email immediately (to/cc/bcc, `body` or `html_body` — or `body_file`/`html_body_file` for large bodies — file attachments, inline images, categories, importance)
 - `create_draft` — create a draft email without sending it (same options as `send_email`)
-- `reply_email` — reply to an email, optionally to all recipients, optionally as a draft
+- `reply_email` — reply to an email, optionally to all recipients, optionally as a draft (same body, inline image, category and importance options)
 - `update_email` — change an existing email: move to a folder, mark read/unread, flag (follow_up/complete/clear), add/remove categories, set importance
-- `update_draft` — edit an unsent draft's subject, body/HTML body, To/CC/BCC (each replaces that line; `[]` clears it), or append attachments; saves but never sends
+- `update_draft` — edit an unsent draft by `email_id` (`draft_id` is a deprecated alias): subject, body/HTML body (or `body_file`/`html_body_file`), To/CC/BCC (each replaces that line; `[]` clears it), append attachments or inline images, add/remove categories, set importance; saves, and sends only with `send=true`
 - `delete_email` — delete an email (moves it to Deleted Items), or hard-delete it with `permanent=true` (like shift+delete; **irreversible**, not recoverable from Deleted Items)
 - `empty_deleted_items` — **permanently** delete everything in Deleted Items (items and subfolders); **irreversible**, refuses unless `confirm=true`. On Exchange/Microsoft 365, retention policy may still keep items in Recoverable Items
 
 **Calendar**
 - `list_events` — list/search calendar events by date range, text (subject/location), category, show_as, your response, or attendees; view meetings-only or all-day; or open another person's shared calendar with `calendar_of`
 - `get_event` — get the full details of one calendar event by id
-- `create_event` — create a calendar event; supports two tiers of attendees, categories, `show_as`, and recurrence, with `send` controlling whether invites actually go out
-- `update_event` — change an existing event (subject, times, location, body, attendees, reminder, recurrence…); optionally notify attendees
+- `create_event` — create a calendar event; supports two tiers of attendees, categories, `show_as`, and recurrence, with `send` controlling whether invites actually go out; `body` or `body_file`
+- `update_event` — change an existing event (subject, times, location, body or `body_file`, attendees, reminder, recurrence…); optionally notify attendees
 - `respond_to_meeting` — respond to a meeting invite (accept, decline, or tentative)
 - `delete_event` — delete/cancel an event (moves it to Deleted Items); optionally send a cancellation to attendees
 - `check_availability` — check free/busy for one or more people over a time window; returns each person's per-slot status plus the windows where everyone is free
@@ -160,39 +160,68 @@ The Outlook tools then appear in that client.
 
 **Tasks**
 - `list_tasks` — list Outlook tasks (filter by category, importance, or a text query matching subject or body)
-- `create_task` — create a new Outlook task
-- `update_task` — change an existing task: mark complete/reopen, subject, body, due_date, start_date, importance, add/remove categories, percent_complete, reminder_time
+- `create_task` — create a new Outlook task (`body` or `body_file`)
+- `update_task` — change an existing task: mark complete/reopen, subject, body (or `body_file`), due_date, start_date, importance, add/remove categories, percent_complete, reminder_time
 - `delete_task` — delete a task (moves it to Deleted Items)
 
 **Notes**
 - `list_notes` — list Outlook notes (filter by category or a text query on the body)
 - `get_note` — get the full body of one note by id
-- `create_note` — create a new Outlook note (optional categories, color)
-- `update_note` — change an existing note: body, add/remove categories, color
+- `create_note` — create a new Outlook note from `body` or `body_file` (optional categories, color)
+- `update_note` — change an existing note: body (or `body_file`), add/remove categories, color
 - `delete_note` — delete a note (moves it to Deleted Items)
+
+### Body inputs
+
+Every tool that writes content follows one convention:
+
+- Mail tools (`send_email`, `create_draft`, `reply_email`, `update_draft`) take the body as exactly one of
+  `body` (plain text), `html_body`, `body_file` or `html_body_file` (`update_draft`: at most one, since the
+  body is optional there). The `*_file` forms take a local path to a UTF-8 file; use them for large bodies,
+  which also avoids escaping big HTML inside JSON.
+- The old `html: true` flag still works on `send_email`/`create_draft`/`reply_email` but is deprecated:
+  `html: true` with `body`/`body_file` means HTML. `html: false` together with `html_body` is an error.
+- Events, tasks and notes have a plain-text `body` with a `body_file` sibling (not both).
+- `categories` (create tools) or `add_categories`/`remove_categories` (update tools), and `importance` on
+  the mail tools.
+
+All inputs, including files and images, are read and validated before anything is created, changed or sent.
 
 ### Inline images
 
-`send_email` and `create_draft` accept `inline_images` to embed images as
-real Content-ID attachments instead of base64 inside the HTML string. This
-requires `html: true`. Each entry has a `content_id` and exactly one of a
-local `path` or `data_base64` (a `data:image/png;base64,` prefix and
-whitespace are accepted). `filename` and `mime_type` are optional; the MIME
-type is otherwise guessed from the file name or the image bytes. Reference
-each image in the body as `<img src="cid:CONTENT_ID">`:
+Images inside an HTML body are sent as real Content-ID attachments instead of base64 inside the HTML
+string. There are two ways, on every mail-writing tool (`send_email`, `create_draft`, `reply_email`,
+`update_draft`):
+
+- **`data:` URIs in the HTML are converted automatically.** Each `data:image/...` URI used as an attribute
+  value (`<img src="data:image/png;base64,...">`, quoted or not) or in a CSS `url(...)` becomes a hidden
+  inline attachment, and the reference is rewritten to `cid:img-<hash>`. Base64 and percent-encoded
+  payloads are accepted; the same image used twice is attached once. Non-image `data:` URIs (for example
+  `data:text/plain,...`) are left untouched, and an image URI that isn't valid base64 is an error.
+- **`inline_images`** lists images explicitly. Each entry has a `content_id` and exactly one of a local
+  `path` or `data_base64` (a `data:image/png;base64,` prefix and whitespace are accepted). `filename` and
+  `mime_type` are optional; the MIME type is otherwise guessed from the file name or the image bytes.
+  Reference each image in the HTML as `<img src="cid:CONTENT_ID">`. Requires an HTML body.
 
 ```json
 {
-  "to": ["ada@example.com"], "subject": "Q3", "html": true,
-  "body": "<p>Results:</p><img src=\"cid:chart\">",
+  "to": ["ada@example.com"], "subject": "Q3",
+  "html_body": "<p>Results:</p><img src=\"cid:chart\"><p>Logo:</p><img src=\"data:image/png;base64,iVBORw0...\">",
   "inline_images": [{"content_id": "chart", "path": "C:/reports/q3.png"}]
 }
 ```
 
-All entries are validated before anything is created, sent or saved. Base64
-data is written to a temp file for `Attachments.Add` and deleted afterwards.
-Images are marked hidden, but some Outlook versions may still list them as
-regular attachments.
+On `update_draft`, an `inline_images` entry replaces an existing attachment with the same Content-ID, and
+a converted `data:` image is not added again if the draft already has it (its Content-ID is a hash of the
+image). Base64 data is written to a temp file for `Attachments.Add` and deleted afterwards. Images are
+marked hidden, but some Outlook versions may still list them as regular attachments.
+
+### Large requests
+
+Neither transport has a small size limit: stdio has none, and the HTTP transport accepts request bodies up
+to 64 MiB and answers a larger one with an explicit `413 payload too large`. A compressed (`Content-Encoding`)
+request is refused with `415`. For large bodies, prefer `body_file` / `html_body_file`: the content never
+has to pass through the tool call at all.
 
 ## How it works
 
@@ -224,11 +253,11 @@ explicitly:
 
 A few tools have real, outbound effects, and these are also explicit in the tool call:
 
-- `send_email` delivers mail;
+- `send_email` delivers mail, as do `reply_email` (unless `send=false`) and `update_draft` with `send=true`;
 - `respond_to_meeting` notifies an organizer;
 - `create_event`, `update_event` and `delete_event` notify attendees when their send/update/cancellation flag is set.
 
-`update_draft` edits a draft but never sends it. [`TESTING.md`](TESTING.md) spells out exactly which behaviors are
+`update_draft` edits a draft and only sends it when `send=true` is passed. [`TESTING.md`](TESTING.md) spells out exactly which behaviors are
 covered by automated tests versus verified by hand precisely because they send real mail.
 
 ## Troubleshooting

@@ -29,8 +29,9 @@ use crate::outlook::{
     CheckAvailabilityInput, permanent_delete_needs_move, require_empty_confirm, CreateEventInput,
     EmailQuery, EmailUpdate, EventQuery, EventUpdate, NoteQuery, NoteUpdate, OutlookClient,
     RecurrenceInput, TaskQuery, TaskUpdate, text_before_cid, draft_update_changes,
-    validate_draft_update, DraftUpdate, InlineImage, InlineImageSource, ValidatedInlineImage,
-    validate_inline_images,
+    validate_draft_update, DraftUpdate, InlineImageSource, ValidatedInlineImage, MailBody,
+    NewEmail, ReplyInput, merge_categories, parse_importance, prepare_html_images,
+    prepare_mail_body,
 };
 
 /// Matches `MAX_EMAIL_COUNT` in `client.py`. Larger result sets are paged
@@ -774,10 +775,9 @@ fn compose(
     app: &IDispatch,
     to: &[String],
     subject: &str,
-    body: &str,
+    body: &MailBody,
     cc: Option<&[String]>,
     bcc: Option<&[String]>,
-    html: bool,
 ) -> Result<IDispatch, ToolError> {
     let mail = to_disp(call_method(app, "CreateItem", &mut [variant_from_i32(c::OL_MAIL_ITEM)])?)?;
     put_property(&mail, "To", variant_from_str(&to.join("; ")))?;
@@ -792,14 +792,48 @@ fn compose(
         }
     }
     put_property(&mail, "Subject", variant_from_str(subject))?;
-    if html {
-        put_property(&mail, "BodyFormat", variant_from_i32(c::OL_FORMAT_HTML))?;
-        put_property(&mail, "HTMLBody", variant_from_str(body))?;
-    } else {
-        put_property(&mail, "BodyFormat", variant_from_i32(c::OL_FORMAT_PLAIN))?;
-        put_property(&mail, "Body", variant_from_str(body))?;
-    }
+    set_mail_body(&mail, body)?;
     Ok(mail)
+}
+
+/// Replace a mail item's body. `BodyFormat` is set first so Outlook doesn't
+/// re-convert the new body.
+fn set_mail_body(mail: &IDispatch, body: &MailBody) -> Result<(), ToolError> {
+    match body {
+        MailBody::Html(html) => {
+            put_property(mail, "BodyFormat", variant_from_i32(c::OL_FORMAT_HTML))?;
+            put_property(mail, "HTMLBody", variant_from_str(html))?;
+        }
+        MailBody::Text(text) => {
+            put_property(mail, "BodyFormat", variant_from_i32(c::OL_FORMAT_PLAIN))?;
+            put_property(mail, "Body", variant_from_str(text))?;
+        }
+    }
+    Ok(())
+}
+
+/// Set categories (when given and non-empty) and importance (an already
+/// validated `OlImportance` id) on a new mail item.
+fn set_mail_metadata(mail: &IDispatch, categories: Option<&[String]>, importance: Option<i32>)
+    -> Result<(), ToolError> {
+    if let Some(cats) = categories.filter(|c| !c.is_empty()) {
+        set_item_categories(mail, cats)?;
+    }
+    if let Some(id) = importance {
+        put_property(mail, "Importance", variant_from_i32(id))?;
+    }
+    Ok(())
+}
+
+/// Validate a [`NewEmail`] before any COM call: importance, attachment
+/// paths, inline images and the body's `data:` URIs. Returns the final body,
+/// all inline images to attach and the importance id.
+fn prepare_new_email(m: &NewEmail)
+    -> Result<(MailBody, Vec<ValidatedInlineImage>, Option<i32>), ToolError> {
+    let importance = parse_importance(m.importance.as_deref())?;
+    check_attachment_paths(m.attachments.as_deref().unwrap_or(&[]))?;
+    let (body, images) = prepare_mail_body(&m.body, m.inline_images.as_deref().unwrap_or(&[]))?;
+    Ok((body, images, importance))
 }
 
 /// Metadata for one attachment (`index` is COM's 1-based position). Shared by
@@ -951,14 +985,20 @@ fn merge_json_objects(mut base: Value, extra: Value) -> Value {
 /// FIRST (so a bad path fails before anything is sent), then adds each via
 /// `MailItem.Attachments.Add(path)`.
 fn attach_files(mail: &IDispatch, paths: &[String]) -> Result<(), ToolError> {
+    check_attachment_paths(paths)?;
+    let atts = to_disp(get_property(mail, "Attachments")?)?;
+    for p in paths {
+        call_method(&atts, "Add", &mut [variant_from_str(p)])?;
+    }
+    Ok(())
+}
+
+/// Every attachment path must be an existing file.
+fn check_attachment_paths(paths: &[String]) -> Result<(), ToolError> {
     for p in paths {
         if !std::path::Path::new(p).is_file() {
             return Err(ToolError::new(format!("attachment not found: {p}")));
         }
-    }
-    let atts = to_disp(get_property(mail, "Attachments")?)?;
-    for p in paths {
-        call_method(&atts, "Add", &mut [variant_from_str(p)])?;
     }
     Ok(())
 }
@@ -999,15 +1039,6 @@ impl Drop for InlineTempDirs {
     }
 }
 
-/// Validate `inline_images` (if any) before any COM item is created.
-fn validated_inline_images(images: Option<&[InlineImage]>, html: bool)
-    -> Result<Vec<ValidatedInlineImage>, ToolError> {
-    match images {
-        Some(images) if !images.is_empty() => validate_inline_images(images, html),
-        _ => Ok(Vec::new()),
-    }
-}
-
 /// Attach validated inline images as hidden Content-ID attachments the HTML
 /// body references via `cid:CONTENT_ID`. Base64 data is written to a temp
 /// file first (tracked in `temp` for cleanup), since `Attachments.Add` only
@@ -1022,36 +1053,84 @@ fn attach_inline_images(
     }
     let atts = to_disp(get_property(mail, "Attachments")?)?;
     for img in images {
-        let path = match &img.source {
-            InlineImageSource::Path(p) => p.clone(),
-            InlineImageSource::Data(bytes) => {
-                let file = temp.create()?.join(&img.filename);
-                std::fs::write(&file, bytes).map_err(|e| {
-                    ToolError::new(format!("could not write inline image {:?} to a temp file: {e}", img.content_id))
-                })?;
-                file.to_string_lossy().into_owned()
+        add_inline_image(&atts, img, temp)?;
+    }
+    Ok(())
+}
+
+/// Add one validated inline image to an `Attachments` collection.
+fn add_inline_image(atts: &IDispatch, img: &ValidatedInlineImage, temp: &mut InlineTempDirs)
+    -> Result<(), ToolError> {
+    let path = match &img.source {
+        InlineImageSource::Path(p) => p.clone(),
+        InlineImageSource::Data(bytes) => {
+            let file = temp.create()?.join(&img.filename);
+            std::fs::write(&file, bytes).map_err(|e| {
+                ToolError::new(format!("could not write inline image {:?} to a temp file: {e}", img.content_id))
+            })?;
+            file.to_string_lossy().into_owned()
+        }
+    };
+    // Position 0: don't render an attachment icon in the body.
+    let att = to_disp(call_method(atts, "Add", &mut [
+        variant_from_str(&path),
+        variant_from_i32(c::OL_BY_VALUE),
+        variant_from_i32(0),
+        variant_from_str(&img.filename),
+    ])?)?;
+    let pa = to_disp(get_property(&att, "PropertyAccessor")?)?;
+    call_method(&pa, "SetProperty", &mut [
+        variant_from_str(c::PR_ATTACH_CONTENT_ID),
+        variant_from_str(&img.content_id),
+    ])?;
+    call_method(&pa, "SetProperty", &mut [
+        variant_from_str(c::PR_ATTACH_MIME_TAG),
+        variant_from_str(&img.mime_type),
+    ])?;
+    call_method(&pa, "SetProperty", &mut [
+        variant_from_str(c::PR_ATTACHMENT_HIDDEN),
+        variant_from_bool(true),
+    ])?;
+    Ok(())
+}
+
+/// `update_draft`'s inline images, added to a draft that may already hold
+/// some. An explicit image (`explicit_count` first entries of `images`)
+/// replaces any existing attachment with the same Content-ID. An image taken
+/// from a `data:` URI is skipped when the draft already has its Content-ID:
+/// that id is a hash of the bytes, so it's the same image (e.g. an earlier
+/// update with the same HTML).
+fn attach_draft_inline_images(
+    item: &IDispatch,
+    images: &[ValidatedInlineImage],
+    explicit_count: usize,
+    temp: &mut InlineTempDirs,
+) -> Result<(), ToolError> {
+    if images.is_empty() {
+        return Ok(());
+    }
+    let atts = to_disp(get_property(item, "Attachments")?)?;
+    for (i, img) in images.iter().enumerate() {
+        // Walk backwards so deleting keeps the remaining indexes valid.
+        let count = variant_to_i32(&get_property(&atts, "Count")?).unwrap_or(0);
+        let mut present = false;
+        for idx in (1..=count).rev() {
+            let att = to_disp(call_method(&atts, "Item", &mut [variant_from_i32(idx)])?)?;
+            let cid = get_mapi_prop(&att, c::PR_ATTACH_CONTENT_ID).map(|v| variant_to_string(&v));
+            let same = clean_content_id(cid.as_deref())
+                .is_some_and(|cid| cid.eq_ignore_ascii_case(&img.content_id));
+            if !same {
+                continue;
             }
-        };
-        // Position 0: don't render an attachment icon in the body.
-        let att = to_disp(call_method(&atts, "Add", &mut [
-            variant_from_str(&path),
-            variant_from_i32(c::OL_BY_VALUE),
-            variant_from_i32(0),
-            variant_from_str(&img.filename),
-        ])?)?;
-        let pa = to_disp(get_property(&att, "PropertyAccessor")?)?;
-        call_method(&pa, "SetProperty", &mut [
-            variant_from_str(c::PR_ATTACH_CONTENT_ID),
-            variant_from_str(&img.content_id),
-        ])?;
-        call_method(&pa, "SetProperty", &mut [
-            variant_from_str(c::PR_ATTACH_MIME_TAG),
-            variant_from_str(&img.mime_type),
-        ])?;
-        call_method(&pa, "SetProperty", &mut [
-            variant_from_str(c::PR_ATTACHMENT_HIDDEN),
-            variant_from_bool(true),
-        ])?;
+            if i < explicit_count {
+                call_method(&att, "Delete", &mut [])?;
+            } else {
+                present = true;
+            }
+        }
+        if !present {
+            add_inline_image(&atts, img, temp)?;
+        }
     }
     Ok(())
 }
@@ -1374,53 +1453,36 @@ impl OutlookClient for WindowsOutlookClient {
         })
     }
 
-    fn send_email(
-        &self,
-        to: Vec<String>,
-        subject: String,
-        body: String,
-        cc: Option<Vec<String>>,
-        bcc: Option<Vec<String>>,
-        html: bool,
-        attachments: Option<Vec<String>>,
-        inline_images: Option<Vec<InlineImage>>,
-    ) -> Result<Value, ToolError> {
-        if to.is_empty() {
+    fn send_email(&self, m: NewEmail) -> Result<Value, ToolError> {
+        if m.to.is_empty() {
             return Err(ToolError::new(
                 "send_email requires at least one recipient in 'to'.",
             ));
         }
-        let images = validated_inline_images(inline_images.as_deref(), html)?;
+        // Validate everything before the item is created.
+        let (body, images, importance) = prepare_new_email(&m)?;
         self.with_com(|| {
             let (app, _ns) = mapi()?;
-            let mail = compose(&app, &to, &subject, &body, cc.as_deref(), bcc.as_deref(), html)?;
-            if let Some(atts) = attachments.as_deref() {
+            let mail = compose(&app, &m.to, &m.subject, &body, m.cc.as_deref(), m.bcc.as_deref())?;
+            set_mail_metadata(&mail, m.categories.as_deref(), importance)?;
+            if let Some(atts) = m.attachments.as_deref() {
                 attach_files(&mail, atts)?;
             }
             // Dropped at the end of this closure: temp files outlive Send.
             let mut temp = InlineTempDirs::default();
             attach_inline_images(&mail, &images, &mut temp)?;
             call_method(&mail, "Send", &mut [])?;
-            Ok(json!({"status": "sent", "to": to.join("; "), "subject": subject}))
+            Ok(json!({"status": "sent", "to": m.to.join("; "), "subject": m.subject}))
         })
     }
 
-    fn create_draft(
-        &self,
-        to: Vec<String>,
-        subject: String,
-        body: String,
-        cc: Option<Vec<String>>,
-        bcc: Option<Vec<String>>,
-        html: bool,
-        attachments: Option<Vec<String>>,
-        inline_images: Option<Vec<InlineImage>>,
-    ) -> Result<Value, ToolError> {
-        let images = validated_inline_images(inline_images.as_deref(), html)?;
+    fn create_draft(&self, m: NewEmail) -> Result<Value, ToolError> {
+        let (body, images, importance) = prepare_new_email(&m)?;
         self.with_com(|| {
             let (app, _ns) = mapi()?;
-            let mail = compose(&app, &to, &subject, &body, cc.as_deref(), bcc.as_deref(), html)?;
-            if let Some(atts) = attachments.as_deref() {
+            let mail = compose(&app, &m.to, &m.subject, &body, m.cc.as_deref(), m.bcc.as_deref())?;
+            set_mail_metadata(&mail, m.categories.as_deref(), importance)?;
+            if let Some(atts) = m.attachments.as_deref() {
                 attach_files(&mail, atts)?;
             }
             // Dropped at the end of this closure: temp files outlive Save.
@@ -1428,38 +1490,41 @@ impl OutlookClient for WindowsOutlookClient {
             attach_inline_images(&mail, &images, &mut temp)?;
             call_method(&mail, "Save", &mut [])?; // Save first so EntryID exists
             let id = make_id(&mail)?;
-            Ok(json!({"status": "draft_saved", "id": id, "subject": subject}))
+            Ok(json!({"status": "draft_saved", "id": id, "subject": m.subject}))
         })
     }
 
-    fn reply_email(
-        &self,
-        email_id: String,
-        body: String,
-        reply_all: bool,
-        html: bool,
-        send: bool,
-        attachments: Option<Vec<String>>,
-    ) -> Result<Value, ToolError> {
+    fn reply_email(&self, r: ReplyInput) -> Result<Value, ToolError> {
+        // Validate everything before the reply is created.
+        let importance = parse_importance(r.importance.as_deref())?;
+        check_attachment_paths(r.attachments.as_deref().unwrap_or(&[]))?;
+        let (body, images) = prepare_mail_body(&r.body, r.inline_images.as_deref().unwrap_or(&[]))?;
         self.with_com(|| {
             let (_app, ns) = mapi()?;
-            let item = get_item(&ns, &email_id)?;
+            let item = get_item(&ns, &r.email_id)?;
             let reply = to_disp(call_method(
                 &item,
-                if reply_all { "ReplyAll" } else { "Reply" },
+                if r.reply_all { "ReplyAll" } else { "Reply" },
                 &mut [],
             )?)?;
-            if html {
-                let existing = variant_to_string(&get_property(&reply, "HTMLBody")?);
-                put_property(&reply, "HTMLBody", variant_from_str(&format!("{body}{existing}")))?;
-            } else {
-                let existing = variant_to_string(&get_property(&reply, "Body")?);
-                put_property(&reply, "Body", variant_from_str(&format!("{body}\n\n{existing}")))?;
+            match &body {
+                MailBody::Html(html) => {
+                    let existing = variant_to_string(&get_property(&reply, "HTMLBody")?);
+                    put_property(&reply, "HTMLBody", variant_from_str(&format!("{html}{existing}")))?;
+                }
+                MailBody::Text(text) => {
+                    let existing = variant_to_string(&get_property(&reply, "Body")?);
+                    put_property(&reply, "Body", variant_from_str(&format!("{text}\n\n{existing}")))?;
+                }
             }
-            if let Some(atts) = attachments.as_deref() {
+            set_mail_metadata(&reply, r.categories.as_deref(), importance)?;
+            if let Some(atts) = r.attachments.as_deref() {
                 attach_files(&reply, atts)?;
             }
-            if send {
+            // Dropped at the end of this closure: temp files outlive Send/Save.
+            let mut temp = InlineTempDirs::default();
+            attach_inline_images(&reply, &images, &mut temp)?;
+            if r.send {
                 // Read Subject *before* Send() — Outlook invalidates the COM
                 // item once sent (a well-known lifecycle rule), so reading a
                 // property off `reply` afterward throws "The item has been
@@ -1568,9 +1633,18 @@ impl OutlookClient for WindowsOutlookClient {
     fn update_draft(&self, u: DraftUpdate) -> Result<Value, ToolError> {
         // Validate everything before the item is touched.
         validate_draft_update(&u)?;
+        let importance = parse_importance(u.importance.as_deref())?;
+        let explicit = u.inline_images.as_deref().unwrap_or(&[]);
+        let (html_body, images) = match &u.html_body {
+            Some(html) => {
+                let (html, images) = prepare_html_images(html, explicit)?;
+                (Some(html), images)
+            }
+            None => (None, Vec::new()),
+        };
         self.with_com(|| {
             let (_app, ns) = mapi()?;
-            let item = get_item(&ns, &u.draft_id)?;
+            let item = get_item(&ns, &u.email_id)?;
             // `Sent` is true for anything sent or received; only an unsent
             // draft may be edited.
             if variant_to_bool(&get_property(&item, "Sent")?).unwrap_or(false) {
@@ -1583,14 +1657,11 @@ impl OutlookClient for WindowsOutlookClient {
             if let Some(subject) = &u.subject {
                 put_property(&item, "Subject", variant_from_str(subject))?;
             }
-            // Set BodyFormat before the body so Outlook doesn't re-convert it.
             if let Some(body) = &u.body {
-                put_property(&item, "BodyFormat", variant_from_i32(c::OL_FORMAT_PLAIN))?;
-                put_property(&item, "Body", variant_from_str(body))?;
+                set_mail_body(&item, &MailBody::Text(body.clone()))?;
             }
-            if let Some(html) = &u.html_body {
-                put_property(&item, "BodyFormat", variant_from_i32(c::OL_FORMAT_HTML))?;
-                put_property(&item, "HTMLBody", variant_from_str(html))?;
+            if let Some(html) = html_body {
+                set_mail_body(&item, &MailBody::Html(html))?;
             }
             // Recipients replace that whole line; an empty list clears it.
             if let Some(to) = &u.to {
@@ -1606,10 +1677,38 @@ impl OutlookClient for WindowsOutlookClient {
             if let Some(atts) = u.attachments.as_deref().filter(|a| !a.is_empty()) {
                 attach_files(&item, atts)?;
             }
+            // Dropped at the end of this closure: temp files outlive Save/Send.
+            let mut temp = InlineTempDirs::default();
+            attach_draft_inline_images(&item, &images, explicit.len(), &mut temp)?;
+            if u.add_categories.is_some() || u.remove_categories.is_some() {
+                let cats = merge_categories(
+                    get_item_categories(&item),
+                    u.add_categories.as_deref().unwrap_or(&[]),
+                    u.remove_categories.as_deref().unwrap_or(&[]),
+                );
+                set_item_categories(&item, &cats)?;
+            }
+            if let Some(id) = importance {
+                put_property(&item, "Importance", variant_from_i32(id))?;
+            }
 
-            call_method(&item, "Save", &mut [])?; // one Save for all changes; never Send
+            call_method(&item, "Save", &mut [])?; // one Save for all changes
             let id = make_id(&item)?;
-            Ok(json!({"status": "draft_updated", "id": id, "changed": draft_update_changes(&u)}))
+            let changed = draft_update_changes(&u);
+            if !u.send {
+                return Ok(json!({"status": "draft_updated", "id": id, "changed": changed}));
+            }
+            let recipients = to_disp(get_property(&item, "Recipients")?)?;
+            if variant_to_i32(&get_property(&recipients, "Count")?).unwrap_or(0) == 0 {
+                return Err(ToolError::new(format!(
+                    "the draft has no recipients, so it was saved but not sent (id {id}); \
+                     pass to/cc/bcc to address it"
+                )));
+            }
+            // Read Subject before Send(): the item is invalid afterwards.
+            let subject = variant_to_string(&get_property(&item, "Subject")?);
+            call_method(&item, "Send", &mut [])?;
+            Ok(json!({"status": "sent", "subject": subject, "changed": changed}))
         })
     }
 

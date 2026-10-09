@@ -9,7 +9,7 @@
 //! can't be undone — see TESTING.md for how to test those by hand.
 
 use outlook_mcp_rs::outlook::client::WindowsOutlookClient;
-use outlook_mcp_rs::outlook::{CheckAvailabilityInput, CreateEventInput, DraftUpdate, EmailQuery, EventQuery, OutlookClient, EmailUpdate, EventUpdate, NoteQuery, NoteUpdate, RecurrenceInput, TaskQuery, TaskUpdate, InlineImage};
+use outlook_mcp_rs::outlook::{MailBody, NewEmail, ReplyInput, CheckAvailabilityInput, CreateEventInput, DraftUpdate, EmailQuery, EventQuery, OutlookClient, EmailUpdate, EventUpdate, NoteQuery, NoteUpdate, RecurrenceInput, TaskQuery, TaskUpdate, InlineImage};
 
 fn client() -> WindowsOutlookClient {
     WindowsOutlookClient::new()
@@ -62,12 +62,12 @@ fn list_emails_offset_pages_tile_without_overlap() {
 #[ignore]
 fn create_draft_then_delete_round_trips() {
     let c = client();
-    let created = c.create_draft(
-        vec!["nobody@example.invalid".to_string()],
-        "outlook-mcp-rs live test draft".to_string(),
-        "This draft is created and deleted by an automated test.".to_string(),
-        None, None, false, None, None,
-    ).expect("create_draft should succeed");
+    let created = c.create_draft(NewEmail {
+        to: vec!["nobody@example.invalid".to_string()],
+        subject: "outlook-mcp-rs live test draft".to_string(),
+        body: MailBody::Text("This draft is created and deleted by an automated test.".to_string()),
+        ..Default::default()
+    }).expect("create_draft should succeed");
     let id = created["id"].as_str().expect("create_draft returns an id").to_string();
     c.delete_email(id, false).expect("cleanup: delete_email should succeed");
 }
@@ -77,12 +77,12 @@ fn create_draft_then_delete_round_trips() {
 fn permanent_delete_of_draft_skips_deleted_items() {
     let c = client();
     let subject = "outlook-mcp-rs permanent delete probe zzqx-7731";
-    let created = c.create_draft(
-        vec!["nobody@example.invalid".to_string()],
-        subject.to_string(),
-        "This draft is created and permanently deleted by an automated test.".to_string(),
-        None, None, false, None, None,
-    ).expect("create_draft should succeed");
+    let created = c.create_draft(NewEmail {
+        to: vec!["nobody@example.invalid".to_string()],
+        subject: subject.to_string(),
+        body: MailBody::Text("This draft is created and permanently deleted by an automated test.".to_string()),
+        ..Default::default()
+    }).expect("create_draft should succeed");
     let id = created["id"].as_str().expect("create_draft returns an id").to_string();
 
     let result = c.delete_email(id.clone(), true).expect("permanent delete_email should succeed");
@@ -345,12 +345,12 @@ fn list_emails_query_filter_narrows_results() {
 fn list_emails_query_matches_real_body_text() {
     let c = client();
     let token = "zzbodytoken8842";
-    let created = c.create_draft(
-        vec!["nobody@example.invalid".to_string()],
-        "[outlook-mcp-rs body-search live] draft probe".to_string(),
-        format!("this draft's body contains {token} and the subject does not"),
-        None, None, false, None, None,
-    ).expect("create_draft should succeed");
+    let created = c.create_draft(NewEmail {
+        to: vec!["nobody@example.invalid".to_string()],
+        subject: "[outlook-mcp-rs body-search live] draft probe".to_string(),
+        body: MailBody::Text(format!("this draft's body contains {token} and the subject does not")),
+        ..Default::default()
+    }).expect("create_draft should succeed");
     let id = created["id"].as_str().unwrap().to_string();
 
     let found = c.list_emails(EmailQuery {
@@ -420,13 +420,13 @@ fn create_draft_with_attachment_round_trips() {
     let path_str = path.to_string_lossy().to_string();
 
     let c = WindowsOutlookClient::new();
-    let created = c.create_draft(
-        vec!["nobody@example.invalid".to_string()],
-        "outlook-mcp-rs attachment test".to_string(),
-        "see attached".to_string(),
-        None, None, false,
-        Some(vec![path_str]), None,
-    ).expect("create_draft with attachment should succeed");
+    let created = c.create_draft(NewEmail {
+        to: vec!["nobody@example.invalid".to_string()],
+        subject: "outlook-mcp-rs attachment test".to_string(),
+        body: MailBody::Text("see attached".to_string()),
+        attachments: Some(vec![path_str]),
+        ..Default::default()
+    }).expect("create_draft with attachment should succeed");
     let id = created["id"].as_str().expect("draft id").to_string();
     c.delete_email(id, false).expect("cleanup: delete the draft");
     let _ = std::fs::remove_file(&path);
@@ -464,17 +464,17 @@ fn create_draft_with_inline_base64_image_sets_content_id() {
     // A 1x1 transparent PNG.
     const PNG_1X1_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
     let c = WindowsOutlookClient::new();
-    let created = c.create_draft(
-        vec!["nobody@example.invalid".to_string()],
-        "outlook-mcp-rs inline image test".to_string(),
-        "<p>Pixel:</p><img src=\"cid:pixel\">".to_string(),
-        None, None, true, None,
-        Some(vec![InlineImage {
+    let created = c.create_draft(NewEmail {
+        to: vec!["nobody@example.invalid".to_string()],
+        subject: "outlook-mcp-rs inline image test".to_string(),
+        body: MailBody::Html("<p>Pixel:</p><img src=\"cid:pixel\">".to_string()),
+        inline_images: Some(vec![InlineImage {
             content_id: "pixel".into(),
             data_base64: Some(format!("data:image/png;base64,{PNG_1X1_B64}")),
             ..Default::default()
         }]),
-    ).expect("create_draft with an inline image should succeed");
+        ..Default::default()
+    }).expect("create_draft with an inline image should succeed");
     let id = created["id"].as_str().expect("draft id").to_string();
     // Read back before asserting so cleanup still runs on a mismatch.
     let read_back = std::panic::catch_unwind(|| first_attachment_cid_and_hidden(&id));
@@ -495,13 +495,13 @@ fn list_attachments_reports_metadata_for_a_draft_attachment() {
     let path_str = path.to_string_lossy().to_string();
 
     let c = WindowsOutlookClient::new();
-    let created = c.create_draft(
-        vec!["nobody@example.invalid".to_string()],
-        "outlook-mcp-rs attachment metadata test".to_string(),
-        "see attached".to_string(),
-        None, None, false,
-        Some(vec![path_str]), None,
-    ).expect("create_draft with attachment should succeed");
+    let created = c.create_draft(NewEmail {
+        to: vec!["nobody@example.invalid".to_string()],
+        subject: "outlook-mcp-rs attachment metadata test".to_string(),
+        body: MailBody::Text("see attached".to_string()),
+        attachments: Some(vec![path_str]),
+        ..Default::default()
+    }).expect("create_draft with attachment should succeed");
     let id = created["id"].as_str().expect("draft id").to_string();
 
     // Capture the result before cleanup so a failed assertion doesn't leak the draft.
@@ -617,12 +617,12 @@ fn get_email_reports_truncation_and_honours_max_body_chars() {
     let filler = "<p>outlook-mcp-rs truncation live test line.</p>\n".repeat(3_000);
     let html = format!("<html><body>{filler}</body></html>");
     assert!(html.chars().count() > 100_000);
-    let created = c.create_draft(
-        vec!["nobody@example.invalid".to_string()],
-        "outlook-mcp-rs truncation live test".to_string(),
-        html,
-        None, None, true, None, None,
-    ).expect("create_draft");
+    let created = c.create_draft(NewEmail {
+        to: vec!["nobody@example.invalid".to_string()],
+        subject: "outlook-mcp-rs truncation live test".to_string(),
+        body: MailBody::Html(html),
+        ..Default::default()
+    }).expect("create_draft");
     let id = created["id"].as_str().expect("draft id").to_string();
 
     let result = || {
@@ -660,12 +660,12 @@ fn get_email_reports_truncation_and_honours_max_body_chars() {
 fn update_email_applies_state_then_moves() {
     let c = WindowsOutlookClient::new();
     // A draft is a safe, disposable target (never sent).
-    let created = c.create_draft(
-        vec!["nobody@example.invalid".to_string()],
-        "outlook-mcp-rs update_email live test".to_string(),
-        "body".to_string(),
-        None, None, false, None, None,
-    ).expect("create_draft");
+    let created = c.create_draft(NewEmail {
+        to: vec!["nobody@example.invalid".to_string()],
+        subject: "outlook-mcp-rs update_email live test".to_string(),
+        body: MailBody::Text("body".to_string()),
+        ..Default::default()
+    }).expect("create_draft");
     let id = created["id"].as_str().expect("draft id").to_string();
 
     // Apply state changes only (no move yet) so we can read them back by the same id.
@@ -726,16 +726,16 @@ fn update_email_applies_state_then_moves() {
 fn update_draft_edits_subject_body_and_recipients() {
     let c = WindowsOutlookClient::new();
     // A draft is a safe, disposable target. update_draft only saves; it never sends.
-    let created = c.create_draft(
-        vec!["nobody@example.invalid".to_string()],
-        "outlook-mcp-rs update_draft live test".to_string(),
-        "original body".to_string(),
-        None, None, false, None, None,
-    ).expect("create_draft");
+    let created = c.create_draft(NewEmail {
+        to: vec!["nobody@example.invalid".to_string()],
+        subject: "outlook-mcp-rs update_draft live test".to_string(),
+        body: MailBody::Text("original body".to_string()),
+        ..Default::default()
+    }).expect("create_draft");
     let id = created["id"].as_str().expect("draft id").to_string();
 
     let res = c.update_draft(DraftUpdate {
-        draft_id: id.clone(),
+        email_id: id.clone(),
         subject: Some("outlook-mcp-rs update_draft live test (edited)".to_string()),
         body: Some("edited body zzdraftedit5521".to_string()),
         to: Some(vec!["someone-else@example.invalid".to_string()]),
@@ -756,16 +756,154 @@ fn update_draft_edits_subject_body_and_recipients() {
     assert!(!to.contains("nobody@example.invalid"), "to was {to:?}");
 }
 
+/// A 1x1 transparent PNG, for the data: URI live tests.
+const LIVE_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+#[test]
+#[ignore]
+fn create_draft_turns_data_uri_into_inline_attachment_with_metadata() {
+    let c = WindowsOutlookClient::new();
+    let html = format!(
+        "<p>Pixel twice:</p><img src=\"data:image/png;base64,{LIVE_PNG_B64}\"><img src='data:image/png;base64,{LIVE_PNG_B64}'>"
+    );
+    let created = c.create_draft(NewEmail {
+        to: vec!["nobody@example.invalid".to_string()],
+        subject: "outlook-mcp-rs data-uri live test".to_string(),
+        body: MailBody::Html(html),
+        categories: Some(vec!["outlook-mcp-rs live".to_string()]),
+        importance: Some("high".to_string()),
+        ..Default::default()
+    }).expect("create_draft with a data: URI image should succeed");
+    let id = created["id"].as_str().expect("draft id").to_string();
+    // Read back before asserting so cleanup still runs on a mismatch.
+    let atts = c.list_attachments(id.clone());
+    let detail = c.get_email(id.clone(), true, None);
+    c.delete_email(id, false).expect("cleanup: delete the draft");
+
+    let atts = atts.expect("list_attachments");
+    assert_eq!(atts.len(), 1, "the same image twice is attached once: {atts:?}");
+    let cid = atts[0].content_id.clone().expect("the attachment has a Content-ID");
+    assert!(cid.starts_with("img-"), "generated cid {cid:?}");
+    assert!(atts[0].is_inline, "{:?}", atts[0]);
+    let detail = detail.expect("get_email");
+    let html = detail.html_body.clone().expect("html_body");
+    assert!(html.contains(&format!("cid:{cid}")), "HTML should reference cid:{cid}");
+    assert!(!html.contains("base64,"), "the data: URI should be gone from the HTML");
+    assert!(detail.summary.categories.iter().any(|c| c == "outlook-mcp-rs live"));
+}
+
+#[test]
+#[ignore]
+fn update_draft_adds_inline_images_categories_and_importance_without_duplicates() {
+    let c = WindowsOutlookClient::new();
+    // A draft is a safe, disposable target; send stays false.
+    let created = c.create_draft(NewEmail {
+        to: vec!["nobody@example.invalid".to_string()],
+        subject: "outlook-mcp-rs update_draft inline live test".to_string(),
+        body: MailBody::Text("original".to_string()),
+        ..Default::default()
+    }).expect("create_draft");
+    let id = created["id"].as_str().expect("draft id").to_string();
+    let update = || DraftUpdate {
+        email_id: id.clone(),
+        html_body: Some(format!(
+            "<p>logo</p><img src=\"cid:logo\"><p>pixel</p><img src=\"data:image/png;base64,{LIVE_PNG_B64}\">"
+        )),
+        inline_images: Some(vec![InlineImage {
+            content_id: "logo".into(), data_base64: Some(LIVE_PNG_B64.into()), ..Default::default()
+        }]),
+        add_categories: Some(vec!["outlook-mcp-rs live".to_string()]),
+        importance: Some("low".to_string()),
+        ..Default::default()
+    };
+    // Apply the same update twice: the explicit image is replaced and the
+    // data: URI image (same bytes, same cid) is not added again.
+    let first = c.update_draft(update());
+    let second = c.update_draft(update());
+    let atts = c.list_attachments(id.clone());
+    let detail = c.get_email(id.clone(), true, None);
+    c.delete_email(id.clone(), false).expect("cleanup: delete the draft");
+
+    let first = first.expect("first update_draft");
+    assert_eq!(first["status"], "draft_updated");
+    assert_eq!(first["changed"], serde_json::json!(["html_body", "inline_images", "add_categories", "importance"]));
+    second.expect("second update_draft");
+    let atts = atts.expect("list_attachments");
+    let mut cids: Vec<String> = atts.iter().filter_map(|a| a.content_id.clone()).collect();
+    cids.sort();
+    assert_eq!(cids.len(), 2, "expected exactly logo + one generated image: {atts:?}");
+    assert!(cids.iter().any(|c| c == "logo"));
+    assert!(cids.iter().any(|c| c.starts_with("img-")));
+    let detail = detail.expect("get_email");
+    assert!(detail.summary.categories.iter().any(|c| c == "outlook-mcp-rs live"));
+    assert!(!detail.html_body.unwrap_or_default().contains("base64,"));
+}
+
+#[test]
+#[ignore]
+fn update_draft_send_without_recipients_saves_and_refuses() {
+    let c = WindowsOutlookClient::new();
+    // No recipients, so send=true must refuse after saving: nothing is sent.
+    let created = c.create_draft(NewEmail {
+        to: vec![],
+        subject: "outlook-mcp-rs update_draft send refusal live test".to_string(),
+        body: MailBody::Text("never sent".to_string()),
+        ..Default::default()
+    }).expect("create_draft");
+    let id = created["id"].as_str().expect("draft id").to_string();
+    let res = c.update_draft(DraftUpdate {
+        email_id: id.clone(), subject: Some("outlook-mcp-rs send refusal (edited)".to_string()),
+        send: true, ..Default::default()
+    });
+    let detail = c.get_email(id.clone(), false, None);
+    c.delete_email(id, false).expect("cleanup: delete the draft");
+    let err = res.expect_err("send=true on a draft with no recipients must fail");
+    assert!(err.to_string().contains("no recipients"), "{err}");
+    assert_eq!(detail.expect("draft still exists").summary.subject, "outlook-mcp-rs send refusal (edited)");
+}
+
+#[test]
+#[ignore]
+fn reply_email_draft_with_data_uri_image() {
+    let c = WindowsOutlookClient::new();
+    // Reply (as a draft only, send=false) to the newest Inbox item, if any.
+    let newest = c.list_emails(EmailQuery {
+        query: None, folder: "inbox".into(), count: 1, offset: 0, unread_only: false,
+        from: None, to: None, category: None, received_after: None, received_before: None,
+        since_days: None, has_attachments: None, flagged: false, high_importance: false,
+    }).expect("list_emails");
+    let Some(original) = newest.first() else {
+        eprintln!("inbox is empty; skipping");
+        return;
+    };
+    let res = c.reply_email(ReplyInput {
+        email_id: original.id.clone(),
+        body: MailBody::Html(format!("<p>pixel:</p><img src=\"data:image/png;base64,{LIVE_PNG_B64}\">")),
+        send: false,
+        ..Default::default()
+    }).expect("reply_email send=false");
+    assert_eq!(res["status"], "draft_saved");
+    let id = res["id"].as_str().expect("draft id").to_string();
+    let atts = c.list_attachments(id.clone());
+    c.delete_email(id, false).expect("cleanup: delete the reply draft");
+    let atts = atts.expect("list_attachments");
+    assert!(
+        atts.iter().any(|a| a.content_id.as_deref().is_some_and(|c| c.starts_with("img-"))),
+        "{atts:?}"
+    );
+}
+
 #[test]
 #[ignore]
 fn send_with_missing_attachment_errors_before_sending() {
     let c = WindowsOutlookClient::new();
-    let err = c.send_email(
-        vec!["nobody@example.invalid".to_string()],
-        "should not send".to_string(), "body".to_string(),
-        None, None, false,
-        Some(vec!["C:/definitely/does/not/exist/nope.pdf".to_string()]), None,
-    ).unwrap_err();
+    let err = c.send_email(NewEmail {
+        to: vec!["nobody@example.invalid".to_string()],
+        subject: "should not send".to_string(),
+        body: MailBody::Text("body".to_string()),
+        attachments: Some(vec!["C:/definitely/does/not/exist/nope.pdf".to_string()]),
+        ..Default::default()
+    }).unwrap_err();
     assert!(err.to_string().contains("attachment not found"));
 }
 
@@ -1188,12 +1326,12 @@ fn delete_note_removes_it() {
 #[ignore]
 fn list_emails_to_filter_matches_draft_recipient() {
     let c = client();
-    let created = c.create_draft(
-        vec!["nobody@example.invalid".to_string()],
-        "[outlook-mcp-rs to-filter live] draft probe".to_string(),
-        "recipient filter probe; never sent".to_string(),
-        None, None, false, None, None,
-    ).expect("create_draft should succeed");
+    let created = c.create_draft(NewEmail {
+        to: vec!["nobody@example.invalid".to_string()],
+        subject: "[outlook-mcp-rs to-filter live] draft probe".to_string(),
+        body: MailBody::Text("recipient filter probe; never sent".to_string()),
+        ..Default::default()
+    }).expect("create_draft should succeed");
     let id = created["id"].as_str().unwrap().to_string();
 
     let query = |to: &str| EmailQuery {
@@ -1221,10 +1359,12 @@ fn hebrew_subject_and_body_round_trip_through_com() {
     let c = client();
     let subject = "[outlook-mcp-rs utf8 live] מייל שיקוף".to_string();
     let body = "סיכום עשייה — שורה ראשונה".to_string();
-    let created = c.create_draft(
-        vec!["nobody@example.invalid".to_string()],
-        subject.clone(), body.clone(), None, None, false, None, None,
-    ).expect("create_draft should succeed");
+    let created = c.create_draft(NewEmail {
+        to: vec!["nobody@example.invalid".to_string()],
+        subject: subject.clone(),
+        body: MailBody::Text(body.clone()),
+        ..Default::default()
+    }).expect("create_draft should succeed");
     let id = created["id"].as_str().unwrap().to_string();
 
     let detail = c.get_email(id.clone(), false, None);

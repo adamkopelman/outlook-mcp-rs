@@ -2,10 +2,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    body::Body,
+    body::{Body, HttpBody},
     extract::State,
     http::{
-        header::{AUTHORIZATION, WWW_AUTHENTICATE},
+        header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, WWW_AUTHENTICATE},
         Request, StatusCode,
     },
     middleware::{self, Next},
@@ -20,6 +20,81 @@ use crate::server::OutlookMcpServer;
 
 /// The single HTTP path the MCP Streamable HTTP endpoint is mounted at.
 pub const MCP_PATH: &str = "/mcp";
+
+/// Largest HTTP request body accepted, in bytes (64 MiB). Neither rmcp's
+/// Streamable HTTP service nor hyper limits request bodies (and axum's
+/// `DefaultBodyLimit` only applies to axum extractors, not to a mounted tower
+/// service), so this is the only cap. It is generous on purpose: tool calls
+/// carrying large HTML bodies with embedded images must get through. Even
+/// larger content should be passed by path (`body_file` / `html_body_file`).
+pub const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Whether a `Content-Length` header value announces a body over `limit`.
+/// A missing or unparsable header is not "over": the streamed body is still
+/// counted while it is read.
+pub fn content_length_exceeds(header: Option<&str>, limit: usize) -> bool {
+    header
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .is_some_and(|len| len > limit as u64)
+}
+
+/// The 413 response for a body over [`MAX_REQUEST_BODY_BYTES`].
+fn payload_too_large() -> Response {
+    plain_response(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        format!(
+            "payload too large: the request body exceeds the {} MiB limit. Pass large \
+             bodies by local path instead (body_file / html_body_file).",
+            MAX_REQUEST_BODY_BYTES / (1024 * 1024)
+        ),
+    )
+}
+
+fn plain_response(status: StatusCode, text: String) -> Response {
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(Body::from(text))
+        .expect("static text response is always valid")
+}
+
+/// Axum middleware: buffer the request body up to [`MAX_REQUEST_BODY_BYTES`]
+/// and answer an explicit 413 "payload too large" past it (instead of a
+/// generic parse failure). A compressed body is refused with 415, because
+/// rmcp parses the raw bytes as JSON and would otherwise report a confusing
+/// deserialize error.
+async fn body_limit_middleware(req: Request<Body>, next: Next) -> Response {
+    if let Some(enc) = req.headers().get(CONTENT_ENCODING) {
+        let enc = enc.to_str().unwrap_or("?").trim();
+        if !enc.eq_ignore_ascii_case("identity") {
+            return plain_response(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                format!("Content-Encoding {enc:?} is not supported; send the JSON request uncompressed."),
+            );
+        }
+    }
+    let announced = req.headers().get(CONTENT_LENGTH).and_then(|v| v.to_str().ok());
+    if content_length_exceeds(announced, MAX_REQUEST_BODY_BYTES) {
+        return payload_too_large();
+    }
+    let (parts, mut body) = req.into_parts();
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(frame) = std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await {
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(e) => {
+                return plain_response(StatusCode::BAD_REQUEST, format!("could not read the request body: {e}"));
+            }
+        };
+        if let Ok(data) = frame.into_data() {
+            if buf.len() + data.len() > MAX_REQUEST_BODY_BYTES {
+                return payload_too_large();
+            }
+            buf.extend_from_slice(&data);
+        }
+    }
+    next.run(Request::from_parts(parts, Body::from(buf))).await
+}
 
 /// Pure authorization decision, split out so it is unit-testable without a
 /// live socket. `configured` is the token the server was started with
@@ -77,8 +152,10 @@ pub fn build_router(server: OutlookMcpServer, token: Option<String>) -> Router {
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default().disable_allowed_hosts(),
     );
+    // The last layer added runs first: authenticate before buffering a body.
     Router::new()
         .route_service(MCP_PATH, service)
+        .layer(middleware::from_fn(body_limit_middleware))
         .layer(middleware::from_fn_with_state(Arc::new(token), auth_middleware))
 }
 
@@ -99,7 +176,17 @@ pub async fn run_http(
 
 #[cfg(test)]
 mod tests {
-    use super::is_authorized;
+    use super::{content_length_exceeds, is_authorized, MAX_REQUEST_BODY_BYTES};
+
+    #[test]
+    fn content_length_over_the_limit_is_detected() {
+        assert!(!content_length_exceeds(None, 10));
+        assert!(!content_length_exceeds(Some("10"), 10));
+        assert!(content_length_exceeds(Some(" 11 "), 10));
+        assert!(!content_length_exceeds(Some("garbage"), 10));
+        // A 76 KB tool call (the size from issue #28) is far below the cap.
+        assert!(!content_length_exceeds(Some("78000"), MAX_REQUEST_BODY_BYTES));
+    }
 
     #[test]
     fn no_token_configured_allows_everything() {

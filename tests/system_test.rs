@@ -11,6 +11,7 @@
 
 use outlook_mcp_rs::outlook::client::WindowsOutlookClient;
 use outlook_mcp_rs::outlook::{
+    MailBody, NewEmail, ReplyInput,
     CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient,
 };
 use outlook_mcp_rs::outlook::types::EmailSummary;
@@ -158,8 +159,11 @@ fn system_test_plans_1_to_9() {
     ];
     for (sid, suffix, attachments) in &seed_specs {
         let subject = format!("{TAG} {suffix}");
-        match c.send_email(vec![SELF_ADDR.to_string()], subject.clone(),
-            format!("Seed data for system test: {suffix}."), None, None, false, attachments.clone(), None) {
+        match c.send_email(NewEmail {
+            to: vec![SELF_ADDR.to_string()], subject: subject.clone(),
+            body: MailBody::Text(format!("Seed data for system test: {suffix}.")),
+            attachments: attachments.clone(), ..Default::default()
+        }) {
             Ok(_) => {
                 match find_by_subject(&c, "inbox", &subject) {
                     Some(found) => {
@@ -363,9 +367,11 @@ fn system_test_plans_1_to_9() {
 
     // ================= A5: send_email external =================
     println!("\n--- A5: send_email external ---");
-    match c.send_email(vec![EXTERNAL_ADDR.to_string()], format!("{TAG} send_email external"),
-        "Automated system test - Plans 1-9 live verification, 2026-07-16.".to_string(),
-        None, None, false, None, None) {
+    match c.send_email(NewEmail {
+        to: vec![EXTERNAL_ADDR.to_string()], subject: format!("{TAG} send_email external"),
+        body: MailBody::Text("Automated system test - Plans 1-9 live verification, 2026-07-16.".to_string()),
+        ..Default::default()
+    }) {
         Ok(v) => r.record("A5", v["status"] == "sent", format!("{v}")),
         Err(e) => r.record("A5", false, format!("send_email failed: {e}")),
     }
@@ -374,7 +380,10 @@ fn system_test_plans_1_to_9() {
     println!("\n--- A6: send_email self-loop ---");
     let a6_subject = format!("{TAG} send_email self-loop");
     let mut a6_id: Option<String> = None;
-    match c.send_email(vec![SELF_ADDR.to_string()], a6_subject.clone(), "Self-loop test.".to_string(), None, None, false, None, None) {
+    match c.send_email(NewEmail {
+        to: vec![SELF_ADDR.to_string()], subject: a6_subject.clone(),
+        body: MailBody::Text("Self-loop test.".to_string()), ..Default::default()
+    }) {
         Ok(_) => {
             match find_by_subject(&c, "inbox", &a6_subject) {
                 Some(found) => {
@@ -393,8 +402,10 @@ fn system_test_plans_1_to_9() {
 
     // ================= A7: create_draft =================
     println!("\n--- A7: create_draft ---");
-    match c.create_draft(vec![EXTERNAL_ADDR.to_string()], format!("{TAG} draft probe"),
-        "Draft, never sent.".to_string(), None, None, false, None, None) {
+    match c.create_draft(NewEmail {
+        to: vec![EXTERNAL_ADDR.to_string()], subject: format!("{TAG} draft probe"),
+        body: MailBody::Text("Draft, never sent.".to_string()), ..Default::default()
+    }) {
         Ok(v) => {
             if let Some(id) = v["id"].as_str() {
                 let found_in_drafts = c.list_emails(EmailQuery { query: Some("draft probe".into()), ..eq_default("drafts") })
@@ -415,7 +426,9 @@ fn system_test_plans_1_to_9() {
     // ================= A8: reply_email =================
     println!("\n--- A8: reply_email ---");
     if let Some(id) = a6_id.clone() {
-        match c.reply_email(id, "Reply body.".to_string(), false, false, true, None) {
+        match c.reply_email(ReplyInput {
+            email_id: id, body: MailBody::Text("Reply body.".to_string()), send: true, ..Default::default()
+        }) {
             Ok(_) => {
                 match find_by_subject_matching(&c, "inbox", "send_email self-loop", |e| e.subject.starts_with("RE:")) {
                     Some(found) => {
@@ -515,8 +528,11 @@ fn system_test_plans_1_to_9() {
         scratch_files.push(a12_src.clone());
         let save_dir = std::env::temp_dir().join("outlook-mcp-rs-systest-a12-saved");
         let subject = format!("{TAG} attachment probe");
-        match c.send_email(vec![SELF_ADDR.to_string()], subject.clone(), "see attached".to_string(),
-            None, None, false, Some(vec![a12_src.to_string_lossy().to_string()]), None) {
+        match c.send_email(NewEmail {
+            to: vec![SELF_ADDR.to_string()], subject: subject.clone(),
+            body: MailBody::Text("see attached".to_string()),
+            attachments: Some(vec![a12_src.to_string_lossy().to_string()]), ..Default::default()
+        }) {
             Ok(_) => {
                 match find_by_subject(&c, "inbox", &subject) {
                     Some(found) => {

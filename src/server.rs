@@ -10,6 +10,7 @@ use serde::Deserialize;
 
 use crate::error::ToolError;
 use crate::outlook::{CheckAvailabilityInput, CreateEventInput, DraftUpdate, EmailQuery, EmailUpdate, EventQuery, EventUpdate, NoteQuery, NoteUpdate, OutlookClient, RecurrenceInput, TaskQuery, TaskUpdate, InlineImage};
+use crate::outlook::{require_mail_body, resolve_mail_body, resolve_text_input, BodyInputs, MailBody, NewEmail, ReplyInput};
 
 /// Runs a blocking `OutlookClient` call on a dedicated blocking thread so the
 /// tokio scheduler never migrates it mid-call (COM apartment-threading
@@ -86,56 +87,121 @@ pub struct GetEmailParams {
     pub max_body_chars: Option<u32>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+// Field docs below are the public schema descriptions, so the shared body
+// fields repeat them on every mail tool.
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct SendEmailParams {
     pub to: Vec<String>,
     pub subject: String,
-    pub body: String,
+    /// Plain-text body. Give exactly one of body, html_body, body_file, html_body_file.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// HTML body. `data:` image URIs in it (e.g. <img src="data:image/png;base64,...">)
+    /// are sent as inline Content-ID attachments.
+    #[serde(default)]
+    pub html_body: Option<String>,
+    /// Local path of a UTF-8 text file to use as the plain-text body (for large bodies).
+    #[serde(default)]
+    pub body_file: Option<String>,
+    /// Local path of a UTF-8 HTML file to use as the HTML body (for large bodies).
+    #[serde(default)]
+    pub html_body_file: Option<String>,
     #[serde(default)]
     pub cc: Option<Vec<String>>,
     #[serde(default)]
     pub bcc: Option<Vec<String>>,
+    /// Deprecated: use html_body / html_body_file instead. true = body/body_file is HTML.
     #[serde(default)]
-    pub html: bool,
+    pub html: Option<bool>,
     #[serde(default)]
     pub attachments: Option<Vec<String>>,
-    /// Images to embed as hidden Content-ID attachments (requires html=true).
+    /// Images to embed as hidden Content-ID attachments (requires an HTML body).
     /// Reference each in the HTML body as <img src="cid:CONTENT_ID">.
     #[serde(default)]
     pub inline_images: Option<Vec<InlineImage>>,
+    /// Category names to assign.
+    #[serde(default)]
+    pub categories: Option<Vec<String>>,
+    /// "low" | "normal" | "high".
+    #[serde(default)]
+    pub importance: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct CreateDraftParams {
     pub to: Vec<String>,
     pub subject: String,
-    pub body: String,
+    /// Plain-text body. Give exactly one of body, html_body, body_file, html_body_file.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// HTML body. `data:` image URIs in it (e.g. <img src="data:image/png;base64,...">)
+    /// are saved as inline Content-ID attachments.
+    #[serde(default)]
+    pub html_body: Option<String>,
+    /// Local path of a UTF-8 text file to use as the plain-text body (for large bodies).
+    #[serde(default)]
+    pub body_file: Option<String>,
+    /// Local path of a UTF-8 HTML file to use as the HTML body (for large bodies).
+    #[serde(default)]
+    pub html_body_file: Option<String>,
     #[serde(default)]
     pub cc: Option<Vec<String>>,
     #[serde(default)]
     pub bcc: Option<Vec<String>>,
+    /// Deprecated: use html_body / html_body_file instead. true = body/body_file is HTML.
     #[serde(default)]
-    pub html: bool,
+    pub html: Option<bool>,
     #[serde(default)]
     pub attachments: Option<Vec<String>>,
-    /// Images to embed as hidden Content-ID attachments (requires html=true).
+    /// Images to embed as hidden Content-ID attachments (requires an HTML body).
     /// Reference each in the HTML body as <img src="cid:CONTENT_ID">.
     #[serde(default)]
     pub inline_images: Option<Vec<InlineImage>>,
+    /// Category names to assign.
+    #[serde(default)]
+    pub categories: Option<Vec<String>>,
+    /// "low" | "normal" | "high".
+    #[serde(default)]
+    pub importance: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct ReplyEmailParams {
     pub email_id: String,
-    pub body: String,
+    /// Plain-text reply, put above the quoted original. Give exactly one of
+    /// body, html_body, body_file, html_body_file.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// HTML reply, put above the quoted original. `data:` image URIs in it
+    /// become inline Content-ID attachments.
+    #[serde(default)]
+    pub html_body: Option<String>,
+    /// Local path of a UTF-8 text file to use as the plain-text reply.
+    #[serde(default)]
+    pub body_file: Option<String>,
+    /// Local path of a UTF-8 HTML file to use as the HTML reply.
+    #[serde(default)]
+    pub html_body_file: Option<String>,
     #[serde(default)]
     pub reply_all: bool,
+    /// Deprecated: use html_body / html_body_file instead. true = body/body_file is HTML.
     #[serde(default)]
-    pub html: bool,
+    pub html: Option<bool>,
     #[serde(default = "default_true")]
     pub send: bool,
     #[serde(default)]
     pub attachments: Option<Vec<String>>,
+    /// Images to embed as hidden Content-ID attachments (requires an HTML reply).
+    /// Reference each in the HTML as <img src="cid:CONTENT_ID">.
+    #[serde(default)]
+    pub inline_images: Option<Vec<InlineImage>>,
+    /// Category names to assign to the reply.
+    #[serde(default)]
+    pub categories: Option<Vec<String>>,
+    /// "low" | "normal" | "high".
+    #[serde(default)]
+    pub importance: Option<String>,
 }
 fn default_true() -> bool { true }
 
@@ -162,19 +228,29 @@ pub struct UpdateEmailParams {
     pub importance: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct UpdateDraftParams {
     /// Id of an unsent draft (e.g. from create_draft or reply_email with send=false).
-    pub draft_id: String,
+    /// `draft_id` is accepted as a deprecated alias.
+    #[serde(alias = "draft_id")]
+    pub email_id: String,
     /// New subject (replaces the current one).
     #[serde(default)]
     pub subject: Option<String>,
-    /// New plain-text body (replaces the current body). Not with html_body.
+    /// New plain-text body (replaces the current body). At most one of body,
+    /// html_body, body_file, html_body_file.
     #[serde(default)]
     pub body: Option<String>,
-    /// New HTML body (replaces the current body). Not with body.
+    /// New HTML body (replaces the current body). `data:` image URIs in it
+    /// become inline Content-ID attachments.
     #[serde(default)]
     pub html_body: Option<String>,
+    /// Local path of a UTF-8 text file to use as the new plain-text body.
+    #[serde(default)]
+    pub body_file: Option<String>,
+    /// Local path of a UTF-8 HTML file to use as the new HTML body.
+    #[serde(default)]
+    pub html_body_file: Option<String>,
     /// Replaces the whole To line; an empty list clears it.
     #[serde(default)]
     pub to: Option<Vec<String>>,
@@ -187,6 +263,23 @@ pub struct UpdateDraftParams {
     /// Local file paths appended to the existing attachments.
     #[serde(default)]
     pub attachments: Option<Vec<String>>,
+    /// Images to embed as hidden Content-ID attachments (requires html_body or
+    /// html_body_file). Reference each in the HTML as <img src="cid:CONTENT_ID">.
+    /// An existing attachment with the same Content-ID is replaced.
+    #[serde(default)]
+    pub inline_images: Option<Vec<InlineImage>>,
+    /// Category names to add (existing categories are preserved).
+    #[serde(default)]
+    pub add_categories: Option<Vec<String>>,
+    /// Category names to remove.
+    #[serde(default)]
+    pub remove_categories: Option<Vec<String>>,
+    /// "low" | "normal" | "high".
+    #[serde(default)]
+    pub importance: Option<String>,
+    /// true = send the draft after applying the changes (default false: only save).
+    #[serde(default)]
+    pub send: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -275,8 +368,12 @@ pub struct CreateEventParams {
     pub subject: String,
     pub start: String,
     pub end: String,
+    /// Plain-text description. Not with body_file.
     #[serde(default)]
     pub body: Option<String>,
+    /// Local path of a UTF-8 text file to use as the body. Not with body.
+    #[serde(default)]
+    pub body_file: Option<String>,
     #[serde(default)]
     pub location: Option<String>,
     /// Legacy alias for `required_attendees`; merged in if both are given.
@@ -324,8 +421,12 @@ pub struct UpdateEventParams {
     pub end: Option<String>,
     #[serde(default)]
     pub location: Option<String>,
+    /// New plain-text description. Not with body_file.
     #[serde(default)]
     pub body: Option<String>,
+    /// Local path of a UTF-8 text file to use as the new body. Not with body.
+    #[serde(default)]
+    pub body_file: Option<String>,
     #[serde(default)]
     pub all_day: Option<bool>,
     #[serde(default)]
@@ -429,8 +530,12 @@ pub struct ListTasksParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CreateTaskParams {
     pub subject: String,
+    /// Plain-text body. Not with body_file.
     #[serde(default)]
     pub body: Option<String>,
+    /// Local path of a UTF-8 text file to use as the body. Not with body.
+    #[serde(default)]
+    pub body_file: Option<String>,
     #[serde(default)]
     pub due_date: Option<String>,
     #[serde(default = "default_importance")]
@@ -455,8 +560,12 @@ pub struct UpdateTaskParams {
     pub mark_complete: Option<bool>,
     #[serde(default)]
     pub subject: Option<String>,
+    /// New plain-text body. Not with body_file.
     #[serde(default)]
     pub body: Option<String>,
+    /// Local path of a UTF-8 text file to use as the new body. Not with body.
+    #[serde(default)]
+    pub body_file: Option<String>,
     #[serde(default)]
     pub due_date: Option<String>,
     #[serde(default)]
@@ -496,9 +605,14 @@ pub struct GetNoteParams {
     pub note_id: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct CreateNoteParams {
-    pub body: String,
+    /// The note's text. Give exactly one of body or body_file.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// Local path of a UTF-8 text file to use as the note's text.
+    #[serde(default)]
+    pub body_file: Option<String>,
     /// Category names to assign on creation.
     #[serde(default)]
     pub categories: Option<Vec<String>>,
@@ -510,8 +624,12 @@ pub struct CreateNoteParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct UpdateNoteParams {
     pub note_id: String,
+    /// New text. Not with body_file.
     #[serde(default)]
     pub body: Option<String>,
+    /// Local path of a UTF-8 text file to use as the new text. Not with body.
+    #[serde(default)]
+    pub body_file: Option<String>,
     #[serde(default)]
     pub add_categories: Option<Vec<String>>,
     #[serde(default)]
@@ -563,33 +681,63 @@ impl OutlookMcpServer {
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
-    #[tool(description = "Send a new email immediately. `attachments` is a list of local file paths. `inline_images` embeds images (a local path or base64 data) as hidden Content-ID attachments and requires html=true: reference each in the HTML body as <img src=\"cid:CONTENT_ID\"> instead of inlining base64 in the HTML. All inline images are validated before anything is sent.")]
+    #[tool(description = "Send a new email immediately. Give the body as exactly one of `body` (plain text), `html_body`, `body_file` or `html_body_file` (local UTF-8 file paths; use these for large bodies). `html` is a deprecated flag: html=true makes body/body_file HTML. `attachments` is a list of local file paths. Images can be embedded two ways, both sent as hidden Content-ID attachments: `data:` image URIs inside the HTML (e.g. <img src=\"data:image/png;base64,...\">) are converted automatically, and `inline_images` takes images (a local path or base64 data) you reference as <img src=\"cid:CONTENT_ID\">. `categories` and `importance` (low/normal/high) are optional. Everything is validated before anything is sent.")]
     pub async fn send_email(
         &self,
-        Parameters(SendEmailParams { to, subject, body, cc, bcc, html, attachments, inline_images }): Parameters<SendEmailParams>,
+        Parameters(p): Parameters<SendEmailParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let result = run_blocking(move || client.send_email(to, subject, body, cc, bcc, html, attachments, inline_images)).await?;
+        let result = run_blocking(move || {
+            let body = require_mail_body(BodyInputs {
+                body: p.body, html_body: p.html_body, body_file: p.body_file,
+                html_body_file: p.html_body_file, html: p.html,
+            }, "send_email")?;
+            client.send_email(NewEmail {
+                to: p.to, subject: p.subject, body, cc: p.cc, bcc: p.bcc,
+                attachments: p.attachments, inline_images: p.inline_images,
+                categories: p.categories, importance: p.importance,
+            })
+        }).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
-    #[tool(description = "Create (but don't send) a draft email. `attachments` is a list of local file paths. `inline_images` embeds images (a local path or base64 data) as hidden Content-ID attachments and requires html=true: reference each in the HTML body as <img src=\"cid:CONTENT_ID\"> instead of inlining base64 in the HTML. All inline images are validated before the draft is created.")]
+    #[tool(description = "Create (but don't send) a draft email. Give the body as exactly one of `body` (plain text), `html_body`, `body_file` or `html_body_file` (local UTF-8 file paths; use these for large bodies). `html` is a deprecated flag: html=true makes body/body_file HTML. `attachments` is a list of local file paths. Images can be embedded two ways, both saved as hidden Content-ID attachments: `data:` image URIs inside the HTML (e.g. <img src=\"data:image/png;base64,...\">) are converted automatically, and `inline_images` takes images (a local path or base64 data) you reference as <img src=\"cid:CONTENT_ID\">. `categories` and `importance` (low/normal/high) are optional. Everything is validated before the draft is created. Edit or send it later with update_draft.")]
     pub async fn create_draft(
         &self,
-        Parameters(CreateDraftParams { to, subject, body, cc, bcc, html, attachments, inline_images }): Parameters<CreateDraftParams>,
+        Parameters(p): Parameters<CreateDraftParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let result = run_blocking(move || client.create_draft(to, subject, body, cc, bcc, html, attachments, inline_images)).await?;
+        let result = run_blocking(move || {
+            let body = require_mail_body(BodyInputs {
+                body: p.body, html_body: p.html_body, body_file: p.body_file,
+                html_body_file: p.html_body_file, html: p.html,
+            }, "create_draft")?;
+            client.create_draft(NewEmail {
+                to: p.to, subject: p.subject, body, cc: p.cc, bcc: p.bcc,
+                attachments: p.attachments, inline_images: p.inline_images,
+                categories: p.categories, importance: p.importance,
+            })
+        }).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
-    #[tool(description = "Reply to an email, optionally to all recipients, optionally as a draft.")]
+    #[tool(description = "Reply to an email, optionally to all recipients (reply_all), and send it (default) or save it as a draft (send=false). Give the reply text as exactly one of `body` (plain text), `html_body`, `body_file` or `html_body_file` (local UTF-8 file paths); it goes above the quoted original. `html` is a deprecated flag: html=true makes body/body_file HTML. `data:` image URIs in an HTML reply become hidden Content-ID attachments, and `inline_images` adds images referenced as <img src=\"cid:CONTENT_ID\">. Optional `attachments` (local file paths), `categories` and `importance` (low/normal/high). Everything is validated before the reply is created.")]
     pub async fn reply_email(
         &self,
-        Parameters(ReplyEmailParams { email_id, body, reply_all, html, send, attachments }): Parameters<ReplyEmailParams>,
+        Parameters(p): Parameters<ReplyEmailParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let result = run_blocking(move || client.reply_email(email_id, body, reply_all, html, send, attachments)).await?;
+        let result = run_blocking(move || {
+            let body = require_mail_body(BodyInputs {
+                body: p.body, html_body: p.html_body, body_file: p.body_file,
+                html_body_file: p.html_body_file, html: p.html,
+            }, "reply_email")?;
+            client.reply_email(ReplyInput {
+                email_id: p.email_id, body, reply_all: p.reply_all, send: p.send,
+                attachments: p.attachments, inline_images: p.inline_images,
+                categories: p.categories, importance: p.importance,
+            })
+        }).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
@@ -608,17 +756,30 @@ impl OutlookMcpServer {
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
-    #[tool(description = "Edit an existing unsent draft (e.g. one from create_draft or reply_email with send=false) and save it. The draft is NOT sent. Only the fields you pass change: subject, body (plain text) and html_body replace the current values (pass body or html_body, not both); to/cc/bcc replace that recipient line entirely (an empty list clears it); attachments are local file paths appended to the existing ones. Sent or received emails are rejected. Returns the draft id and the list of changed fields.")]
+    #[tool(description = "Edit an existing unsent draft (e.g. one from create_draft or reply_email with send=false) by `email_id` (`draft_id` is a deprecated alias), save it, and optionally send it (send=true; default false). Only the fields you pass change: subject; the body, as at most one of `body` (plain text), `html_body`, `body_file` or `html_body_file` (local UTF-8 file paths; use these for large bodies), replaces the current body; to/cc/bcc replace that recipient line entirely (an empty list clears it); attachments are local file paths appended to the existing ones; add_categories/remove_categories; importance (low/normal/high). `data:` image URIs in a new HTML body become hidden Content-ID attachments, and `inline_images` (needs an HTML body) adds images referenced as <img src=\"cid:CONTENT_ID\">. send=true alone sends the draft as is. Sent or received emails are rejected. Returns the draft id and the list of changed fields (status \"draft_updated\"), or status \"sent\" when sent.")]
     pub async fn update_draft(
         &self,
         Parameters(p): Parameters<UpdateDraftParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let u = DraftUpdate {
-            draft_id: p.draft_id, subject: p.subject, body: p.body, html_body: p.html_body,
-            to: p.to, cc: p.cc, bcc: p.bcc, attachments: p.attachments,
-        };
-        let result = run_blocking(move || client.update_draft(u)).await?;
+        let result = run_blocking(move || {
+            let body = resolve_mail_body(BodyInputs {
+                body: p.body, html_body: p.html_body, body_file: p.body_file,
+                html_body_file: p.html_body_file, html: None,
+            })?;
+            let (body, html_body) = match body {
+                Some(MailBody::Text(t)) => (Some(t), None),
+                Some(MailBody::Html(h)) => (None, Some(h)),
+                None => (None, None),
+            };
+            client.update_draft(DraftUpdate {
+                email_id: p.email_id, subject: p.subject, body, html_body,
+                to: p.to, cc: p.cc, bcc: p.bcc, attachments: p.attachments,
+                inline_images: p.inline_images, add_categories: p.add_categories,
+                remove_categories: p.remove_categories, importance: p.importance,
+                send: p.send,
+            })
+        }).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
@@ -671,16 +832,17 @@ impl OutlookMcpServer {
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
-    #[tool(description = "Create a calendar event. required_attendees/optional_attendees invite two tiers (attendees is a legacy alias merged into required_attendees); any attendee makes it a meeting. categories and show_as (busy status) can be set on creation. recurrence repeats the event (daily/weekly/monthly/yearly, with an interval and an until date or occurrence count). send (default true) controls whether a meeting is actually sent to attendees or just saved for review.")]
+    #[tool(description = "Create a calendar event. required_attendees/optional_attendees invite two tiers (attendees is a legacy alias merged into required_attendees); any attendee makes it a meeting. categories and show_as (busy status) can be set on creation. body (plain text) or body_file (a local UTF-8 text file path, for large text), not both. recurrence repeats the event (daily/weekly/monthly/yearly, with an interval and an until date or occurrence count). send (default true) controls whether a meeting is actually sent to attendees or just saved for review.")]
     pub async fn create_event(
         &self,
         Parameters(CreateEventParams {
-            subject, start, end, body, location, attendees, required_attendees,
+            subject, start, end, body, body_file, location, attendees, required_attendees,
             optional_attendees, all_day, reminder_minutes, categories, show_as, send,
             recurrence,
         }): Parameters<CreateEventParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
+        let body = run_blocking(move || resolve_text_input(body, body_file, "body", "body_file")).await?;
         // `attendees` is a legacy alias for the required tier; merge it in.
         let mut required = required_attendees.unwrap_or_default();
         required.extend(attendees.unwrap_or_default());
@@ -707,7 +869,7 @@ impl OutlookMcpServer {
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
-    #[tool(description = "Update an existing calendar event: subject, start/end, location, body, show_as, add/remove categories, add/remove attendees, reminder, all_day, recurrence (set/replace) or clear_recurrence (remove it). Adding an attendee converts a personal appointment into a meeting. Recurrence edits apply to the whole series. send_update (default true) notifies attendees if the event is a meeting.")]
+    #[tool(description = "Update an existing calendar event: subject, start/end, location, body (or body_file: a local UTF-8 text file path), show_as, add/remove categories, add/remove attendees, reminder, all_day, recurrence (set/replace) or clear_recurrence (remove it). Adding an attendee converts a personal appointment into a meeting. Recurrence edits apply to the whole series. send_update (default true) notifies attendees if the event is a meeting.")]
     pub async fn update_event(
         &self,
         Parameters(p): Parameters<UpdateEventParams>,
@@ -717,9 +879,11 @@ impl OutlookMcpServer {
             pattern: r.pattern, interval: r.interval, days_of_week: r.days_of_week,
             day_of_month: r.day_of_month, until: r.until, occurrences: r.occurrences,
         });
+        let (body, body_file) = (p.body, p.body_file);
+        let body = run_blocking(move || resolve_text_input(body, body_file, "body", "body_file")).await?;
         let u = EventUpdate {
             event_id: p.event_id, subject: p.subject, start: p.start, end: p.end,
-            location: p.location, body: p.body, all_day: p.all_day,
+            location: p.location, body, all_day: p.all_day,
             reminder_minutes: p.reminder_minutes, show_as: p.show_as,
             add_categories: p.add_categories, remove_categories: p.remove_categories,
             add_required_attendees: p.add_required_attendees,
@@ -801,33 +965,37 @@ impl OutlookMcpServer {
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
-    #[tool(description = "Create a new task. reminder_time (ISO datetime) is an absolute reminder time, unlike appointment reminders which are minutes-before-start.")]
+    #[tool(description = "Create a new task. body (plain text) or body_file (a local UTF-8 text file path, for large text), not both. reminder_time (ISO datetime) is an absolute reminder time, unlike appointment reminders which are minutes-before-start.")]
     pub async fn create_task(
         &self,
-        Parameters(CreateTaskParams { subject, body, due_date, importance, categories, start_date, reminder_time }):
-            Parameters<CreateTaskParams>,
+        Parameters(CreateTaskParams {
+            subject, body, body_file, due_date, importance, categories, start_date, reminder_time,
+        }): Parameters<CreateTaskParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let result = run_blocking(move ||
+        let result = run_blocking(move || {
+            let body = resolve_text_input(body, body_file, "body", "body_file")?;
             client.create_task(subject, body, due_date, importance, categories, start_date, reminder_time)
-        ).await?;
+        }).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
-    #[tool(description = "Update an existing task: mark_complete (true=complete, false=reopen), subject, body, due_date, start_date, importance, add/remove categories, percent_complete, reminder_time. Combine any of these in one call. Note: mark_complete is applied last and both complete/reopen set percent_complete themselves, so mark_complete:false always resets percent_complete to 0 even if you also pass an explicit percent_complete in the same call — set it in a separate call afterward if you need it to stick.")]
+    #[tool(description = "Update an existing task: mark_complete (true=complete, false=reopen), subject, body (or body_file: a local UTF-8 text file path), due_date, start_date, importance, add/remove categories, percent_complete, reminder_time. Combine any of these in one call. Note: mark_complete is applied last and both complete/reopen set percent_complete themselves, so mark_complete:false always resets percent_complete to 0 even if you also pass an explicit percent_complete in the same call — set it in a separate call afterward if you need it to stick.")]
     pub async fn update_task(
         &self,
         Parameters(p): Parameters<UpdateTaskParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let u = TaskUpdate {
-            task_id: p.task_id, mark_complete: p.mark_complete, subject: p.subject,
-            body: p.body, due_date: p.due_date, start_date: p.start_date,
-            importance: p.importance, add_categories: p.add_categories,
-            remove_categories: p.remove_categories, percent_complete: p.percent_complete,
-            reminder_time: p.reminder_time,
-        };
-        let result = run_blocking(move || client.update_task(u)).await?;
+        let result = run_blocking(move || {
+            let body = resolve_text_input(p.body, p.body_file, "body", "body_file")?;
+            client.update_task(TaskUpdate {
+                task_id: p.task_id, mark_complete: p.mark_complete, subject: p.subject,
+                body, due_date: p.due_date, start_date: p.start_date,
+                importance: p.importance, add_categories: p.add_categories,
+                remove_categories: p.remove_categories, percent_complete: p.percent_complete,
+                reminder_time: p.reminder_time,
+            })
+        }).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
@@ -864,27 +1032,34 @@ impl OutlookMcpServer {
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
-    #[tool(description = "Create a new note.")]
+    #[tool(description = "Create a new note. Give its text as exactly one of `body` or `body_file` (a local UTF-8 text file path, for large text). Optional categories and color.")]
     pub async fn create_note(
         &self,
-        Parameters(CreateNoteParams { body, categories, color }): Parameters<CreateNoteParams>,
+        Parameters(CreateNoteParams { body, body_file, categories, color }): Parameters<CreateNoteParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let result = run_blocking(move || client.create_note(body, categories, color)).await?;
+        let result = run_blocking(move || {
+            let body = resolve_text_input(body, body_file, "body", "body_file")?.ok_or_else(|| {
+                ToolError::new("create_note needs a body: pass `body` or `body_file`")
+            })?;
+            client.create_note(body, categories, color)
+        }).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 
-    #[tool(description = "Update an existing note: body, add/remove categories, color. Combine any of these in one call.")]
+    #[tool(description = "Update an existing note: body (or body_file: a local UTF-8 text file path), add/remove categories, color. Combine any of these in one call.")]
     pub async fn update_note(
         &self,
         Parameters(p): Parameters<UpdateNoteParams>,
     ) -> Result<CallToolResult, McpError> {
         let client = self.client.clone();
-        let u = NoteUpdate {
-            note_id: p.note_id, body: p.body, add_categories: p.add_categories,
-            remove_categories: p.remove_categories, color: p.color,
-        };
-        let result = run_blocking(move || client.update_note(u)).await?;
+        let result = run_blocking(move || {
+            let body = resolve_text_input(p.body, p.body_file, "body", "body_file")?;
+            client.update_note(NoteUpdate {
+                note_id: p.note_id, body, add_categories: p.add_categories,
+                remove_categories: p.remove_categories, color: p.color,
+            })
+        }).await?;
         Ok(CallToolResult::success(vec![json_content(&result)?]))
     }
 

@@ -10,7 +10,7 @@
 use base64::Engine as _;
 use outlook_mcp_rs::outlook::client::WindowsOutlookClient;
 use outlook_mcp_rs::outlook::types::EmailSummary;
-use outlook_mcp_rs::outlook::{DraftUpdate, EmailQuery, InlineImage, OutlookClient};
+use outlook_mcp_rs::outlook::{DraftUpdate, EmailQuery, InlineImage, MailBody, NewEmail, OutlookClient, ReplyInput};
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -101,7 +101,11 @@ fn draft(
     inline: Option<Vec<InlineImage>>,
 ) -> Result<String, String> {
     let v = c
-        .create_draft(vec![to.to_string()], subject.to_string(), body.to_string(), None, None, html, attachments, inline)
+        .create_draft(NewEmail {
+            to: vec![to.to_string()], subject: subject.to_string(),
+            body: if html { MailBody::Html(body.to_string()) } else { MailBody::Text(body.to_string()) },
+            attachments, inline_images: inline, ..Default::default()
+        })
         .map_err(|e| e.0)?;
     v["id"].as_str().map(str::to_string).ok_or_else(|| format!("no id in {v}"))
 }
@@ -459,7 +463,7 @@ fn system_test_open_prs_14_to_25() {
                 Err(e) => r.fail("P21-1", e.0),
             }
             let new_subject = subj("עדכון כותרת בעברית ✓");
-            let res = c.update_draft(DraftUpdate { draft_id: id.clone(), subject: Some(new_subject.clone()), ..Default::default() });
+            let res = c.update_draft(DraftUpdate { email_id: id.clone(), subject: Some(new_subject.clone()), ..Default::default() });
             let back = c.get_email(id.clone(), false, None).map(|d| d.summary.subject);
             r.record("P21-2", res.is_ok() && back.as_deref().ok() == Some(new_subject.as_str()),
                 format!("update_draft {:?}; read back {:?}", res.map(|v| v["status"].clone()).map_err(|e| e.0), back.map_err(|e| e.0)));
@@ -477,7 +481,7 @@ fn system_test_open_prs_14_to_25() {
             cleanup.push(("UPD".into(), id.clone()));
             let new_subject = subj("updated");
             let res = c.update_draft(DraftUpdate {
-                draft_id: id.clone(),
+                email_id: id.clone(),
                 subject: Some(new_subject.clone()),
                 html_body: Some(format!("<p>marker-{run}</p>")),
                 to: Some(vec![SOMEONE_ELSE.into(), NOBODY.into()]),
@@ -501,12 +505,12 @@ fn system_test_open_prs_14_to_25() {
                 }
                 Err(e) => r.fail("P19-1", e.0),
             }
-            let res = c.update_draft(DraftUpdate { draft_id: id.clone(), cc: Some(vec![]), bcc: Some(vec![SOMEONE_ELSE.into()]), ..Default::default() });
+            let res = c.update_draft(DraftUpdate { email_id: id.clone(), cc: Some(vec![]), bcc: Some(vec![SOMEONE_ELSE.into()]), ..Default::default() });
             match (res, c.get_email(id.clone(), false, None)) {
                 (Ok(_), Ok(d)) => r.record("P19-2", d.cc.trim().is_empty() && d.bcc.contains("someone-else"), format!("cc {:?} bcc {:?}", d.cc, d.bcc)),
                 (a, b) => r.fail("P19-2", format!("{:?} / {:?}", a.err().map(|e| e.0), b.err().map(|e| e.0))),
             }
-            let res = c.update_draft(DraftUpdate { draft_id: id.clone(), attachments: Some(vec![txt2_path_s.clone()]), ..Default::default() });
+            let res = c.update_draft(DraftUpdate { email_id: id.clone(), attachments: Some(vec![txt2_path_s.clone()]), ..Default::default() });
             match (res, c.list_attachments(id.clone())) {
                 (Ok(_), Ok(atts)) => {
                     let names: Vec<&str> = atts.iter().map(|a| a.filename.as_str()).collect();
@@ -514,7 +518,7 @@ fn system_test_open_prs_14_to_25() {
                 }
                 (a, b) => r.fail("P19-3", format!("{:?} / {:?}", a.err().map(|e| e.0), b.err().map(|e| e.0))),
             }
-            let res = c.update_draft(DraftUpdate { draft_id: id.clone(), body: Some("x".into()), html_body: Some("<p>x</p>".into()), subject: Some(subj("SHOULD NOT APPLY")), ..Default::default() });
+            let res = c.update_draft(DraftUpdate { email_id: id.clone(), body: Some("x".into()), html_body: Some("<p>x</p>".into()), subject: Some(subj("SHOULD NOT APPLY")), ..Default::default() });
             let still = c.get_email(id.clone(), false, None).map(|d| d.summary.subject);
             r.record("P19-4", res.is_err() && still.as_deref().ok() == Some(new_subject.as_str()),
                 format!("body+html_body -> {:?}; subject now {:?}", res.err().map(|e| e.0), still.map_err(|e| e.0)));
@@ -587,9 +591,11 @@ fn system_test_open_prs_14_to_25() {
     println!("\n--- S1 self-loop send ---");
     let s1_subject = subj("self-loop inline send");
     let mut s1_inbox: Option<EmailSummary> = None;
-    match c.send_email(vec![SELF_ADDR.into()], s1_subject.clone(),
-        "<p>Automated system test (PRs #14-#25), sent to self.</p><img src=\"cid:s1img\">".into(),
-        None, None, true, None, Some(vec![b64_image("s1img")])) {
+    match c.send_email(NewEmail {
+        to: vec![SELF_ADDR.into()], subject: s1_subject.clone(),
+        body: MailBody::Html("<p>Automated system test (PRs #14-#25), sent to self.</p><img src=\"cid:s1img\">".into()),
+        inline_images: Some(vec![b64_image("s1img")]), ..Default::default()
+    }) {
         Ok(v) => {
             r.record("S1", v["status"] == "sent", format!("send_email -> {v}"));
             s1_inbox = wait_for(&c, "inbox", &s1_subject);
@@ -618,11 +624,13 @@ fn system_test_open_prs_14_to_25() {
                 format!("received image bytes equal sent: {}; context {:?}", decode_data_uri(&img.data_uri) == Some(png_bytes()), img.context)),
             Err(e) => r.fail("P24-4", e.0),
         }
-        let res = c.update_draft(DraftUpdate { draft_id: recv.id.clone(), subject: Some(subj("MUST NOT CHANGE")), ..Default::default() });
+        let res = c.update_draft(DraftUpdate { email_id: recv.id.clone(), subject: Some(subj("MUST NOT CHANGE")), ..Default::default() });
         let still = c.get_email(recv.id.clone(), false, None).map(|d| d.summary.subject);
         r.record("P19-5", res.as_ref().is_err_and(|e| e.0.contains("only unsent drafts")) && still.as_deref().ok() == Some(recv.subject.as_str()),
             format!("update_draft on received item -> {:?}; subject now {:?}", res.err().map(|e| e.0), still.map_err(|e| e.0)));
-        match c.reply_email(recv.id.clone(), "systest reply draft".into(), false, false, false, None) {
+        match c.reply_email(ReplyInput {
+            email_id: recv.id.clone(), body: MailBody::Text("systest reply draft".into()), ..Default::default()
+        }) {
             Ok(v) => {
                 if let Some(id) = v["id"].as_str() { cleanup.push(("R3".into(), id.to_string())); }
                 r.record("R3", v["status"] == "draft_saved" && v["id"].is_string(), format!("reply_email send=false -> {}", v["status"]));

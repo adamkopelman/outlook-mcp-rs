@@ -14,6 +14,24 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
 
+/// Write `bytes` to a fresh file under the temp dir and return its path.
+fn temp_file(name: &str, bytes: &[u8]) -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "outlook-mcp-rs-tools-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, bytes).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+/// The error text of a failed tool call.
+fn err_text(err: rmcp::ErrorData) -> String {
+    err.message.to_string()
+}
+
 fn result_json(result: &CallToolResult) -> Value {
     let text = result.content[0]
         .as_text()
@@ -222,12 +240,8 @@ async fn hebrew_arguments_reach_the_client_unchanged() {
         .create_draft(Parameters(CreateDraftParams {
             to: vec!["a@example.com".to_string()],
             subject: HE_SUBJECT.to_string(),
-            body: HE_BODY.to_string(),
-            cc: None,
-            bcc: None,
-            html: false,
-            attachments: None,
-            inline_images: None,
+            body: Some(HE_BODY.to_string()),
+            ..Default::default()
         }))
         .await
         .unwrap();
@@ -370,12 +384,9 @@ async fn send_email_passes_recipients_and_html_flag() {
         .send_email(Parameters(SendEmailParams {
             to: vec!["a@example.com".to_string(), "b@example.com".to_string()],
             subject: "Hi".to_string(),
-            body: "Hello!".to_string(),
-            cc: None,
-            bcc: None,
-            html: false,
-            attachments: None,
-            inline_images: None,
+            body: Some("Hello!".to_string()),
+            html: Some(false),
+            ..Default::default()
         }))
         .await
         .unwrap();
@@ -393,12 +404,9 @@ async fn create_draft_returns_draft_saved_status() {
         .create_draft(Parameters(CreateDraftParams {
             to: vec!["a@example.com".to_string()],
             subject: "Hi".to_string(),
-            body: "Hello!".to_string(),
-            cc: None,
-            bcc: None,
-            html: false,
-            attachments: None,
-            inline_images: None,
+            body: Some("Hello!".to_string()),
+            html: Some(false),
+            ..Default::default()
         }))
         .await
         .unwrap();
@@ -412,11 +420,10 @@ async fn reply_email_passes_reply_all_and_send_flags() {
     server
         .reply_email(Parameters(ReplyEmailParams {
             email_id: EMAIL_ID.to_string(),
-            body: "Thanks!".to_string(),
+            body: Some("Thanks!".to_string()),
             reply_all: true,
-            html: false,
             send: false,
-            attachments: None,
+            ..Default::default()
         }))
         .await
         .unwrap();
@@ -457,7 +464,8 @@ async fn update_draft_forwards_fields_and_lists_changes_in_apply_order() {
     assert_eq!(v["changed"], json!(["subject", "html_body", "to", "bcc", "attachments"]));
     let (name, args) = fake.calls().pop().unwrap();
     assert_eq!(name, "update_draft");
-    assert_eq!(args["draft_id"], EMAIL_ID);
+    // `draft_id` (deprecated alias) still deserializes into `email_id`.
+    assert_eq!(args["email_id"], EMAIL_ID);
     assert_eq!(args["subject"], "New");
     assert_eq!(args["html_body"], "<p>hi</p>");
     assert_eq!(args["body"], Value::Null);
@@ -491,11 +499,13 @@ async fn update_draft_rejects_an_empty_update() {
 async fn send_email_forwards_inline_images() {
     let fake = Arc::new(FakeOutlookClient::new());
     let server = OutlookMcpServer::new(fake.clone());
+    // Paths are validated (in the fake too), so use a real file.
+    let logo = temp_file("logo.png", b"\x89PNG\r\n\x1a\n");
     let params: SendEmailParams = serde_json::from_value(json!({
         "to": ["a@x.com"], "subject": "Hi", "html": true,
         "body": "<img src=\"cid:logo\">",
         "inline_images": [
-            {"content_id": "logo", "path": "C:/img/logo.png"},
+            {"content_id": "logo", "path": logo},
             {"content_id": "chart", "data_base64": "aGk=", "filename": "chart.png", "mime_type": "image/png"}
         ]
     })).unwrap();
@@ -505,7 +515,7 @@ async fn send_email_forwards_inline_images() {
     assert_eq!(args["html"], true);
     let imgs = &args["inline_images"];
     assert_eq!(imgs[0]["content_id"], "logo");
-    assert_eq!(imgs[0]["path"], "C:/img/logo.png");
+    assert_eq!(imgs[0]["path"], logo);
     assert_eq!(imgs[0]["data_base64"], Value::Null);
     assert_eq!(imgs[1]["content_id"], "chart");
     assert_eq!(imgs[1]["data_base64"], "aGk=");
@@ -549,6 +559,357 @@ fn inline_images_appear_in_send_and_draft_schemas() {
         }
         assert_eq!(def["required"], json!(["content_id"]));
     }
+}
+
+// ---- #28 / #29: body inputs, files, metadata, data: URI images ----
+
+/// Issue #28: a tool call with a large HTML body (76 KB in the report;
+/// ~1.5 MB here, with an embedded base64 image) goes through the same
+/// newline-delimited JSON-RPC codec rmcp's stdio transport uses, which has
+/// no size limit. The data: URI arrives and is turned into a cid: image.
+#[tokio::test]
+async fn large_html_body_round_trips_over_the_stdio_codec() {
+    use rmcp::model::CallToolRequestParams;
+    use rmcp::ServiceExt;
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(async move {
+        if let Ok(running) = server.serve(server_io).await {
+            let _ = running.waiting().await;
+        }
+    });
+    let client = ().serve(client_io).await.expect("handshake");
+    let html = format!(
+        "<p>{}</p><img src=\"data:image/png;base64,{PNG_B64}\">",
+        "lorem ipsum ".repeat(130_000)
+    );
+    let args = json!({"email_id": EMAIL_ID, "html_body": html});
+    let result = client
+        .call_tool(CallToolRequestParams::new("update_draft").with_arguments(args.as_object().unwrap().clone()))
+        .await
+        .expect("a ~1.5 MB update_draft call should succeed");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let (name, recorded) = fake.calls().pop().unwrap();
+    assert_eq!(name, "update_draft");
+    let body = recorded["html_body"].as_str().unwrap();
+    assert!(body.len() > 1_500_000 && body.contains("cid:img-") && !body.contains("base64"));
+    client.cancel().await.ok();
+}
+
+/// A 1x1 transparent PNG.
+const PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+async fn send(fake: &Arc<FakeOutlookClient>, args: Value) -> Result<CallToolResult, rmcp::ErrorData> {
+    let server = OutlookMcpServer::new(fake.clone());
+    let params: SendEmailParams = serde_json::from_value(args).unwrap();
+    server.send_email(Parameters(params)).await
+}
+
+#[tokio::test]
+async fn send_email_html_body_is_html() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    send(&fake, json!({"to": ["a@x.com"], "subject": "Hi", "html_body": "<p>hi</p>"})).await.unwrap();
+    let (_, args) = &fake.calls()[0];
+    assert_eq!(args["html"], true);
+    assert_eq!(args["body"], "<p>hi</p>");
+    // Plain body stays text; the new fields default to null.
+    send(&fake, json!({"to": ["a@x.com"], "subject": "Hi", "body": "<p>hi</p>"})).await.unwrap();
+    let (_, args) = &fake.calls()[1];
+    assert_eq!(args["html"], false);
+    assert_eq!(args["categories"], Value::Null);
+    assert_eq!(args["importance"], Value::Null);
+}
+
+#[tokio::test]
+async fn send_email_deprecated_html_flag_still_works_and_contradictions_fail() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    send(&fake, json!({"to": ["a@x.com"], "subject": "Hi", "body": "<b>x</b>", "html": true})).await.unwrap();
+    assert_eq!(fake.calls()[0].1["html"], true);
+    let e = err_text(send(&fake, json!({
+        "to": ["a@x.com"], "subject": "Hi", "html_body": "<b>x</b>", "html": false
+    })).await.unwrap_err());
+    assert!(e.contains("`html: false`") && e.contains("`html_body`"), "{e}");
+    assert_eq!(fake.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn send_email_needs_exactly_one_body_source() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let e = err_text(send(&fake, json!({"to": ["a@x.com"], "subject": "Hi"})).await.unwrap_err());
+    assert!(e.contains("needs a body"), "{e}");
+    let e = err_text(send(&fake, json!({
+        "to": ["a@x.com"], "subject": "Hi", "body": "a", "html_body": "<p>b</p>"
+    })).await.unwrap_err());
+    assert_eq!(e, "pass either `body` or `html_body`, not both");
+    let e = err_text(send(&fake, json!({
+        "to": ["a@x.com"], "subject": "Hi", "html_body": "<p>b</p>", "html_body_file": "x.html"
+    })).await.unwrap_err());
+    assert_eq!(e, "pass either `html_body` or `html_body_file`, not both");
+    assert!(fake.calls().is_empty());
+}
+
+#[tokio::test]
+async fn compose_tools_read_body_files() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let html = "<p>שלום</p>".repeat(20_000); // ~360 KB, well past the 76 KB from #28
+    let html_path = temp_file("big.html", html.as_bytes());
+    let txt_path = temp_file("body.txt", b"plain from file");
+    let params: CreateDraftParams = serde_json::from_value(json!({
+        "to": ["a@x.com"], "subject": "Big", "html_body_file": html_path
+    })).unwrap();
+    server.create_draft(Parameters(params)).await.unwrap();
+    let (_, args) = &fake.calls()[0];
+    assert_eq!(args["html"], true);
+    assert_eq!(args["body"].as_str().unwrap(), html);
+    send(&fake, json!({"to": ["a@x.com"], "subject": "T", "body_file": txt_path})).await.unwrap();
+    let (_, args) = &fake.calls()[1];
+    assert_eq!(args["html"], false);
+    assert_eq!(args["body"], "plain from file");
+    // Deprecated html=true applies to body_file too.
+    send(&fake, json!({"to": ["a@x.com"], "subject": "T", "body_file": txt_path, "html": true})).await.unwrap();
+    assert_eq!(fake.calls()[2].1["html"], true);
+}
+
+#[tokio::test]
+async fn missing_body_file_fails_before_the_client_is_called() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let e = err_text(send(&fake, json!({
+        "to": ["a@x.com"], "subject": "Hi", "html_body_file": "/definitely/not/here.html"
+    })).await.unwrap_err());
+    assert!(e.starts_with("html_body_file: could not read"), "{e}");
+    assert!(fake.calls().is_empty());
+}
+
+#[tokio::test]
+async fn data_uri_images_in_html_body_become_inline_attachments() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    send(&fake, json!({
+        "to": ["a@x.com"], "subject": "Hi",
+        "html_body": format!("<p>Look:</p><img src=\"data:image/png;base64,{PNG_B64}\"><img src='data:image/png;base64,{PNG_B64}'>"),
+    })).await.unwrap();
+    let (_, args) = &fake.calls()[0];
+    let ids = args["inline_content_ids"].as_array().unwrap();
+    assert_eq!(ids.len(), 1, "the same image twice is attached once: {args}");
+    let cid = ids[0].as_str().unwrap();
+    assert_eq!(
+        args["body"],
+        format!("<p>Look:</p><img src=\"cid:{cid}\"><img src='cid:{cid}'>")
+    );
+    assert!(!args["body"].as_str().unwrap().contains("base64"));
+}
+
+#[tokio::test]
+async fn invalid_data_uri_fails_before_anything_is_created() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let e = err_text(send(&fake, json!({
+        "to": ["a@x.com"], "subject": "Hi",
+        "html_body": "<img src=\"data:image/png;base64,@@@not base64@@@\">",
+    })).await.unwrap_err());
+    assert!(e.contains("not valid base64"), "{e}");
+    assert!(fake.calls().is_empty());
+}
+
+#[tokio::test]
+async fn inline_images_need_an_html_body() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let e = err_text(send(&fake, json!({
+        "to": ["a@x.com"], "subject": "Hi", "body": "plain",
+        "inline_images": [{"content_id": "a", "data_base64": PNG_B64}],
+    })).await.unwrap_err());
+    assert!(e.contains("requires an HTML body"), "{e}");
+    assert!(fake.calls().is_empty());
+}
+
+#[tokio::test]
+async fn send_and_draft_forward_categories_and_importance() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    send(&fake, json!({
+        "to": ["a@x.com"], "subject": "Hi", "body": "x",
+        "categories": ["Red Category"], "importance": "high",
+    })).await.unwrap();
+    let params: CreateDraftParams = serde_json::from_value(json!({
+        "to": ["a@x.com"], "subject": "Hi", "body": "x",
+        "categories": ["Blue Category"], "importance": "low",
+    })).unwrap();
+    server.create_draft(Parameters(params)).await.unwrap();
+    let calls = fake.calls();
+    assert_eq!(calls[0].1["categories"], json!(["Red Category"]));
+    assert_eq!(calls[0].1["importance"], "high");
+    assert_eq!(calls[1].1["categories"], json!(["Blue Category"]));
+    assert_eq!(calls[1].1["importance"], "low");
+    let e = err_text(send(&fake, json!({
+        "to": ["a@x.com"], "subject": "Hi", "body": "x", "importance": "urgent",
+    })).await.unwrap_err());
+    assert!(e.contains("invalid importance"), "{e}");
+    assert_eq!(fake.calls().len(), 2);
+}
+
+#[tokio::test]
+async fn reply_email_takes_html_body_inline_images_and_metadata() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let params: ReplyEmailParams = serde_json::from_value(json!({
+        "email_id": EMAIL_ID, "send": false,
+        "html_body": format!("<p>See</p><img src=\"cid:logo\"><img src=\"data:image/png;base64,{PNG_B64}\">"),
+        "inline_images": [{"content_id": "logo", "data_base64": PNG_B64}],
+        "categories": ["Work"], "importance": "high",
+    })).unwrap();
+    server.reply_email(Parameters(params)).await.unwrap();
+    let (name, args) = &fake.calls()[0];
+    assert_eq!(name, "reply_email");
+    assert_eq!(args["html"], true);
+    let ids = args["inline_content_ids"].as_array().unwrap();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(ids[0], "logo");
+    assert!(args["body"].as_str().unwrap().contains(&format!("cid:{}", ids[1].as_str().unwrap())));
+    assert_eq!(args["categories"], json!(["Work"]));
+    assert_eq!(args["importance"], "high");
+    // body_file works for replies too.
+    let path = temp_file("reply.txt", b"thanks from a file");
+    let params: ReplyEmailParams = serde_json::from_value(json!({"email_id": EMAIL_ID, "body_file": path})).unwrap();
+    server.reply_email(Parameters(params)).await.unwrap();
+    let (_, args) = &fake.calls()[1];
+    assert_eq!(args["body"], "thanks from a file");
+    assert_eq!(args["send"], true);
+}
+
+async fn update_draft(fake: &Arc<FakeOutlookClient>, args: Value) -> Result<CallToolResult, rmcp::ErrorData> {
+    let server = OutlookMcpServer::new(fake.clone());
+    let params: UpdateDraftParams = serde_json::from_value(args).unwrap();
+    server.update_draft(Parameters(params)).await
+}
+
+#[tokio::test]
+async fn update_draft_takes_email_id_and_new_fields() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let html_path = temp_file("draft.html", format!("<p>x</p><img src=\"data:image/png;base64,{PNG_B64}\">").as_bytes());
+    let v = result_json(&update_draft(&fake, json!({
+        "email_id": EMAIL_ID, "html_body_file": html_path,
+        "inline_images": [{"content_id": "logo", "data_base64": PNG_B64}],
+        "add_categories": ["Red"], "remove_categories": ["Blue"], "importance": "high",
+    })).await.unwrap());
+    assert_eq!(v["status"], "draft_updated");
+    assert_eq!(v["changed"], json!(["html_body", "inline_images", "add_categories", "remove_categories", "importance"]));
+    let (_, args) = fake.calls().pop().unwrap();
+    assert_eq!(args["email_id"], EMAIL_ID);
+    assert_eq!(args["send"], false);
+    let ids = args["inline_content_ids"].as_array().unwrap();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(args["html_body"], format!("<p>x</p><img src=\"cid:{}\">", ids[1].as_str().unwrap()));
+    assert_eq!(args["add_categories"], json!(["Red"]));
+    assert_eq!(args["remove_categories"], json!(["Blue"]));
+}
+
+#[tokio::test]
+async fn update_draft_send_alone_sends_it() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let v = result_json(&update_draft(&fake, json!({"draft_id": EMAIL_ID, "send": true})).await.unwrap());
+    assert_eq!(v["status"], "sent");
+    assert_eq!(v["changed"], json!([]));
+    let (_, args) = fake.calls().pop().unwrap();
+    assert_eq!(args["send"], true);
+    assert_eq!(args["email_id"], EMAIL_ID);
+}
+
+#[tokio::test]
+async fn update_draft_rejects_bad_inputs_without_touching_the_draft() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let e = err_text(update_draft(&fake, json!({
+        "email_id": EMAIL_ID, "body": "plain",
+        "inline_images": [{"content_id": "a", "data_base64": PNG_B64}],
+    })).await.unwrap_err());
+    assert!(e.contains("html_body"), "{e}");
+    let e = err_text(update_draft(&fake, json!({"email_id": EMAIL_ID, "body": "a", "body_file": "b.txt"})).await.unwrap_err());
+    assert_eq!(e, "pass either `body` or `body_file`, not both");
+    let e = err_text(update_draft(&fake, json!({"email_id": EMAIL_ID, "importance": "urgent"})).await.unwrap_err());
+    assert!(e.contains("invalid importance"), "{e}");
+    let e = err_text(update_draft(&fake, json!({"email_id": EMAIL_ID, "html_body": "<img src=\"data:image/png;base64,!!\">"})).await.unwrap_err());
+    assert!(e.contains("not valid base64"), "{e}");
+    assert!(fake.calls().is_empty());
+}
+
+#[test]
+fn write_tool_schemas_reflect_the_new_body_convention() {
+    // Compared sorted: the order schemars lists required fields in is not part of the contract.
+    let required = |schema: schemars::Schema| {
+        let mut names: Vec<String> = serde_json::from_value(serde_json::to_value(&schema).unwrap()["required"].clone()).unwrap();
+        names.sort();
+        json!(names)
+    };
+    // A body is no longer a required field (any one of four sources works).
+    assert_eq!(required(schemars::schema_for!(SendEmailParams)), json!(["subject", "to"]));
+    assert_eq!(required(schemars::schema_for!(CreateDraftParams)), json!(["subject", "to"]));
+    assert_eq!(required(schemars::schema_for!(ReplyEmailParams)), json!(["email_id"]));
+    assert_eq!(required(schemars::schema_for!(UpdateDraftParams)), json!(["email_id"]));
+    for schema in [
+        schemars::schema_for!(SendEmailParams), schemars::schema_for!(CreateDraftParams),
+        schemars::schema_for!(ReplyEmailParams), schemars::schema_for!(UpdateDraftParams),
+    ] {
+        let v = serde_json::to_value(&schema).unwrap();
+        for field in ["body", "html_body", "body_file", "html_body_file", "inline_images", "importance"] {
+            assert!(v["properties"][field].is_object(), "{field} missing: {v}");
+        }
+    }
+    let v = serde_json::to_value(schemars::schema_for!(UpdateDraftParams)).unwrap();
+    for field in ["send", "add_categories", "remove_categories"] {
+        assert!(v["properties"][field].is_object(), "{field} missing: {v}");
+    }
+    for schema in [
+        schemars::schema_for!(CreateEventParams), schemars::schema_for!(UpdateEventParams),
+        schemars::schema_for!(CreateTaskParams), schemars::schema_for!(UpdateTaskParams),
+        schemars::schema_for!(CreateNoteParams), schemars::schema_for!(UpdateNoteParams),
+    ] {
+        let v = serde_json::to_value(&schema).unwrap();
+        assert!(v["properties"]["body_file"].is_object(), "body_file missing: {v}");
+    }
+}
+
+#[tokio::test]
+async fn event_task_and_note_tools_read_body_file() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let path = temp_file("desc.txt", "תיאור from a file".as_bytes());
+    let p: CreateEventParams = serde_json::from_value(json!({
+        "subject": "S", "start": "2026-06-12T14:00", "end": "2026-06-12T15:00", "body_file": path
+    })).unwrap();
+    server.create_event(Parameters(p)).await.unwrap();
+    let p: UpdateEventParams = serde_json::from_value(json!({"event_id": "e", "body_file": path})).unwrap();
+    server.update_event(Parameters(p)).await.unwrap();
+    let p: CreateTaskParams = serde_json::from_value(json!({"subject": "S", "body_file": path})).unwrap();
+    server.create_task(Parameters(p)).await.unwrap();
+    let p: UpdateTaskParams = serde_json::from_value(json!({"task_id": "t", "body_file": path})).unwrap();
+    server.update_task(Parameters(p)).await.unwrap();
+    let p: CreateNoteParams = serde_json::from_value(json!({"body_file": path})).unwrap();
+    server.create_note(Parameters(p)).await.unwrap();
+    let p: UpdateNoteParams = serde_json::from_value(json!({"note_id": "n", "body_file": path})).unwrap();
+    server.update_note(Parameters(p)).await.unwrap();
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 6);
+    for (name, args) in &calls {
+        assert_eq!(args["body"], "תיאור from a file", "{name}");
+    }
+}
+
+#[tokio::test]
+async fn body_and_body_file_are_exclusive_and_create_note_needs_one() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let p: CreateTaskParams = serde_json::from_value(json!({"subject": "S", "body": "a", "body_file": "b"})).unwrap();
+    let e = err_text(server.create_task(Parameters(p)).await.unwrap_err());
+    assert_eq!(e, "pass either `body` or `body_file`, not both");
+    let p: UpdateNoteParams = serde_json::from_value(json!({"note_id": "n", "body": "a", "body_file": "b"})).unwrap();
+    assert!(server.update_note(Parameters(p)).await.is_err());
+    let p: CreateEventParams = serde_json::from_value(json!({
+        "subject": "S", "start": "2026-06-12T14:00", "end": "2026-06-12T15:00", "body": "a", "body_file": "b"
+    })).unwrap();
+    assert!(server.create_event(Parameters(p)).await.is_err());
+    let p: CreateNoteParams = serde_json::from_value(json!({})).unwrap();
+    let e = err_text(server.create_note(Parameters(p)).await.unwrap_err());
+    assert!(e.contains("create_note needs a body"), "{e}");
+    assert!(fake.calls().is_empty());
 }
 
 #[tokio::test]
@@ -749,7 +1110,7 @@ async fn create_event_passes_attendees() {
             subject: "Sync".to_string(),
             start: "2026-06-12T14:00".to_string(),
             end: "2026-06-12T15:00".to_string(),
-            body: None,
+            body: None, body_file: None,
             location: None,
             attendees: Some(vec!["a@example.com".to_string()]),
             required_attendees: None,
@@ -777,7 +1138,7 @@ async fn create_event_status_reflects_attendees_and_send() {
         subject: "Sync".to_string(),
         start: "2026-06-12T14:00".to_string(),
         end: "2026-06-12T15:00".to_string(),
-        body: None, location: None, attendees: None,
+        body: None, body_file: None, location: None, attendees: None,
         required_attendees: required, optional_attendees: None,
         all_day: false, reminder_minutes: None, categories: None, show_as: None,
         send,
@@ -805,7 +1166,7 @@ async fn create_event_forwards_recurrence() {
             subject: "Standup".to_string(),
             start: "2026-06-12T09:00".to_string(),
             end: "2026-06-12T09:15".to_string(),
-            body: None, location: None, attendees: None,
+            body: None, body_file: None, location: None, attendees: None,
             required_attendees: None, optional_attendees: None,
             all_day: false, reminder_minutes: None, categories: None, show_as: None,
             send: true,
@@ -904,7 +1265,7 @@ async fn update_event_lists_changed_fields() {
         .update_event(Parameters(UpdateEventParams {
             event_id: EVENT_ID.to_string(),
             subject: Some("Renamed sync".to_string()),
-            start: None, end: None, location: None, body: None, all_day: None,
+            start: None, end: None, location: None, body: None, body_file: None, all_day: None,
             reminder_minutes: None, show_as: Some("tentative".to_string()),
             add_categories: Some(vec!["Work".to_string()]),
             remove_categories: None,
@@ -935,7 +1296,7 @@ async fn update_event_remove_attendees_is_tracked() {
     let result = server
         .update_event(Parameters(UpdateEventParams {
             event_id: EVENT_ID.to_string(),
-            subject: None, start: None, end: None, location: None, body: None,
+            subject: None, start: None, end: None, location: None, body: None, body_file: None,
             all_day: None, reminder_minutes: None, show_as: None,
             add_categories: None, remove_categories: None,
             add_required_attendees: None, add_optional_attendees: None,
@@ -957,7 +1318,7 @@ async fn update_event_forwards_recurrence() {
     let result = server
         .update_event(Parameters(UpdateEventParams {
             event_id: EVENT_ID.to_string(),
-            subject: None, start: None, end: None, location: None, body: None,
+            subject: None, start: None, end: None, location: None, body: None, body_file: None,
             all_day: None, reminder_minutes: None, show_as: None,
             add_categories: None, remove_categories: None,
             add_required_attendees: None, add_optional_attendees: None, remove_attendees: None,
@@ -985,7 +1346,7 @@ async fn update_event_forwards_clear_recurrence() {
     let result = server
         .update_event(Parameters(UpdateEventParams {
             event_id: EVENT_ID.to_string(),
-            subject: None, start: None, end: None, location: None, body: None,
+            subject: None, start: None, end: None, location: None, body: None, body_file: None,
             all_day: None, reminder_minutes: None, show_as: None,
             add_categories: None, remove_categories: None,
             add_required_attendees: None, add_optional_attendees: None, remove_attendees: None,
@@ -1007,7 +1368,7 @@ async fn update_event_rejects_recurrence_and_clear_recurrence_together() {
     let err = server
         .update_event(Parameters(UpdateEventParams {
             event_id: EVENT_ID.to_string(),
-            subject: None, start: None, end: None, location: None, body: None,
+            subject: None, start: None, end: None, location: None, body: None, body_file: None,
             all_day: None, reminder_minutes: None, show_as: None,
             add_categories: None, remove_categories: None,
             add_required_attendees: None, add_optional_attendees: None, remove_attendees: None,
@@ -1271,7 +1632,7 @@ async fn update_task_marks_complete() {
     server
         .update_task(Parameters(UpdateTaskParams {
             task_id: TASK_ID.to_string(), mark_complete: Some(true),
-            subject: None, body: None, due_date: None, start_date: None,
+            subject: None, body: None, body_file: None, due_date: None, start_date: None,
             importance: None, add_categories: None, remove_categories: None,
             percent_complete: None, reminder_time: None,
         }))
@@ -1289,7 +1650,7 @@ async fn update_task_reopens_with_mark_complete_false() {
     let result = server
         .update_task(Parameters(UpdateTaskParams {
             task_id: TASK_ID.to_string(), mark_complete: Some(false),
-            subject: None, body: None, due_date: None, start_date: None,
+            subject: None, body: None, body_file: None, due_date: None, start_date: None,
             importance: None, add_categories: None, remove_categories: None,
             percent_complete: None, reminder_time: None,
         }))
@@ -1307,7 +1668,7 @@ async fn update_task_forwards_field_edits() {
     server
         .update_task(Parameters(UpdateTaskParams {
             task_id: TASK_ID.to_string(), mark_complete: None,
-            subject: Some("Renamed".to_string()), body: None,
+            subject: Some("Renamed".to_string()), body: None, body_file: None,
             due_date: None, start_date: None, importance: Some("high".to_string()),
             add_categories: Some(vec!["Red Category".to_string()]), remove_categories: None,
             percent_complete: Some(50), reminder_time: None,
@@ -1393,7 +1754,7 @@ async fn create_note_records_body() {
     let server = OutlookMcpServer::new(fake.clone());
     server
         .create_note(Parameters(CreateNoteParams {
-            body: "Ideas\n- one".to_string(), categories: None, color: None,
+            body: Some("Ideas\n- one".to_string()), ..Default::default()
         }))
         .await
         .unwrap();
@@ -1440,7 +1801,7 @@ async fn update_note_forwards_body_and_color() {
     server
         .update_note(Parameters(UpdateNoteParams {
             note_id: NOTE_ID.to_string(),
-            body: Some("Updated body".to_string()),
+            body: Some("Updated body".to_string()), body_file: None,
             add_categories: None, remove_categories: None,
             color: Some("pink".to_string()),
         }))
@@ -1459,7 +1820,7 @@ async fn update_note_manages_categories() {
     let result = server
         .update_note(Parameters(UpdateNoteParams {
             note_id: NOTE_ID.to_string(),
-            body: None,
+            body: None, body_file: None,
             add_categories: Some(vec!["Blue Category".to_string()]),
             remove_categories: None,
             color: None,

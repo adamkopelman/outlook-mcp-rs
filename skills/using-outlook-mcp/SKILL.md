@@ -24,9 +24,11 @@ unless they already asked for that exact send in this conversation:
 | `update_event` on a meeting | `send_update` (default true) | `send_update: false` |
 | `delete_event` you organize | `send_cancellation` (default true) | `send_cancellation: false` |
 | `respond_to_meeting` | `send` (default true) | `send: false` |
+| `update_draft` | only with `send: true` | omit `send` (default false) |
 
 When the user's intent is ambiguous ("write to Dana about…"), make a draft and say so.
-To revise a draft before it goes out, use `update_draft`. It saves the draft and never sends it.
+To revise a draft before it goes out, use `update_draft`. It saves the draft and sends it only
+with `send: true`, which needs the same go-ahead as `send_email`.
 
 ## Actions that destroy data
 
@@ -62,16 +64,23 @@ permanent delete. Never set `confirm: true` on your own initiative.
   - Returns the full body: plain text, or HTML with `prefer_html`.
   - Bodies are cut at `max_body_chars` (default 100,000, up to 5,000,000).
   - If `body_truncated` (or `html_truncated`) is true, call again with `max_body_chars` ≥ `body_length` (or `html_length`).
+- **Bodies (all tools that write content):**
+  - Mail tools take exactly one of `body` (plain text), `html_body`, `body_file` or `html_body_file`. Events, tasks and notes take `body` or `body_file`.
+  - The `*_file` forms are local paths to UTF-8 files. Use them for long or image-heavy bodies: write the HTML to a file and pass its path instead of a huge JSON string.
+  - `html: true` (old flag) still works but is deprecated; use `html_body`.
+  - Mail tools also take `categories` (or `add_categories`/`remove_categories` on `update_draft`) and `importance` (`low`/`normal`/`high`).
 - **`update_draft`:**
+  - Pass the draft's id as `email_id` (`draft_id` still works).
   - Only works on unsent drafts. It refuses received or sent mail.
-  - `subject`, `body` and `html_body` replace the current value. Pass `body` or `html_body`, not both.
+  - `subject` and the body replace the current value.
   - `to`, `cc` and `bcc` replace the whole line, and `[]` clears it.
-  - `attachments` are added to the existing ones.
+  - `attachments` and `inline_images` are added to the existing ones.
+  - `send: true` sends the draft after the changes (and alone, sends it as is).
 - **Attachments:**
   - `list_attachments` gives each attachment's `type`, `content_id`, `mime_type`, `hidden`, and `is_inline` (an image shown inside the HTML body, as opposed to a regular attachment).
   - Give `save_attachments` an absolute `save_dir` (or `~/...`). A relative path resolves against the server's working directory, not the user's.
 - **Inline images:**
-  - **Sending:** `send_email` and `create_draft` take `inline_images: [{content_id, path | data_base64}]`. They require `html: true`, and the body references each image as `<img src="cid:CONTENT_ID">`.
+  - **Writing:** on `send_email`, `create_draft`, `reply_email` and `update_draft`, `data:` image URIs in `html_body` (e.g. `<img src="data:image/png;base64,...">`) become real inline attachments automatically. Or pass `inline_images: [{content_id, path | data_base64}]` and reference each as `<img src="cid:CONTENT_ID">` (needs an HTML body).
   - **Reading:** `get_inline_image(email_id, content_id)` returns the image as a `data:` URI (max 10 MB). Add `context_lines` (max 50) to also get the text just before the image.
 - **`list_events`:**
   - The default window is today plus 7 days, with at most 250 results.

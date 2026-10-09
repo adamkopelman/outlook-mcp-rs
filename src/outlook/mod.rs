@@ -47,15 +47,18 @@ pub struct EmailUpdate {
 }
 
 /// All changes `update_draft` can apply to one existing, unsent draft.
-/// Every field except `draft_id` is optional; supplying several applies all
-/// of them in field order and then saves once (the draft is never sent).
-/// `subject`, `body` and `html_body` replace the current value (`body` and
-/// `html_body` are mutually exclusive). `to`/`cc`/`bcc` replace that whole
-/// recipient line, and `Some(vec![])` clears it. `attachments` are local file
-/// paths appended to the existing attachments.
+/// Every field except `email_id` is optional; supplying several applies all
+/// of them in field order and then saves once. `subject`, `body` and
+/// `html_body` replace the current value (`body` and `html_body` are
+/// mutually exclusive; `data:` image URIs in `html_body` become inline
+/// attachments). `to`/`cc`/`bcc` replace that whole recipient line, and
+/// `Some(vec![])` clears it. `attachments` are local file paths appended to
+/// the existing attachments; `inline_images` (which need `html_body`) are
+/// added as hidden Content-ID attachments. `send: true` sends the draft
+/// after the changes are saved (it may be the only "change").
 #[derive(Debug, Clone, Default)]
 pub struct DraftUpdate {
-    pub draft_id: String,
+    pub email_id: String,
     pub subject: Option<String>,
     pub body: Option<String>,
     pub html_body: Option<String>,
@@ -63,6 +66,41 @@ pub struct DraftUpdate {
     pub cc: Option<Vec<String>>,
     pub bcc: Option<Vec<String>>,
     pub attachments: Option<Vec<String>>,
+    pub inline_images: Option<Vec<InlineImage>>,
+    pub add_categories: Option<Vec<String>>,
+    pub remove_categories: Option<Vec<String>>,
+    pub importance: Option<String>, // "low" | "normal" | "high"
+    pub send: bool,
+}
+
+/// A new email for `send_email` / `create_draft`. `data:` image URIs in an
+/// HTML body become inline attachments; `inline_images` need an HTML body.
+#[derive(Debug, Clone, Default)]
+pub struct NewEmail {
+    pub to: Vec<String>,
+    pub subject: String,
+    pub body: MailBody,
+    pub cc: Option<Vec<String>>,
+    pub bcc: Option<Vec<String>>,
+    pub attachments: Option<Vec<String>>,
+    pub inline_images: Option<Vec<InlineImage>>,
+    pub categories: Option<Vec<String>>,
+    pub importance: Option<String>, // "low" | "normal" | "high"
+}
+
+/// A reply for `reply_email`. `body` is put above the quoted original (an
+/// HTML body is prepended to the original's HTML). `send: false` saves the
+/// reply as a draft instead of sending it.
+#[derive(Debug, Clone, Default)]
+pub struct ReplyInput {
+    pub email_id: String,
+    pub body: MailBody,
+    pub reply_all: bool,
+    pub send: bool,
+    pub attachments: Option<Vec<String>>,
+    pub inline_images: Option<Vec<InlineImage>>,
+    pub categories: Option<Vec<String>>,
+    pub importance: Option<String>, // "low" | "normal" | "high"
 }
 
 /// One image to embed in an HTML body as a hidden Content-ID attachment
@@ -268,17 +306,9 @@ pub trait OutlookClient: Send + Sync {
     /// clamped to 1,000..=5,000,000.
     fn get_email(&self, email_id: String, prefer_html: bool, max_body_chars: Option<u32>)
         -> Result<EmailDetail, ToolError>;
-    fn send_email(&self, to: Vec<String>, subject: String, body: String,
-        cc: Option<Vec<String>>, bcc: Option<Vec<String>>, html: bool,
-        attachments: Option<Vec<String>>, inline_images: Option<Vec<InlineImage>>)
-        -> Result<Value, ToolError>;
-    fn create_draft(&self, to: Vec<String>, subject: String, body: String,
-        cc: Option<Vec<String>>, bcc: Option<Vec<String>>, html: bool,
-        attachments: Option<Vec<String>>, inline_images: Option<Vec<InlineImage>>)
-        -> Result<Value, ToolError>;
-    fn reply_email(&self, email_id: String, body: String, reply_all: bool,
-        html: bool, send: bool, attachments: Option<Vec<String>>)
-        -> Result<Value, ToolError>;
+    fn send_email(&self, m: NewEmail) -> Result<Value, ToolError>;
+    fn create_draft(&self, m: NewEmail) -> Result<Value, ToolError>;
+    fn reply_email(&self, r: ReplyInput) -> Result<Value, ToolError>;
     fn update_email(&self, u: EmailUpdate) -> Result<Value, ToolError>;
     fn update_draft(&self, u: DraftUpdate) -> Result<Value, ToolError>;
     /// `permanent = false` moves the email to Deleted Items; `true`
@@ -413,21 +443,24 @@ pub fn validate_recurrence_update(u: &EventUpdate) -> Result<(), ToolError> {
 
 /// Rejects a `DraftUpdate` that can't be applied, before the draft is
 /// touched: `body` and `html_body` together, an update that changes nothing
-/// (an empty `attachments` list counts as nothing), or an attachment path
-/// that isn't an existing file. Called by both `update_draft` implementors.
+/// and doesn't send (an empty list counts as nothing), `inline_images`
+/// without `html_body`, an invalid `importance`, or an attachment path that
+/// isn't an existing file. Called by both `update_draft` implementors.
 pub fn validate_draft_update(u: &DraftUpdate) -> Result<(), ToolError> {
     if u.body.is_some() && u.html_body.is_some() {
-        return Err(ToolError::new("pass either 'body' or 'html_body', not both"));
+        return Err(ToolError::new("pass either `body` or `html_body`, not both"));
     }
-    let attachments = u.attachments.as_deref().unwrap_or(&[]);
-    if u.subject.is_none() && u.body.is_none() && u.html_body.is_none()
-        && u.to.is_none() && u.cc.is_none() && u.bcc.is_none() && attachments.is_empty()
-    {
+    if draft_update_changes(u).is_empty() && !u.send {
         return Err(ToolError::new(
-            "update_draft needs at least one of: subject, body, html_body, to, cc, bcc, attachments",
+            "update_draft needs at least one of: subject, body, html_body, to, cc, bcc, \
+             attachments, inline_images, add_categories, remove_categories, importance, send",
         ));
     }
-    for p in attachments {
+    if u.inline_images.as_ref().is_some_and(|i| !i.is_empty()) && u.html_body.is_none() {
+        return Err(inline_images_need_html());
+    }
+    parse_importance(u.importance.as_deref())?;
+    for p in u.attachments.as_deref().unwrap_or(&[]) {
         if !std::path::Path::new(p).is_file() {
             return Err(ToolError::new(format!("attachment not found: {p}")));
         }
@@ -436,8 +469,11 @@ pub fn validate_draft_update(u: &DraftUpdate) -> Result<(), ToolError> {
 }
 
 /// The `changed` list `update_draft` returns: the supplied fields, in the
-/// order they are applied. Assumes `u` already passed `validate_draft_update`.
+/// order they are applied (`send` is not a change; it's reported by the
+/// status). Empty lists of attachments/inline images/categories count as
+/// not supplied.
 pub fn draft_update_changes(u: &DraftUpdate) -> Vec<&'static str> {
+    let non_empty = |v: &Option<Vec<String>>| v.as_ref().is_some_and(|a| !a.is_empty());
     let mut changed = Vec::new();
     if u.subject.is_some() { changed.push("subject"); }
     if u.body.is_some() { changed.push("body"); }
@@ -445,7 +481,11 @@ pub fn draft_update_changes(u: &DraftUpdate) -> Vec<&'static str> {
     if u.to.is_some() { changed.push("to"); }
     if u.cc.is_some() { changed.push("cc"); }
     if u.bcc.is_some() { changed.push("bcc"); }
-    if u.attachments.as_ref().is_some_and(|a| !a.is_empty()) { changed.push("attachments"); }
+    if non_empty(&u.attachments) { changed.push("attachments"); }
+    if u.inline_images.as_ref().is_some_and(|i| !i.is_empty()) { changed.push("inline_images"); }
+    if non_empty(&u.add_categories) { changed.push("add_categories"); }
+    if non_empty(&u.remove_categories) { changed.push("remove_categories"); }
+    if u.importance.is_some() { changed.push("importance"); }
     changed
 }
 
@@ -828,9 +868,7 @@ pub fn extension_for_mime(mime: &str) -> &'static str {
 pub fn validate_inline_images(images: &[InlineImage], html: bool)
     -> Result<Vec<ValidatedInlineImage>, ToolError> {
     if !html {
-        return Err(ToolError::new(
-            "inline_images requires html=true (reference them in the HTML body as <img src=\"cid:CONTENT_ID\">).",
-        ));
+        return Err(inline_images_need_html());
     }
     let non_empty = |v: &Option<String>| v.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
     let mut out = Vec::with_capacity(images.len());
@@ -881,13 +919,363 @@ pub fn validate_inline_images(images: &[InlineImage], html: bool)
     Ok(out)
 }
 
+// ---- data: URI images in an HTML body (#29, write half) ------------------
+
+/// One image taken out of an HTML body's `data:` URI by
+/// [`extract_data_uri_images`]; attached as a hidden Content-ID attachment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataUriImage {
+    /// Generated Content-ID (`img-` + 16 hex digits of a hash of the MIME
+    /// type and bytes), so the same image always gets the same id.
+    pub content_id: String,
+    /// The URI's declared media type, lowercased (always `image/...`).
+    pub mime_type: String,
+    /// The decoded image bytes.
+    pub data: Vec<u8>,
+}
+
+/// 64-bit FNV-1a, used to derive a stable Content-ID from an image's bytes.
+fn fnv1a64(parts: &[&[u8]]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for part in parts {
+        for &b in *part {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
+}
+
+/// RFC 3986 percent-decoding to bytes. An invalid escape (like `%zz` or a
+/// trailing `%`) is kept literally, as browsers do.
+fn percent_decode(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = |b: u8| (b as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Where a `data:` URI found in the HTML ends: at the closing quote of a
+/// quoted value, or at the first delimiter of an unquoted one.
+#[derive(Clone, Copy)]
+enum UriEnd {
+    Quote(char),
+    Unquoted,
+}
+
+/// Find every `data:image/...` URI used as an HTML attribute value (quoted
+/// with `"` or `'`, or unquoted, e.g. `<img src="data:image/png;base64,...">`)
+/// or as a CSS `url(...)` argument, decode it, and replace it with
+/// `cid:<content id>`. Returns the rewritten HTML and the images, one per
+/// distinct image (the same MIME type and bytes used twice share one
+/// Content-ID and one entry).
+///
+/// - Both `;base64` and percent-encoded (`data:image/svg+xml,%3Csvg...`)
+///   payloads are accepted. HTML entities in the value are decoded first,
+///   then percent-escapes, then base64 (whitespace such as line wrapping is
+///   ignored; `=` padding is optional).
+/// - Non-image `data:` URIs (`data:text/plain,...`, `data:application/pdf;...`,
+///   a missing media type) are left untouched, as is the text `data:` outside
+///   an attribute value or `url(...)`.
+/// - Errors, so nothing is created from a half-converted body: an image
+///   `data:` URI with no `,`, invalid base64, an empty payload, or an
+///   unterminated quoted value.
+pub fn extract_data_uri_images(html: &str) -> Result<(String, Vec<DataUriImage>), ToolError> {
+    use base64::Engine as _;
+    let lenient = base64::engine::GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        base64::engine::GeneralPurposeConfig::new()
+            .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+    );
+    // ASCII lowercasing keeps byte offsets identical to `html`.
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let mut images: Vec<DataUriImage> = Vec::new();
+    let mut copied = 0; // `html[..copied]` is already in `out`
+    let mut search = 0;
+    while let Some(rel) = lower[search..].find("data:") {
+        let start = search + rel;
+        search = start + 5;
+        // The URI must start a value: after `="`, `='`, `=`, `("`, `('` or
+        // `url(`, optionally with whitespace in between.
+        let before = html[..start].trim_end_matches(|c: char| c.is_ascii_whitespace());
+        let end_kind = match before.chars().next_back() {
+            Some(q @ ('"' | '\'')) => {
+                let pre = before[..before.len() - 1].trim_end_matches(|c: char| c.is_ascii_whitespace());
+                let opens_value = pre.ends_with('=')
+                    || (pre.ends_with('(') && lower[..pre.len() - 1].ends_with("url"));
+                if !opens_value {
+                    continue;
+                }
+                UriEnd::Quote(q)
+            }
+            Some('=') => UriEnd::Unquoted,
+            Some('(') if lower[..before.len() - 1].ends_with("url") => UriEnd::Unquoted,
+            _ => continue,
+        };
+        // Only image URIs are converted; check before looking for the end so
+        // other data: URIs are never an error.
+        let header_lower = lower[start + 5..]
+            .split([',', '"', '\'', '>', ')'])
+            .next()
+            .unwrap_or("");
+        let mime_type = header_lower.split(';').next().unwrap_or("").trim().to_string();
+        if !mime_type.starts_with("image/") {
+            continue;
+        }
+        let end = match end_kind {
+            UriEnd::Quote(q) => match html[start..].find(q) {
+                Some(len) => start + html[start..start + len].trim_end().len(),
+                None => {
+                    return Err(ToolError::new(format!(
+                        "html_body: unterminated {mime_type} data: URI (no closing {q})"
+                    )))
+                }
+            },
+            UriEnd::Unquoted => html[start..]
+                .find(|c: char| c.is_ascii_whitespace() || "\"'<>)`".contains(c))
+                .map_or(html.len(), |len| start + len),
+        };
+        let uri = decode_entities(&html[start + 5..end]);
+        let Some((header, payload)) = uri.split_once(',') else {
+            return Err(ToolError::new(format!(
+                "html_body: malformed {mime_type} data: URI (missing ',' before the data)"
+            )));
+        };
+        let is_base64 = header.split(';').skip(1).any(|p| p.trim().eq_ignore_ascii_case("base64"));
+        let mut data = percent_decode(payload);
+        if is_base64 {
+            data.retain(|b| !b.is_ascii_whitespace());
+            data = lenient.decode(&data).map_err(|_| {
+                ToolError::new(format!(
+                    "html_body: a {mime_type} data: URI is not valid base64 (image #{} in the HTML)",
+                    images.len() + 1
+                ))
+            })?;
+        }
+        if data.is_empty() {
+            return Err(ToolError::new(format!("html_body: a {mime_type} data: URI has no data")));
+        }
+        let content_id = format!("img-{:016x}", fnv1a64(&[mime_type.as_bytes(), &[0], &data]));
+        if !images.iter().any(|i| i.content_id == content_id) {
+            images.push(DataUriImage { content_id: content_id.clone(), mime_type, data });
+        }
+        out.push_str(&html[copied..start]);
+        out.push_str("cid:");
+        out.push_str(&content_id);
+        copied = end;
+        search = end;
+    }
+    out.push_str(&html[copied..]);
+    Ok((out, images))
+}
+
+/// Everything a mail-writing tool attaches as inline images: the explicit
+/// `inline_images` (validated by [`validate_inline_images`]) plus the images
+/// pulled out of the HTML's `data:` URIs. Returns the rewritten HTML (data
+/// URIs replaced by `cid:` references) and the full list, explicit images
+/// first. A generated Content-ID that equals an explicit one is an error.
+pub fn prepare_html_images(html: &str, explicit: &[InlineImage])
+    -> Result<(String, Vec<ValidatedInlineImage>), ToolError> {
+    let mut images = validate_inline_images(explicit, true)?;
+    let (html, found) = extract_data_uri_images(html)?;
+    for img in found {
+        if images.iter().any(|i| i.content_id.eq_ignore_ascii_case(&img.content_id)) {
+            return Err(ToolError::new(format!(
+                "duplicate inline image content_id: {:?}", img.content_id
+            )));
+        }
+        images.push(ValidatedInlineImage {
+            filename: format!("{}{}", img.content_id, extension_for_mime(&img.mime_type)),
+            content_id: img.content_id,
+            source: InlineImageSource::Data(img.data),
+            mime_type: img.mime_type,
+        });
+    }
+    Ok((html, images))
+}
+
+/// The final body and inline images for `send_email` / `create_draft` /
+/// `reply_email`: an HTML body goes through [`prepare_html_images`]; a
+/// plain-text body takes no inline images.
+pub fn prepare_mail_body(body: &MailBody, inline_images: &[InlineImage])
+    -> Result<(MailBody, Vec<ValidatedInlineImage>), ToolError> {
+    match body {
+        MailBody::Text(text) => {
+            if !inline_images.is_empty() {
+                return Err(inline_images_need_html());
+            }
+            Ok((MailBody::Text(text.clone()), Vec::new()))
+        }
+        MailBody::Html(html) => {
+            let (html, images) = prepare_html_images(html, inline_images)?;
+            Ok((MailBody::Html(html), images))
+        }
+    }
+}
+
+fn inline_images_need_html() -> ToolError {
+    ToolError::new(
+        "inline_images requires an HTML body: pass html_body (or html_body_file) and reference \
+         each image as <img src=\"cid:CONTENT_ID\">.",
+    )
+}
+
+// ---- body / *_file inputs (#28) ------------------------------------------
+
+/// A mail body: plain text or HTML.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MailBody {
+    Text(String),
+    Html(String),
+}
+
+impl Default for MailBody {
+    fn default() -> Self {
+        MailBody::Text(String::new())
+    }
+}
+
+impl MailBody {
+    pub fn is_html(&self) -> bool {
+        matches!(self, MailBody::Html(_))
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            MailBody::Text(s) | MailBody::Html(s) => s,
+        }
+    }
+}
+
+/// Read a `*_file` input: the whole file as UTF-8 (a leading BOM is dropped).
+/// `param` names the parameter in the error.
+pub fn read_text_file(path: &str, param: &str) -> Result<String, ToolError> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| ToolError::new(format!("{param}: could not read {path:?}: {e}")))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| ToolError::new(format!("{param}: {path:?} is not valid UTF-8 text")))?;
+    Ok(text.strip_prefix('\u{feff}').map(str::to_string).unwrap_or(text))
+}
+
+/// Resolve a text parameter that has a `*_file` sibling (e.g. `body` /
+/// `body_file`): at most one may be given; the file is read as UTF-8.
+pub fn resolve_text_input(value: Option<String>, file: Option<String>, name: &str, file_name: &str)
+    -> Result<Option<String>, ToolError> {
+    match (value, file) {
+        (Some(_), Some(_)) => Err(ToolError::new(format!(
+            "pass either `{name}` or `{file_name}`, not both"
+        ))),
+        (Some(v), None) => Ok(Some(v)),
+        (None, Some(path)) => read_text_file(&path, file_name).map(Some),
+        (None, None) => Ok(None),
+    }
+}
+
+/// The body inputs every mail-writing tool accepts. `html` is the deprecated
+/// flag the compose tools used to take (`html: true` + `body` = HTML).
+#[derive(Debug, Clone, Default)]
+pub struct BodyInputs {
+    pub body: Option<String>,
+    pub html_body: Option<String>,
+    pub body_file: Option<String>,
+    pub html_body_file: Option<String>,
+    pub html: Option<bool>,
+}
+
+/// Turn [`BodyInputs`] into one [`MailBody`] (or `None` when no body source
+/// was given). At most one of `body`, `html_body`, `body_file` and
+/// `html_body_file` may be given. The deprecated `html: true` turns `body` /
+/// `body_file` into HTML; `html: false` together with `html_body` /
+/// `html_body_file` is a contradiction and an error. Files are read here, so
+/// call this before anything is created.
+pub fn resolve_mail_body(b: BodyInputs) -> Result<Option<MailBody>, ToolError> {
+    let given: Vec<&str> = [
+        ("body", b.body.is_some()),
+        ("html_body", b.html_body.is_some()),
+        ("body_file", b.body_file.is_some()),
+        ("html_body_file", b.html_body_file.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(name, set)| set.then_some(name))
+    .collect();
+    if let [first, second, ..] = given[..] {
+        return Err(ToolError::new(format!("pass either `{first}` or `{second}`, not both")));
+    }
+    let html_source = b.html_body.is_some() || b.html_body_file.is_some();
+    if html_source && b.html == Some(false) {
+        let name = if b.html_body.is_some() { "html_body" } else { "html_body_file" };
+        return Err(ToolError::new(format!(
+            "`html: false` contradicts `{name}`; drop the deprecated `html` flag"
+        )));
+    }
+    let as_html = html_source || b.html == Some(true);
+    let text = if let Some(t) = b.body.or(b.html_body) {
+        t
+    } else if let Some(path) = &b.body_file {
+        read_text_file(path, "body_file")?
+    } else if let Some(path) = &b.html_body_file {
+        read_text_file(path, "html_body_file")?
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(if as_html { MailBody::Html(text) } else { MailBody::Text(text) }))
+}
+
+/// [`resolve_mail_body`] for a tool where a body is required.
+pub fn require_mail_body(b: BodyInputs, tool: &str) -> Result<MailBody, ToolError> {
+    resolve_mail_body(b)?.ok_or_else(|| {
+        ToolError::new(format!(
+            "{tool} needs a body: pass one of `body`, `html_body`, `body_file` or `html_body_file`"
+        ))
+    })
+}
+
+/// Validate an optional importance word, returning its `OlImportance` id.
+pub fn parse_importance(importance: Option<&str>) -> Result<Option<i32>, ToolError> {
+    importance
+        .map(|imp| {
+            crate::constants::importance_name_to_id(imp).ok_or_else(|| {
+                ToolError::new(format!(
+                    "invalid importance {imp:?}: expected \"low\", \"normal\", or \"high\""
+                ))
+            })
+        })
+        .transpose()
+}
+
+/// `current` with `add` appended (skipping ones already present) and `remove`
+/// dropped, all case-insensitively.
+pub fn merge_categories(mut current: Vec<String>, add: &[String], remove: &[String]) -> Vec<String> {
+    for a in add {
+        if !current.iter().any(|c| c.eq_ignore_ascii_case(a)) {
+            current.push(a.clone());
+        }
+    }
+    current.retain(|c| !remove.iter().any(|r| r.eq_ignore_ascii_case(c)));
+    current
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         com_recurrence_interval, common_free, create_event_status, friendly_recurrence_interval,
         parse_freebusy_slots, take_page, validate_recurrence, validate_recurrence_update,
         EventUpdate, RecurrenceInput, permanent_delete_needs_move, require_empty_confirm,
-        draft_update_changes, validate_draft_update, DraftUpdate,
+        draft_update_changes, validate_draft_update, DraftUpdate, InlineImage, merge_categories,
+        parse_importance,
     };
     use std::cell::Cell;
 
@@ -1181,7 +1569,7 @@ mod tests {
     }
 
     fn draft(id: &str) -> DraftUpdate {
-        DraftUpdate { draft_id: id.to_string(), ..Default::default() }
+        DraftUpdate { email_id: id.to_string(), ..Default::default() }
     }
 
     #[test]
@@ -1238,6 +1626,307 @@ mod tests {
         };
         assert_eq!(draft_update_changes(&u), vec!["subject", "body", "to", "bcc", "attachments"]);
         assert!(draft_update_changes(&DraftUpdate { attachments: Some(vec![]), ..draft("d") }).is_empty());
+        let u = DraftUpdate {
+            importance: Some("high".into()), remove_categories: Some(vec!["Old".into()]),
+            add_categories: Some(vec!["New".into()]), html_body: Some("<p>x</p>".into()),
+            inline_images: Some(vec![InlineImage { content_id: "a".into(), ..Default::default() }]),
+            ..draft("d")
+        };
+        assert_eq!(
+            draft_update_changes(&u),
+            vec!["html_body", "inline_images", "add_categories", "remove_categories", "importance"]
+        );
+    }
+
+    #[test]
+    fn validate_draft_update_send_alone_is_enough() {
+        assert!(validate_draft_update(&DraftUpdate { send: true, ..draft("d") }).is_ok());
+        assert!(draft_update_changes(&DraftUpdate { send: true, ..draft("d") }).is_empty());
+    }
+
+    #[test]
+    fn validate_draft_update_checks_importance_and_inline_images() {
+        let u = DraftUpdate { importance: Some("urgent".into()), ..draft("d") };
+        assert!(validate_draft_update(&u).unwrap_err().to_string().contains("invalid importance"));
+        let img = InlineImage { content_id: "a".into(), data_base64: Some("aGk=".into()), ..Default::default() };
+        let u = DraftUpdate { inline_images: Some(vec![img.clone()]), body: Some("plain".into()), ..draft("d") };
+        assert!(validate_draft_update(&u).unwrap_err().to_string().contains("html_body"));
+        let u = DraftUpdate { inline_images: Some(vec![img]), html_body: Some("<p/>".into()), ..draft("d") };
+        assert!(validate_draft_update(&u).is_ok());
+    }
+
+    #[test]
+    fn merge_categories_adds_and_removes_caselessly() {
+        let cur = vec!["Red".to_string(), "Blue".to_string()];
+        let got = merge_categories(cur, &["red".into(), "Green".into()], &["BLUE".into()]);
+        assert_eq!(got, vec!["Red".to_string(), "Green".to_string()]);
+    }
+
+    #[test]
+    fn parse_importance_maps_and_rejects() {
+        assert_eq!(parse_importance(None).unwrap(), None);
+        assert_eq!(parse_importance(Some("High")).unwrap(), Some(crate::constants::OL_IMPORTANCE_HIGH));
+        assert!(parse_importance(Some("meh")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod body_input_tests {
+    use super::{read_text_file, require_mail_body, resolve_mail_body, resolve_text_input, BodyInputs, MailBody};
+
+    fn temp_file(name: &str, bytes: &[u8]) -> String {
+        let dir = std::env::temp_dir().join(format!("outlook-mcp-rs-body-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    fn inputs() -> BodyInputs {
+        BodyInputs::default()
+    }
+
+    #[test]
+    fn plain_and_html_strings() {
+        let b = resolve_mail_body(BodyInputs { body: Some("hi".into()), ..inputs() }).unwrap();
+        assert_eq!(b, Some(MailBody::Text("hi".into())));
+        let b = resolve_mail_body(BodyInputs { html_body: Some("<p>hi</p>".into()), ..inputs() }).unwrap();
+        assert_eq!(b, Some(MailBody::Html("<p>hi</p>".into())));
+        assert_eq!(resolve_mail_body(inputs()).unwrap(), None);
+    }
+
+    #[test]
+    fn deprecated_html_flag() {
+        // html=true + body = HTML.
+        let b = resolve_mail_body(BodyInputs { body: Some("<b>x</b>".into()), html: Some(true), ..inputs() }).unwrap();
+        assert_eq!(b, Some(MailBody::Html("<b>x</b>".into())));
+        // html=false + body = text; html=true + html_body is redundant but fine.
+        let b = resolve_mail_body(BodyInputs { body: Some("x".into()), html: Some(false), ..inputs() }).unwrap();
+        assert_eq!(b, Some(MailBody::Text("x".into())));
+        let b = resolve_mail_body(BodyInputs { html_body: Some("<p/>".into()), html: Some(true), ..inputs() }).unwrap();
+        assert_eq!(b, Some(MailBody::Html("<p/>".into())));
+        // html=false contradicts html_body.
+        let e = resolve_mail_body(BodyInputs { html_body: Some("<p/>".into()), html: Some(false), ..inputs() })
+            .unwrap_err().to_string();
+        assert!(e.contains("`html: false`") && e.contains("`html_body`"), "{e}");
+    }
+
+    #[test]
+    fn sources_are_mutually_exclusive() {
+        let e = resolve_mail_body(BodyInputs { body: Some("a".into()), html_body: Some("b".into()), ..inputs() })
+            .unwrap_err().to_string();
+        assert_eq!(e, "pass either `body` or `html_body`, not both");
+        let e = resolve_mail_body(BodyInputs { html_body: Some("a".into()), html_body_file: Some("f".into()), ..inputs() })
+            .unwrap_err().to_string();
+        assert_eq!(e, "pass either `html_body` or `html_body_file`, not both");
+        let e = resolve_mail_body(BodyInputs { body_file: Some("a".into()), html_body_file: Some("f".into()), ..inputs() })
+            .unwrap_err().to_string();
+        assert_eq!(e, "pass either `body_file` or `html_body_file`, not both");
+    }
+
+    #[test]
+    fn files_are_read_as_utf8() {
+        let html = temp_file("body.html", "\u{feff}<p>שלום</p>".as_bytes());
+        let b = resolve_mail_body(BodyInputs { html_body_file: Some(html), ..inputs() }).unwrap();
+        assert_eq!(b, Some(MailBody::Html("<p>שלום</p>".into())));
+        let txt = temp_file("body.txt", b"plain");
+        let b = resolve_mail_body(BodyInputs { body_file: Some(txt.clone()), ..inputs() }).unwrap();
+        assert_eq!(b, Some(MailBody::Text("plain".into())));
+        let b = resolve_mail_body(BodyInputs { body_file: Some(txt), html: Some(true), ..inputs() }).unwrap();
+        assert_eq!(b, Some(MailBody::Html("plain".into())));
+    }
+
+    #[test]
+    fn bad_files_error_with_the_parameter_name() {
+        let e = read_text_file("/definitely/not/here.html", "html_body_file").unwrap_err().to_string();
+        assert!(e.starts_with("html_body_file: could not read"), "{e}");
+        let bin = temp_file("bin.dat", &[0xff, 0xfe, 0x00, 0x80]);
+        let e = read_text_file(&bin, "body_file").unwrap_err().to_string();
+        assert!(e.contains("not valid UTF-8"), "{e}");
+    }
+
+    #[test]
+    fn required_body() {
+        let e = require_mail_body(inputs(), "send_email").unwrap_err().to_string();
+        assert!(e.starts_with("send_email needs a body"), "{e}");
+        assert_eq!(require_mail_body(BodyInputs { body: Some(String::new()), ..inputs() }, "x").unwrap(),
+            MailBody::Text(String::new()));
+    }
+
+    #[test]
+    fn text_input_with_file_sibling() {
+        assert_eq!(resolve_text_input(None, None, "body", "body_file").unwrap(), None);
+        assert_eq!(resolve_text_input(Some("a".into()), None, "body", "body_file").unwrap(), Some("a".into()));
+        let f = temp_file("note.txt", b"from file");
+        assert_eq!(resolve_text_input(None, Some(f.clone()), "body", "body_file").unwrap(), Some("from file".into()));
+        let e = resolve_text_input(Some("a".into()), Some(f), "body", "body_file").unwrap_err().to_string();
+        assert_eq!(e, "pass either `body` or `body_file`, not both");
+    }
+}
+
+#[cfg(test)]
+mod data_uri_tests {
+    use super::{
+        extract_data_uri_images, prepare_html_images, prepare_mail_body, InlineImage,
+        InlineImageSource, MailBody,
+    };
+
+    /// A 1x1 transparent PNG.
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    /// "GIF89a" + filler.
+    const GIF: &str = "R0lGODlhAQABAAAAACw=";
+
+    fn png_bytes() -> Vec<u8> {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.decode(PNG).unwrap()
+    }
+
+    #[test]
+    fn double_quoted_src_is_rewritten() {
+        let html = format!("<p>Hi</p><img src=\"data:image/png;base64,{PNG}\" alt=\"x\">");
+        let (out, imgs) = extract_data_uri_images(&html).unwrap();
+        assert_eq!(imgs.len(), 1);
+        let cid = &imgs[0].content_id;
+        assert!(cid.starts_with("img-") && cid.len() == 20, "{cid}");
+        assert_eq!(out, format!("<p>Hi</p><img src=\"cid:{cid}\" alt=\"x\">"));
+        assert_eq!(imgs[0].mime_type, "image/png");
+        assert_eq!(imgs[0].data, png_bytes());
+    }
+
+    #[test]
+    fn single_quotes_whitespace_and_case() {
+        let html = format!("<IMG SRC = '  DATA:Image/PNG;BASE64,{}\n{}  ' >", &PNG[..30], &PNG[30..]);
+        let (out, imgs) = extract_data_uri_images(&html).unwrap();
+        assert_eq!(imgs.len(), 1);
+        assert_eq!(imgs[0].mime_type, "image/png");
+        assert_eq!(imgs[0].data, png_bytes());
+        assert_eq!(out, format!("<IMG SRC = '  cid:{}  ' >", imgs[0].content_id));
+    }
+
+    #[test]
+    fn unquoted_attribute_and_css_url() {
+        let html = format!(
+            "<img src=data:image/png;base64,{PNG}><div style=\"background:url(data:image/gif;base64,{GIF})\">\
+             <td style='background-image: url(\"data:image/png;base64,{PNG}\")'>"
+        );
+        let (out, imgs) = extract_data_uri_images(&html).unwrap();
+        assert_eq!(imgs.len(), 2, "same PNG twice shares one entry");
+        let (png, gif) = (&imgs[0].content_id, &imgs[1].content_id);
+        assert_eq!(imgs[1].mime_type, "image/gif");
+        assert_eq!(
+            out,
+            format!(
+                "<img src=cid:{png}><div style=\"background:url(cid:{gif})\">\
+                 <td style='background-image: url(\"cid:{png}\")'>"
+            )
+        );
+    }
+
+    #[test]
+    fn duplicates_reuse_one_content_id() {
+        let html = format!("<img src=\"data:image/png;base64,{PNG}\"><img src='data:image/png;base64,{PNG}'>");
+        let (out, imgs) = extract_data_uri_images(&html).unwrap();
+        assert_eq!(imgs.len(), 1);
+        assert_eq!(out.matches(&format!("cid:{}", imgs[0].content_id)).count(), 2);
+        // Same bytes under another MIME type is a different image.
+        let html = format!("<img src=\"data:image/png;base64,{PNG}\"><img src=\"data:image/x-png;base64,{PNG}\">");
+        assert_eq!(extract_data_uri_images(&html).unwrap().1.len(), 2);
+        // Stable across calls.
+        let a = extract_data_uri_images(&format!("<img src=\"data:image/png;base64,{PNG}\">")).unwrap().1;
+        assert_eq!(a[0].content_id, imgs[0].content_id);
+    }
+
+    #[test]
+    fn url_encoded_payload() {
+        let html = "<img src=\"data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%3E%3C/svg%3E\">";
+        // The ' inside the double-quoted value does not end it.
+        let (out, imgs) = extract_data_uri_images(html).unwrap();
+        assert_eq!(imgs[0].mime_type, "image/svg+xml");
+        assert_eq!(imgs[0].data, b"<svg xmlns='http://www.w3.org/2000/svg'></svg>");
+        assert_eq!(out, format!("<img src=\"cid:{}\">", imgs[0].content_id));
+        // Percent-escaped base64 and missing padding are accepted; invalid
+        // escapes are kept literally.
+        let esc = PNG.replace('+', "%2B").trim_end_matches('=').to_string();
+        let (_, imgs) = extract_data_uri_images(&format!("<img src=\"data:image/png;base64,{esc}\">")).unwrap();
+        assert_eq!(imgs[0].data, png_bytes());
+        let (_, imgs) = extract_data_uri_images("<img src=\"data:image/x-raw,a%zzb%4\">").unwrap();
+        assert_eq!(imgs[0].data, b"a%zzb%4");
+    }
+
+    #[test]
+    fn html_entities_in_the_value_are_decoded() {
+        let (_, imgs) = extract_data_uri_images("<img src=\"data:image/x-raw,a&amp;b\">").unwrap();
+        assert_eq!(imgs[0].data, b"a&b");
+    }
+
+    #[test]
+    fn invalid_base64_is_an_error() {
+        let e = extract_data_uri_images("<img src=\"data:image/png;base64,@@not-base64@@\">").unwrap_err().to_string();
+        assert!(e.contains("not valid base64"), "{e}");
+        let e = extract_data_uri_images("<img src=\"data:image/png;base64,\">").unwrap_err().to_string();
+        assert!(e.contains("no data"), "{e}");
+        let e = extract_data_uri_images("<img src=\"data:image/png;base64\">").unwrap_err().to_string();
+        assert!(e.contains("missing ','"), "{e}");
+        let e = extract_data_uri_images(&format!("<img src=\"data:image/png;base64,{PNG}")).unwrap_err().to_string();
+        assert!(e.contains("unterminated"), "{e}");
+    }
+
+    #[test]
+    fn non_image_and_non_attribute_data_uris_are_left_alone() {
+        for html in [
+            "<a href=\"data:text/plain;base64,aGk=\">x</a>",
+            "<a href=\"data:application/pdf;base64,!!!\">x</a>",
+            "<a href=\"data:;base64,aGk=\">x</a>",
+            "<a href=\"data:,hello\">x</a>",
+            "<p>Paste data:image/png;base64,iVBOR here</p>",
+            "<p>He said \"data:image/png;base64,iVBOR\"</p>",
+            "<p>func(data:image/png;base64,iVBOR)</p>",
+            "<p>no uris at all — שלום</p>",
+            "",
+        ] {
+            let (out, imgs) = extract_data_uri_images(html).unwrap();
+            assert_eq!(out, html);
+            assert!(imgs.is_empty(), "{html}");
+        }
+    }
+
+    #[test]
+    fn multibyte_text_around_uris_survives() {
+        let html = format!("<p>שלום</p><img src=\"data:image/png;base64,{PNG}\"><p>עולם</p>");
+        let (out, imgs) = extract_data_uri_images(&html).unwrap();
+        assert_eq!(out, format!("<p>שלום</p><img src=\"cid:{}\"><p>עולם</p>", imgs[0].content_id));
+    }
+
+    #[test]
+    fn prepare_html_images_merges_explicit_and_embedded() {
+        let html = format!("<img src=\"cid:logo\"><img src=\"data:image/png;base64,{PNG}\">");
+        let explicit = [InlineImage { content_id: "logo".into(), data_base64: Some(GIF.into()), ..Default::default() }];
+        let (out, imgs) = prepare_html_images(&html, &explicit).unwrap();
+        assert_eq!(imgs.len(), 2);
+        assert_eq!(imgs[0].content_id, "logo");
+        assert_eq!(imgs[1].mime_type, "image/png");
+        assert_eq!(imgs[1].filename, format!("{}.png", imgs[1].content_id));
+        assert!(matches!(&imgs[1].source, InlineImageSource::Data(d) if *d == png_bytes()));
+        assert_eq!(out, format!("<img src=\"cid:logo\"><img src=\"cid:{}\">", imgs[1].content_id));
+        // An explicit image that reuses a generated id is a duplicate.
+        let cid = imgs[1].content_id.clone();
+        let clash = [InlineImage { content_id: cid.to_uppercase(), data_base64: Some(GIF.into()), ..Default::default() }];
+        assert!(prepare_html_images(&html, &clash).unwrap_err().to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn prepare_mail_body_text_vs_html() {
+        let img = [InlineImage { content_id: "a".into(), data_base64: Some(GIF.into()), ..Default::default() }];
+        let e = prepare_mail_body(&MailBody::Text("x".into()), &img).unwrap_err().to_string();
+        assert!(e.contains("requires an HTML body"), "{e}");
+        // A text body is never scanned for data: URIs.
+        let text = format!("src=\"data:image/png;base64,{PNG}\"");
+        let (body, imgs) = prepare_mail_body(&MailBody::Text(text.clone()), &[]).unwrap();
+        assert_eq!(body, MailBody::Text(text));
+        assert!(imgs.is_empty());
+        let (body, imgs) = prepare_mail_body(&MailBody::Html("<img src=\"cid:a\">".into()), &img).unwrap();
+        assert_eq!(body, MailBody::Html("<img src=\"cid:a\">".into()));
+        assert_eq!(imgs.len(), 1);
     }
 }
 
@@ -1426,7 +2115,7 @@ mod inline_image_tests {
 
     #[test]
     fn requires_html() {
-        assert!(err(&[b64("logo", PNG_1X1_B64)], false).contains("html=true"));
+        assert!(err(&[b64("logo", PNG_1X1_B64)], false).contains("html_body"));
     }
 
     #[test]
