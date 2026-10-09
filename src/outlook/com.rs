@@ -143,9 +143,40 @@ pub fn string_from_utf16(wide: &[u16]) -> String {
     String::from_utf16_lossy(wide)
 }
 
+/// Maps a Windows `LOCALE_IFIRSTDAYOFWEEK` value (`"0"` = Monday through
+/// `"6"` = Sunday) to a weekday. Surrounding whitespace and NULs are ignored;
+/// anything else is `None`.
+pub fn first_day_of_week_from_locale_value(value: &str) -> Option<chrono::Weekday> {
+    use chrono::Weekday::*;
+    match value.trim_matches(|c: char| c == '\0' || c.is_whitespace()) {
+        "0" => Some(Mon),
+        "1" => Some(Tue),
+        "2" => Some(Wed),
+        "3" => Some(Thu),
+        "4" => Some(Fri),
+        "5" => Some(Sat),
+        "6" => Some(Sun),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_day_of_week_maps_every_locale_value() {
+        use chrono::Weekday::*;
+        let expected = [Mon, Tue, Wed, Thu, Fri, Sat, Sun];
+        for (i, day) in expected.into_iter().enumerate() {
+            assert_eq!(first_day_of_week_from_locale_value(&i.to_string()), Some(day));
+        }
+        assert_eq!(first_day_of_week_from_locale_value("6\0"), Some(Sun));
+        assert_eq!(first_day_of_week_from_locale_value(" 5 "), Some(Sat));
+        for bad in ["", "7", "-1", "06", "Monday", "\0"] {
+            assert_eq!(first_day_of_week_from_locale_value(bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn make_and_parse_item_id_round_trip() {
@@ -336,7 +367,7 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 use windows::core::{Error as WinError, Result as WinResult, BSTR, GUID, PCWSTR};
-use windows::Win32::Globalization::GetUserDefaultLCID;
+use windows::Win32::Globalization::{GetLocaleInfoEx, GetUserDefaultLCID, LOCALE_IFIRSTDAYOFWEEK};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSIDFromProgID, IDispatch,
     CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, DISPATCH_METHOD, DISPATCH_PROPERTYGET,
@@ -346,6 +377,21 @@ use windows::Win32::System::Variant::{
     SystemTimeToVariantTime, VariantTimeToSystemTime, VARIANT, VT_DATE,
 };
 use windows::Win32::Foundation::SYSTEMTIME;
+
+/// The first day of the week from the current Windows user's regional
+/// settings (`GetLocaleInfoEx(LOCALE_NAME_USER_DEFAULT, LOCALE_IFIRSTDAYOFWEEK)`),
+/// which is what `start_of_week` / `end_of_week` in the date grammar use.
+/// Looked up on every call (it is cheap, and the user can change the setting
+/// while the server runs). Falls back to Monday (ISO 8601) only if the API
+/// fails or returns an unexpected value.
+pub fn user_first_day_of_week() -> chrono::Weekday {
+    let mut buf = [0u16; 8];
+    // A null locale name is LOCALE_NAME_USER_DEFAULT. The return value is the
+    // number of UTF-16 units written, including the terminating NUL; 0 = error.
+    let written = unsafe { GetLocaleInfoEx(PCWSTR::null(), LOCALE_IFIRSTDAYOFWEEK, Some(&mut buf)) };
+    let len = usize::try_from(written).unwrap_or(0).min(buf.len());
+    first_day_of_week_from_locale_value(&string_from_utf16(&buf[..len])).unwrap_or(chrono::Weekday::Mon)
+}
 
 /// One per COM call (mirrors `pythoncom.CoInitialize()` inside `client.py`'s
 /// `@_com` decorator): initializes this OS thread for apartment-threaded COM
