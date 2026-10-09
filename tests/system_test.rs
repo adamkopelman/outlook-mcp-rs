@@ -10,7 +10,10 @@
 //! but only after cleanup has already happened.
 
 use outlook_mcp_rs::outlook::client::WindowsOutlookClient;
+use outlook_mcp_rs::outlook::read::single;
+use outlook_mcp_rs::outlook::ReadOptions;
 use outlook_mcp_rs::outlook::{
+    MailBody, NewEmail, ReplyInput,
     CreateEventInput, EmailQuery, EmailUpdate, EventQuery, EventUpdate, OutlookClient,
 };
 use outlook_mcp_rs::outlook::types::EmailSummary;
@@ -158,8 +161,11 @@ fn system_test_plans_1_to_9() {
     ];
     for (sid, suffix, attachments) in &seed_specs {
         let subject = format!("{TAG} {suffix}");
-        match c.send_email(vec![SELF_ADDR.to_string()], subject.clone(),
-            format!("Seed data for system test: {suffix}."), None, None, false, attachments.clone(), None) {
+        match c.send_email(NewEmail {
+            to: vec![SELF_ADDR.to_string()], subject: subject.clone(),
+            body: MailBody::Text(format!("Seed data for system test: {suffix}.")),
+            attachments: attachments.clone(), ..Default::default()
+        }) {
             Ok(_) => {
                 match find_by_subject(&c, "inbox", &subject) {
                     Some(found) => {
@@ -351,8 +357,8 @@ fn system_test_plans_1_to_9() {
     println!("\n--- A4: get_email ---");
     if let Ok(list) = c.list_emails(EmailQuery { count: 1, ..eq_default("inbox") }) {
         if let Some(first) = list.first() {
-            let plain_ok = c.get_email(first.id.clone(), false, None).is_ok();
-            let html_ok = c.get_email(first.id.clone(), true, None).is_ok();
+            let plain_ok = single(c.get_email(vec![first.id.clone()], &ReadOptions::default())).is_ok();
+            let html_ok = single(c.get_email(vec![first.id.clone()], &ReadOptions { html_body: true, ..ReadOptions::default() })).is_ok();
             r.record("A4", plain_ok && html_ok, format!("prefer_html false/true both ok: {plain_ok}/{html_ok}"));
         } else {
             r.record("A4", false, "no inbox email available to test get_email against");
@@ -363,9 +369,11 @@ fn system_test_plans_1_to_9() {
 
     // ================= A5: send_email external =================
     println!("\n--- A5: send_email external ---");
-    match c.send_email(vec![EXTERNAL_ADDR.to_string()], format!("{TAG} send_email external"),
-        "Automated system test - Plans 1-9 live verification, 2026-07-16.".to_string(),
-        None, None, false, None, None) {
+    match c.send_email(NewEmail {
+        to: vec![EXTERNAL_ADDR.to_string()], subject: format!("{TAG} send_email external"),
+        body: MailBody::Text("Automated system test - Plans 1-9 live verification, 2026-07-16.".to_string()),
+        ..Default::default()
+    }) {
         Ok(v) => r.record("A5", v["status"] == "sent", format!("{v}")),
         Err(e) => r.record("A5", false, format!("send_email failed: {e}")),
     }
@@ -374,12 +382,15 @@ fn system_test_plans_1_to_9() {
     println!("\n--- A6: send_email self-loop ---");
     let a6_subject = format!("{TAG} send_email self-loop");
     let mut a6_id: Option<String> = None;
-    match c.send_email(vec![SELF_ADDR.to_string()], a6_subject.clone(), "Self-loop test.".to_string(), None, None, false, None, None) {
+    match c.send_email(NewEmail {
+        to: vec![SELF_ADDR.to_string()], subject: a6_subject.clone(),
+        body: MailBody::Text("Self-loop test.".to_string()), ..Default::default()
+    }) {
         Ok(_) => {
             match find_by_subject(&c, "inbox", &a6_subject) {
                 Some(found) => {
-                    let detail_ok = c.get_email(found.id.clone(), false, None)
-                        .map(|d| d.body.contains("Self-loop test."))
+                    let detail_ok = single(c.get_email(vec![found.id.clone()], &ReadOptions::default()))
+                        .map(|d| d.body.as_deref().unwrap_or_default().contains("Self-loop test."))
                         .unwrap_or(false);
                     r.record("A6", detail_ok, format!("landed as {} and body round-trips: {detail_ok}", found.id));
                     a6_id = Some(found.id.clone());
@@ -393,8 +404,10 @@ fn system_test_plans_1_to_9() {
 
     // ================= A7: create_draft =================
     println!("\n--- A7: create_draft ---");
-    match c.create_draft(vec![EXTERNAL_ADDR.to_string()], format!("{TAG} draft probe"),
-        "Draft, never sent.".to_string(), None, None, false, None, None) {
+    match c.create_draft(NewEmail {
+        to: vec![EXTERNAL_ADDR.to_string()], subject: format!("{TAG} draft probe"),
+        body: MailBody::Text("Draft, never sent.".to_string()), ..Default::default()
+    }) {
         Ok(v) => {
             if let Some(id) = v["id"].as_str() {
                 let found_in_drafts = c.list_emails(EmailQuery { query: Some("draft probe".into()), ..eq_default("drafts") })
@@ -415,7 +428,9 @@ fn system_test_plans_1_to_9() {
     // ================= A8: reply_email =================
     println!("\n--- A8: reply_email ---");
     if let Some(id) = a6_id.clone() {
-        match c.reply_email(id, "Reply body.".to_string(), false, false, true, None) {
+        match c.reply_email(ReplyInput {
+            email_id: id, body: MailBody::Text("Reply body.".to_string()), send: true, ..Default::default()
+        }) {
             Ok(_) => {
                 match find_by_subject_matching(&c, "inbox", "send_email self-loop", |e| e.subject.starts_with("RE:")) {
                     Some(found) => {
@@ -448,7 +463,7 @@ fn system_test_plans_1_to_9() {
                 Err(e) => { ok = false; notes.push(format!("{label} FAILED: {e}")); }
             }
         }
-        let has_orange = c.get_email(id.clone(), false, None)
+        let has_orange = single(c.get_email(vec![id.clone()], &ReadOptions::default()))
             .map(|d| d.summary.categories.iter().any(|cat| cat == "Orange Category"))
             .unwrap_or(false);
         ok &= has_orange;
@@ -515,16 +530,19 @@ fn system_test_plans_1_to_9() {
         scratch_files.push(a12_src.clone());
         let save_dir = std::env::temp_dir().join("outlook-mcp-rs-systest-a12-saved");
         let subject = format!("{TAG} attachment probe");
-        match c.send_email(vec![SELF_ADDR.to_string()], subject.clone(), "see attached".to_string(),
-            None, None, false, Some(vec![a12_src.to_string_lossy().to_string()]), None) {
+        match c.send_email(NewEmail {
+            to: vec![SELF_ADDR.to_string()], subject: subject.clone(),
+            body: MailBody::Text("see attached".to_string()),
+            attachments: Some(vec![a12_src.to_string_lossy().to_string()]), ..Default::default()
+        }) {
             Ok(_) => {
                 match find_by_subject(&c, "inbox", &subject) {
                     Some(found) => {
                         cleanup_emails.push(("A12".to_string(), found.id.clone()));
-                        match c.list_attachments(found.id.clone()) {
+                        match single(c.list_attachments(vec![found.id.clone()])) {
                             Ok(atts) if !atts.is_empty() => {
                                 let fname = atts[0].filename.clone();
-                                match c.save_attachments(found.id.clone(), save_dir.to_string_lossy().to_string(), None) {
+                                match c.save_attachments(found.id.clone(), save_dir.to_string_lossy().to_string(), None, None) {
                                     Ok(results) => {
                                         let saved_path = results.iter()
                                             .find(|v| v["filename"] == fname)
@@ -643,7 +661,7 @@ fn system_test_plans_1_to_9() {
     // ================= B3: get_event =================
     println!("\n--- B3: get_event ---");
     if let Some(id) = b2_id.clone() {
-        match c.get_event(id) {
+        match single(c.get_event(vec![id], &ReadOptions::default())) {
             Ok(d) => {
                 let ok = d.summary.show_as == "busy"
                     && d.summary.categories.iter().any(|c| c == "Purple Category")
@@ -671,7 +689,7 @@ fn system_test_plans_1_to_9() {
             if let Some(id) = v["id"].as_str() {
                 b4_id = Some(id.to_string());
                 cleanup_events.push(("B4".to_string(), id.to_string(), true));
-                let detail_ok = c.get_event(id.to_string())
+                let detail_ok = single(c.get_event(vec![id.to_string()], &ReadOptions::default()))
                     .map(|d| d.summary.required_attendees.contains(EXTERNAL_ADDR) && !d.summary.is_recurring)
                     .unwrap_or(false);
                 r.record("B4", sent && detail_ok, format!("status={} attendee/recurring confirmed={detail_ok}", v["status"]));
@@ -738,7 +756,7 @@ fn system_test_plans_1_to_9() {
             send_update: true, recurrence: None, clear_recurrence: false,
         }) {
             Ok(_) => {
-                let after_add = c.get_event(id.clone()).ok();
+                let after_add = single(c.get_event(vec![id.clone()], &ReadOptions::default())).ok();
                 let add_ok = after_add.as_ref().map(|d| {
                     d.summary.subject == renamed && d.summary.location == "Room 7"
                         && d.summary.show_as == "tentative"
@@ -774,7 +792,7 @@ fn system_test_plans_1_to_9() {
             add_optional_attendees: None, remove_attendees: None, recurrence: None, clear_recurrence: false,
         }) {
             Ok(_) => {
-                let is_meeting = c.get_event(id.clone()).map(|d| d.summary.is_meeting
+                let is_meeting = single(c.get_event(vec![id.clone()], &ReadOptions::default())).map(|d| d.summary.is_meeting
                     && d.summary.required_attendees.contains(EXTERNAL_ADDR)).unwrap_or(false);
                 match c.update_event(EventUpdate {
                     event_id: id, remove_attendees: Some(vec![EXTERNAL_ADDR.to_string()]),

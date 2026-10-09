@@ -29,8 +29,14 @@ use crate::outlook::{
     CheckAvailabilityInput, permanent_delete_needs_move, require_empty_confirm, CreateEventInput,
     EmailQuery, EmailUpdate, EventQuery, EventUpdate, NoteQuery, NoteUpdate, OutlookClient,
     RecurrenceInput, TaskQuery, TaskUpdate, text_before_cid, draft_update_changes,
-    validate_draft_update, DraftUpdate, InlineImage, InlineImageSource, ValidatedInlineImage,
-    validate_inline_images,
+    validate_draft_update, DraftUpdate, InlineImageSource, ValidatedInlineImage, MailBody,
+    NewEmail, ReplyInput, merge_categories, parse_importance, prepare_html_images,
+    prepare_mail_body,
+};
+use crate::outlook::read::{
+    cid_references, image_extension, outlook_date, output_file_path, prepare_output_dir,
+    replace_cid_references, resolve_save_dir, shape_field, write_output_file, BatchResult, BodyOut,
+    CidRewrite, ReadOptions, ReadTool,
 };
 
 /// Matches `MAX_EMAIL_COUNT` in `client.py`. Larger result sets are paged
@@ -46,20 +52,12 @@ const PR_SMTP_ADDRESS: &str = "http://schemas.microsoft.com/mapi/proptag/0x39FE0
 /// recurring appointment without an end date expands forever under
 /// `IncludeRecurrences`.
 const MAX_CALENDAR_ITEMS: usize = 250;
-/// Matches `MAX_BODY_CHARS` in `client.py`. The default body cut, and the
-/// fixed cut for `get_event`/`get_note`.
-const MAX_BODY_CHARS: usize = 100_000;
 /// Largest attachment `get_inline_image` returns inline (base64 in the tool
 /// result); anything bigger belongs on disk via `save_attachments`.
 const MAX_INLINE_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 /// Upper bound on items scanned client-side when the DASL text search for a
 /// non-ASCII query comes back empty (see `list_emails`).
 const MAX_SCAN_ITEMS: i32 = 2000;
-/// Bounds for `get_email`'s caller-chosen `max_body_chars` (large HTML mail
-/// with inline images can run to megabytes). Match `MIN_BODY_CHARS_LIMIT` /
-/// `MAX_BODY_CHARS_LIMIT` in `client.py`.
-const MIN_BODY_CHARS_LIMIT: usize = 1_000;
-const MAX_BODY_CHARS_LIMIT: usize = 5_000_000;
 
 /// Lets `?` turn a `windows::core::Error` into a [`ToolError`] anywhere in
 /// this module, so COM-plumbing calls (`call_method`, `get_property`, …) and
@@ -194,52 +192,6 @@ fn resolve_folder(ns: &IDispatch, folder: Option<&str>) -> Result<IDispatch, Too
         };
     }
     Ok(current)
-}
-
-/// `os.path.abspath(os.path.expanduser(save_dir))`: expand a leading `~` to the
-/// user's home directory, then make the path absolute. Mirrors the Python
-/// `save_attachments` directory normalization so the returned `saved_to` paths
-/// are absolute. Falls back to the un-absolutized path if `absolute` fails
-/// (it does not touch the filesystem, so this only guards against odd inputs).
-fn resolve_save_dir(save_dir: &str) -> std::path::PathBuf {
-    let expanded = if save_dir == "~"
-        || save_dir.starts_with("~/")
-        || save_dir.starts_with("~\\")
-    {
-        match std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
-            Some(home) => {
-                let rest = save_dir[1..].trim_start_matches(['/', '\\']);
-                std::path::Path::new(&home).join(rest)
-            }
-            None => std::path::PathBuf::from(save_dir),
-        }
-    } else {
-        std::path::PathBuf::from(save_dir)
-    };
-    std::path::absolute(&expanded).unwrap_or(expanded)
-}
-
-/// `client.py::_truncate`: cap long bodies at `limit` *characters* (not
-/// bytes) so multi-byte UTF-8 content is never split mid-codepoint. The cut
-/// is a hard one and may land mid-tag or mid-base64 in HTML; the returned
-/// flag says whether it happened so callers can re-request with a larger
-/// limit. Returns `(text, truncated)`.
-fn truncate(text: &str, limit: usize) -> (String, bool) {
-    if text.chars().count() > limit {
-        let head: String = text.chars().take(limit).collect();
-        (format!("{head}\n\n[... truncated at {limit} characters]"), true)
-    } else {
-        (text.to_string(), false)
-    }
-}
-
-/// `client.py::_clamp_body_limit`: `None` means `MAX_BODY_CHARS`; any other
-/// value is clamped into `[MIN_BODY_CHARS_LIMIT, MAX_BODY_CHARS_LIMIT]`.
-fn clamp_body_limit(max_body_chars: Option<u32>) -> usize {
-    match max_body_chars {
-        None => MAX_BODY_CHARS,
-        Some(n) => (n as usize).clamp(MIN_BODY_CHARS_LIMIT, MAX_BODY_CHARS_LIMIT),
-    }
 }
 
 /// Normalize text for caseless matching: NFC (so composed and decomposed
@@ -774,10 +726,9 @@ fn compose(
     app: &IDispatch,
     to: &[String],
     subject: &str,
-    body: &str,
+    body: &MailBody,
     cc: Option<&[String]>,
     bcc: Option<&[String]>,
-    html: bool,
 ) -> Result<IDispatch, ToolError> {
     let mail = to_disp(call_method(app, "CreateItem", &mut [variant_from_i32(c::OL_MAIL_ITEM)])?)?;
     put_property(&mail, "To", variant_from_str(&to.join("; ")))?;
@@ -792,14 +743,48 @@ fn compose(
         }
     }
     put_property(&mail, "Subject", variant_from_str(subject))?;
-    if html {
-        put_property(&mail, "BodyFormat", variant_from_i32(c::OL_FORMAT_HTML))?;
-        put_property(&mail, "HTMLBody", variant_from_str(body))?;
-    } else {
-        put_property(&mail, "BodyFormat", variant_from_i32(c::OL_FORMAT_PLAIN))?;
-        put_property(&mail, "Body", variant_from_str(body))?;
-    }
+    set_mail_body(&mail, body)?;
     Ok(mail)
+}
+
+/// Replace a mail item's body. `BodyFormat` is set first so Outlook doesn't
+/// re-convert the new body.
+fn set_mail_body(mail: &IDispatch, body: &MailBody) -> Result<(), ToolError> {
+    match body {
+        MailBody::Html(html) => {
+            put_property(mail, "BodyFormat", variant_from_i32(c::OL_FORMAT_HTML))?;
+            put_property(mail, "HTMLBody", variant_from_str(html))?;
+        }
+        MailBody::Text(text) => {
+            put_property(mail, "BodyFormat", variant_from_i32(c::OL_FORMAT_PLAIN))?;
+            put_property(mail, "Body", variant_from_str(text))?;
+        }
+    }
+    Ok(())
+}
+
+/// Set categories (when given and non-empty) and importance (an already
+/// validated `OlImportance` id) on a new mail item.
+fn set_mail_metadata(mail: &IDispatch, categories: Option<&[String]>, importance: Option<i32>)
+    -> Result<(), ToolError> {
+    if let Some(cats) = categories.filter(|c| !c.is_empty()) {
+        set_item_categories(mail, cats)?;
+    }
+    if let Some(id) = importance {
+        put_property(mail, "Importance", variant_from_i32(id))?;
+    }
+    Ok(())
+}
+
+/// Validate a [`NewEmail`] before any COM call: importance, attachment
+/// paths, inline images and the body's `data:` URIs. Returns the final body,
+/// all inline images to attach and the importance id.
+fn prepare_new_email(m: &NewEmail)
+    -> Result<(MailBody, Vec<ValidatedInlineImage>, Option<i32>), ToolError> {
+    let importance = parse_importance(m.importance.as_deref())?;
+    check_attachment_paths(m.attachments.as_deref().unwrap_or(&[]))?;
+    let (body, images) = prepare_mail_body(&m.body, m.inline_images.as_deref().unwrap_or(&[]))?;
+    Ok((body, images, importance))
 }
 
 /// Metadata for one attachment (`index` is COM's 1-based position). Shared by
@@ -863,6 +848,256 @@ fn select_by_content_id(wanted: &str, content_ids: &[Option<String>]) -> Result<
             available.join(", ")
         )))
     }
+}
+
+/// Every attachment of `item` with its metadata (`is_inline` is not
+/// computed, so the HTML body isn't read for it). An item without an
+/// `Attachments` collection is treated as having none.
+fn attachment_candidates(item: &IDispatch) -> Result<Vec<(IDispatch, AttachmentInfo)>, ToolError> {
+    let mut candidates = Vec::new();
+    if let Some(Ok(attachments)) = get_property(item, "Attachments").ok().map(to_disp) {
+        let count = variant_to_i32(&get_property(&attachments, "Count")?).unwrap_or(0);
+        for i in 1..=count {
+            let att = to_disp(call_method(&attachments, "Item", &mut [variant_from_i32(i)])?)?;
+            let info = attachment_info(&att, i, "")?;
+            candidates.push((att, info));
+        }
+    }
+    Ok(candidates)
+}
+
+/// An attachment's bytes for `get_inline_image` / `resolve_inline_images`,
+/// refused over `MAX_INLINE_IMAGE_BYTES`. `Size` is the MAPI attachment size
+/// (a bit above the payload), so it only pre-screens; the real byte count is
+/// checked after reading.
+fn read_inline_image_bytes(att: &IDispatch, info: &AttachmentInfo) -> Result<Vec<u8>, ToolError> {
+    if usize::try_from(info.size).unwrap_or(0) > MAX_INLINE_IMAGE_BYTES {
+        return Err(inline_image_too_big(info));
+    }
+    let bytes = read_attachment_bytes(att, info)?;
+    if bytes.len() > MAX_INLINE_IMAGE_BYTES {
+        return Err(inline_image_too_big(info));
+    }
+    Ok(bytes)
+}
+
+/// The MIME type an inline image's data URI carries.
+fn inline_mime(info: &AttachmentInfo) -> String {
+    info.mime_type.clone().unwrap_or_else(|| "application/octet-stream".to_string())
+}
+
+/// `get_email`'s `resolve_inline_images`: replace each `cid:` reference in
+/// `html` with the matching attachment's `data:` URI. A reference with no
+/// matching attachment, or whose attachment is over `MAX_INLINE_IMAGE_BYTES`
+/// or can't be read, is left as is and reported in `unresolved`. Only
+/// referenced attachments are read.
+fn resolve_inline_images(item: &IDispatch, html: &str) -> CidRewrite {
+    let wanted = cid_references(html);
+    let mut images = Vec::new();
+    if !wanted.is_empty() {
+        let candidates = attachment_candidates(item).unwrap_or_default();
+        for cid in &wanted {
+            let key = cid.to_lowercase();
+            let found = candidates.iter().find(|(_, info)| {
+                info.content_id.as_deref().is_some_and(|c| c.to_lowercase() == key)
+            });
+            if let Some((att, info)) = found
+                && let Ok(bytes) = read_inline_image_bytes(att, info)
+            {
+                images.push((cid.clone(), data_uri(&inline_mime(info), &bytes)));
+            }
+        }
+    }
+    replace_cid_references(html, &images)
+}
+
+/// One `get_email` result (see `OutlookClient::get_email`).
+fn read_email(ns: &IDispatch, email_id: &str, opts: &ReadOptions,
+    out_dir: Option<&std::path::Path>) -> Result<EmailDetail, ToolError> {
+    let item = get_item(ns, email_id)?;
+    let summary = email_summary(&item)?;
+    // Python's `get_email` reads these via `getattr(item, "X", "") or ""`
+    // so a non-mail item (MeetingItem, ReportItem, …) that lacks CC/BCC/
+    // Body/HTMLBody yields graceful partial detail rather than a COM error.
+    let cc = variant_to_string(&get_property(&item, "CC").unwrap_or_default());
+    let bcc = variant_to_string(&get_property(&item, "BCC").unwrap_or_default());
+    let shape = |full: &str, field: &str, ext: &str| {
+        shape_field(full, ReadTool::Email, email_id, field, ext, opts, out_dir)
+    };
+    // `*_length` is the full original length in chars, so a caller that
+    // sees a `*_truncated` flag knows what limit to ask for.
+    let body = if opts.body {
+        let full = variant_to_string(&get_property(&item, "Body").unwrap_or_default());
+        Some(shape(&full, "body", ".txt")?)
+    } else {
+        None
+    };
+    let (mut inline_images_resolved, mut inline_images_unresolved) = (None, None);
+    let html = if opts.html_body {
+        let mut full = variant_to_string(&get_property(&item, "HTMLBody").unwrap_or_default());
+        if opts.resolve_inline_images {
+            let rewrite = resolve_inline_images(&item, &full);
+            inline_images_resolved = Some(rewrite.resolved.len());
+            inline_images_unresolved = Some(rewrite.unresolved);
+            full = rewrite.html;
+        }
+        Some(shape(&full, "html_body", ".html")?)
+    } else {
+        None
+    };
+    let (body, body_file, body_truncated, body_length) = BodyOut::into_parts(body);
+    let (html_body, html_body_file, html_truncated, html_length) = BodyOut::into_parts(html);
+    // `getattr(item, "Attachments", None)` then `attachments and attachments.Count`:
+    // tolerate an item that has no `Attachments` collection at all (falls back
+    // to an empty list) rather than propagating the COM error, mirroring
+    // `email_summary`'s already-fixed handling.
+    let attachments = opts.attachments.then(|| {
+        (|| -> Result<Vec<String>, ToolError> {
+            let attachments_obj = to_disp(get_property(&item, "Attachments")?)?;
+            let att_count = variant_to_i32(&get_property(&attachments_obj, "Count")?).unwrap_or(0);
+            let mut names = Vec::new();
+            for i in 1..=att_count {
+                let att = to_disp(call_method(&attachments_obj, "Item", &mut [variant_from_i32(i)])?)?;
+                names.push(variant_to_string(&get_property(&att, "FileName")?));
+            }
+            Ok(names)
+        })()
+        .unwrap_or_default()
+    });
+    let message_class = variant_to_string(&get_property(&item, "MessageClass").unwrap_or_default());
+    let item_type = crate::friendly::item_type_from_class(&message_class).to_string();
+
+    // A MeetingItem exposes GetAssociatedAppointment; a plain MailItem
+    // does not. Build the meeting block from the associated appointment.
+    let is_meeting = has_member(&item, "GetAssociatedAppointment");
+    let meeting = if is_meeting && opts.meeting {
+        let appt = to_disp(call_method(
+            &item, "GetAssociatedAppointment", &mut [variant_from_bool(false)],
+        )?)?;
+        Some(MeetingInfo {
+            meeting_type: crate::friendly::meeting_type_from_class(&message_class).to_string(),
+            start: variant_to_iso_string(&get_property(&appt, "Start").unwrap_or_default()),
+            end: variant_to_iso_string(&get_property(&appt, "End").unwrap_or_default()),
+            location: variant_to_string(&get_property(&appt, "Location").unwrap_or_default()),
+            organizer: variant_to_string(&get_property(&appt, "Organizer").unwrap_or_default()),
+            required_attendees: variant_to_string(&get_property(&appt, "RequiredAttendees").unwrap_or_default()),
+            optional_attendees: variant_to_string(&get_property(&appt, "OptionalAttendees").unwrap_or_default()),
+            is_recurring: variant_to_bool(&get_property(&appt, "IsRecurring").unwrap_or_default()).unwrap_or(false),
+        })
+    } else {
+        None
+    };
+    Ok(EmailDetail {
+        summary,
+        cc,
+        bcc,
+        body,
+        body_file,
+        body_truncated,
+        body_length,
+        html_body,
+        html_body_file,
+        html_truncated,
+        html_length,
+        inline_images_resolved,
+        inline_images_unresolved,
+        attachments,
+        item_type,
+        is_meeting,
+        meeting,
+    })
+}
+
+/// `opts.body` -> the item's plain-text `Body`, shaped for `tool`.
+fn read_plain_body(item: &IDispatch, tool: ReadTool, id: &str, opts: &ReadOptions,
+    out_dir: Option<&std::path::Path>) -> Result<Option<BodyOut>, ToolError> {
+    if !opts.body {
+        return Ok(None);
+    }
+    let full = variant_to_string(&get_property(item, "Body").unwrap_or_default());
+    Ok(Some(shape_field(&full, tool, id, "body", ".txt", opts, out_dir)?))
+}
+
+/// One `get_event` result.
+fn read_event(ns: &IDispatch, event_id: &str, opts: &ReadOptions,
+    out_dir: Option<&std::path::Path>) -> Result<EventDetail, ToolError> {
+    let item = get_item(ns, event_id)?;
+    let summary = event_summary(&item, None)?;
+    let recurrence = recurrence_info(&item)?;
+    let body = read_plain_body(&item, ReadTool::Event, event_id, opts, out_dir)?;
+    let (body, body_file, body_truncated, body_length) = BodyOut::into_parts(body);
+    Ok(EventDetail { summary, body, body_file, body_truncated, body_length, recurrence })
+}
+
+/// One `get_note` result.
+fn read_note(ns: &IDispatch, note_id: &str, opts: &ReadOptions,
+    out_dir: Option<&std::path::Path>) -> Result<NoteDetail, ToolError> {
+    let note = get_item(ns, note_id)?;
+    let summary = note_summary(&note)?;
+    let body = read_plain_body(&note, ReadTool::Note, note_id, opts, out_dir)?;
+    let (body, body_file, body_truncated, body_length) = BodyOut::into_parts(body);
+    Ok(NoteDetail {
+        summary,
+        body,
+        body_file,
+        body_truncated,
+        body_length,
+        modified: variant_to_iso_string(&get_property(&note, "LastModificationTime").unwrap_or_default()),
+    })
+}
+
+/// One `get_task` result: the `list_tasks` summary plus body and details.
+fn read_task(ns: &IDispatch, task_id: &str, opts: &ReadOptions,
+    out_dir: Option<&std::path::Path>) -> Result<TaskDetail, ToolError> {
+    let task = get_item(ns, task_id)?;
+    let summary = task_summary(&task)?;
+    let body = read_plain_body(&task, ReadTool::Task, task_id, opts, out_dir)?;
+    let (body, body_file, body_truncated, body_length) = BodyOut::into_parts(body);
+    let date = |name: &str| {
+        outlook_date(variant_to_iso_string(&get_property(&task, name).unwrap_or_default()))
+    };
+    let reminder_set =
+        variant_to_bool(&get_property(&task, "ReminderSet").unwrap_or_default()).unwrap_or(false);
+    Ok(TaskDetail {
+        summary,
+        body,
+        body_file,
+        body_truncated,
+        body_length,
+        start_date: date("StartDate"),
+        date_completed: date("DateCompleted"),
+        percent_complete: variant_to_i32(&get_property(&task, "PercentComplete").unwrap_or_default())
+            .unwrap_or(0),
+        reminder_set,
+        reminder_time: if reminder_set { date("ReminderTime") } else { None },
+        created: date("CreationTime"),
+        modified: date("LastModificationTime"),
+    })
+}
+
+/// One `list_attachments` result.
+fn list_item_attachments(ns: &IDispatch, email_id: &str) -> Result<Vec<AttachmentInfo>, ToolError> {
+    let item = get_item(ns, email_id)?;
+    // `getattr(item, "Attachments", None)` then `if attachments:` — an item
+    // with no `Attachments` collection yields an empty list, not a COM error.
+    let attachments = match get_property(&item, "Attachments").ok().map(to_disp) {
+        Some(Ok(a)) => a,
+        _ => return Ok(Vec::new()),
+    };
+    let count = variant_to_i32(&get_property(&attachments, "Count")?).unwrap_or(0);
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    // Read the HTML body once (only when there are attachments) for
+    // `is_inline`; a plain-text item or an unreadable body counts as "".
+    let html_body = item_html_body(&item);
+    let mut results = Vec::new();
+    for i in 1..=count {
+        // COM collections are 1-based.
+        let att = to_disp(call_method(&attachments, "Item", &mut [variant_from_i32(i)])?)?;
+        results.push(attachment_info(&att, i, &html_body)?);
+    }
+    Ok(results)
 }
 
 /// `get_inline_image`'s error for an attachment over `MAX_INLINE_IMAGE_BYTES`.
@@ -951,14 +1186,20 @@ fn merge_json_objects(mut base: Value, extra: Value) -> Value {
 /// FIRST (so a bad path fails before anything is sent), then adds each via
 /// `MailItem.Attachments.Add(path)`.
 fn attach_files(mail: &IDispatch, paths: &[String]) -> Result<(), ToolError> {
+    check_attachment_paths(paths)?;
+    let atts = to_disp(get_property(mail, "Attachments")?)?;
+    for p in paths {
+        call_method(&atts, "Add", &mut [variant_from_str(p)])?;
+    }
+    Ok(())
+}
+
+/// Every attachment path must be an existing file.
+fn check_attachment_paths(paths: &[String]) -> Result<(), ToolError> {
     for p in paths {
         if !std::path::Path::new(p).is_file() {
             return Err(ToolError::new(format!("attachment not found: {p}")));
         }
-    }
-    let atts = to_disp(get_property(mail, "Attachments")?)?;
-    for p in paths {
-        call_method(&atts, "Add", &mut [variant_from_str(p)])?;
     }
     Ok(())
 }
@@ -999,15 +1240,6 @@ impl Drop for InlineTempDirs {
     }
 }
 
-/// Validate `inline_images` (if any) before any COM item is created.
-fn validated_inline_images(images: Option<&[InlineImage]>, html: bool)
-    -> Result<Vec<ValidatedInlineImage>, ToolError> {
-    match images {
-        Some(images) if !images.is_empty() => validate_inline_images(images, html),
-        _ => Ok(Vec::new()),
-    }
-}
-
 /// Attach validated inline images as hidden Content-ID attachments the HTML
 /// body references via `cid:CONTENT_ID`. Base64 data is written to a temp
 /// file first (tracked in `temp` for cleanup), since `Attachments.Add` only
@@ -1022,36 +1254,84 @@ fn attach_inline_images(
     }
     let atts = to_disp(get_property(mail, "Attachments")?)?;
     for img in images {
-        let path = match &img.source {
-            InlineImageSource::Path(p) => p.clone(),
-            InlineImageSource::Data(bytes) => {
-                let file = temp.create()?.join(&img.filename);
-                std::fs::write(&file, bytes).map_err(|e| {
-                    ToolError::new(format!("could not write inline image {:?} to a temp file: {e}", img.content_id))
-                })?;
-                file.to_string_lossy().into_owned()
+        add_inline_image(&atts, img, temp)?;
+    }
+    Ok(())
+}
+
+/// Add one validated inline image to an `Attachments` collection.
+fn add_inline_image(atts: &IDispatch, img: &ValidatedInlineImage, temp: &mut InlineTempDirs)
+    -> Result<(), ToolError> {
+    let path = match &img.source {
+        InlineImageSource::Path(p) => p.clone(),
+        InlineImageSource::Data(bytes) => {
+            let file = temp.create()?.join(&img.filename);
+            std::fs::write(&file, bytes).map_err(|e| {
+                ToolError::new(format!("could not write inline image {:?} to a temp file: {e}", img.content_id))
+            })?;
+            file.to_string_lossy().into_owned()
+        }
+    };
+    // Position 0: don't render an attachment icon in the body.
+    let att = to_disp(call_method(atts, "Add", &mut [
+        variant_from_str(&path),
+        variant_from_i32(c::OL_BY_VALUE),
+        variant_from_i32(0),
+        variant_from_str(&img.filename),
+    ])?)?;
+    let pa = to_disp(get_property(&att, "PropertyAccessor")?)?;
+    call_method(&pa, "SetProperty", &mut [
+        variant_from_str(c::PR_ATTACH_CONTENT_ID),
+        variant_from_str(&img.content_id),
+    ])?;
+    call_method(&pa, "SetProperty", &mut [
+        variant_from_str(c::PR_ATTACH_MIME_TAG),
+        variant_from_str(&img.mime_type),
+    ])?;
+    call_method(&pa, "SetProperty", &mut [
+        variant_from_str(c::PR_ATTACHMENT_HIDDEN),
+        variant_from_bool(true),
+    ])?;
+    Ok(())
+}
+
+/// `update_draft`'s inline images, added to a draft that may already hold
+/// some. An explicit image (`explicit_count` first entries of `images`)
+/// replaces any existing attachment with the same Content-ID. An image taken
+/// from a `data:` URI is skipped when the draft already has its Content-ID:
+/// that id is a hash of the bytes, so it's the same image (e.g. an earlier
+/// update with the same HTML).
+fn attach_draft_inline_images(
+    item: &IDispatch,
+    images: &[ValidatedInlineImage],
+    explicit_count: usize,
+    temp: &mut InlineTempDirs,
+) -> Result<(), ToolError> {
+    if images.is_empty() {
+        return Ok(());
+    }
+    let atts = to_disp(get_property(item, "Attachments")?)?;
+    for (i, img) in images.iter().enumerate() {
+        // Walk backwards so deleting keeps the remaining indexes valid.
+        let count = variant_to_i32(&get_property(&atts, "Count")?).unwrap_or(0);
+        let mut present = false;
+        for idx in (1..=count).rev() {
+            let att = to_disp(call_method(&atts, "Item", &mut [variant_from_i32(idx)])?)?;
+            let cid = get_mapi_prop(&att, c::PR_ATTACH_CONTENT_ID).map(|v| variant_to_string(&v));
+            let same = clean_content_id(cid.as_deref())
+                .is_some_and(|cid| cid.eq_ignore_ascii_case(&img.content_id));
+            if !same {
+                continue;
             }
-        };
-        // Position 0: don't render an attachment icon in the body.
-        let att = to_disp(call_method(&atts, "Add", &mut [
-            variant_from_str(&path),
-            variant_from_i32(c::OL_BY_VALUE),
-            variant_from_i32(0),
-            variant_from_str(&img.filename),
-        ])?)?;
-        let pa = to_disp(get_property(&att, "PropertyAccessor")?)?;
-        call_method(&pa, "SetProperty", &mut [
-            variant_from_str(c::PR_ATTACH_CONTENT_ID),
-            variant_from_str(&img.content_id),
-        ])?;
-        call_method(&pa, "SetProperty", &mut [
-            variant_from_str(c::PR_ATTACH_MIME_TAG),
-            variant_from_str(&img.mime_type),
-        ])?;
-        call_method(&pa, "SetProperty", &mut [
-            variant_from_str(c::PR_ATTACHMENT_HIDDEN),
-            variant_from_bool(true),
-        ])?;
+            if i < explicit_count {
+                call_method(&att, "Delete", &mut [])?;
+            } else {
+                present = true;
+            }
+        }
+        if !present {
+            add_inline_image(&atts, img, temp)?;
+        }
     }
     Ok(())
 }
@@ -1292,135 +1572,44 @@ impl OutlookClient for WindowsOutlookClient {
         })
     }
 
-    fn get_email(&self, email_id: String, prefer_html: bool, max_body_chars: Option<u32>)
-        -> Result<EmailDetail, ToolError> {
-        let limit = clamp_body_limit(max_body_chars);
+    fn get_email(&self, email_ids: Vec<String>, opts: &ReadOptions) -> BatchResult<EmailDetail> {
+        let out_dir = opts.output_dir.as_deref().map(prepare_output_dir).transpose()?;
         self.with_com(|| {
             let (_app, ns) = mapi()?;
-            let item = get_item(&ns, &email_id)?;
-            let summary = email_summary(&item)?;
-            // Python's `get_email` reads these via `getattr(item, "X", "") or ""`
-            // so a non-mail item (MeetingItem, ReportItem, …) that lacks CC/BCC/
-            // Body/HTMLBody yields graceful partial detail rather than a COM error.
-            let cc = variant_to_string(&get_property(&item, "CC").unwrap_or_default());
-            let bcc = variant_to_string(&get_property(&item, "BCC").unwrap_or_default());
-            // `*_length` is the full original length in chars, so a caller
-            // that sees a `*_truncated` flag knows what limit to ask for.
-            let full_body = variant_to_string(&get_property(&item, "Body").unwrap_or_default());
-            let body_length = full_body.chars().count();
-            let (body, body_truncated) = truncate(&full_body, limit);
-            let (html_body, html_truncated, html_length) = if prefer_html {
-                let full_html = variant_to_string(&get_property(&item, "HTMLBody").unwrap_or_default());
-                let (html, truncated) = truncate(&full_html, limit);
-                (Some(html), Some(truncated), Some(full_html.chars().count()))
-            } else {
-                (None, None, None)
-            };
-            // `getattr(item, "Attachments", None)` then `attachments and attachments.Count`:
-            // tolerate an item that has no `Attachments` collection at all (falls back
-            // to an empty list) rather than propagating the COM error, mirroring
-            // `email_summary`'s already-fixed handling.
-            let attachments = (|| -> Result<Vec<String>, ToolError> {
-                let attachments_obj = to_disp(get_property(&item, "Attachments")?)?;
-                let att_count =
-                    variant_to_i32(&get_property(&attachments_obj, "Count")?).unwrap_or(0);
-                let mut names = Vec::new();
-                for i in 1..=att_count {
-                    let att =
-                        to_disp(call_method(&attachments_obj, "Item", &mut [variant_from_i32(i)])?)?;
-                    names.push(variant_to_string(&get_property(&att, "FileName")?));
-                }
-                Ok(names)
-            })()
-            .unwrap_or_default();
-            let message_class = variant_to_string(&get_property(&item, "MessageClass").unwrap_or_default());
-            let item_type = crate::friendly::item_type_from_class(&message_class).to_string();
-
-            // A MeetingItem exposes GetAssociatedAppointment; a plain MailItem
-            // does not. Build the meeting block from the associated appointment.
-            let (is_meeting, meeting) = if has_member(&item, "GetAssociatedAppointment") {
-                let appt = to_disp(call_method(
-                    &item, "GetAssociatedAppointment", &mut [variant_from_bool(false)],
-                )?)?;
-                let info = MeetingInfo {
-                    meeting_type: crate::friendly::meeting_type_from_class(&message_class).to_string(),
-                    start: variant_to_iso_string(&get_property(&appt, "Start").unwrap_or_default()),
-                    end: variant_to_iso_string(&get_property(&appt, "End").unwrap_or_default()),
-                    location: variant_to_string(&get_property(&appt, "Location").unwrap_or_default()),
-                    organizer: variant_to_string(&get_property(&appt, "Organizer").unwrap_or_default()),
-                    required_attendees: variant_to_string(&get_property(&appt, "RequiredAttendees").unwrap_or_default()),
-                    optional_attendees: variant_to_string(&get_property(&appt, "OptionalAttendees").unwrap_or_default()),
-                    is_recurring: variant_to_bool(&get_property(&appt, "IsRecurring").unwrap_or_default()).unwrap_or(false),
-                };
-                (true, Some(info))
-            } else {
-                (false, None)
-            };
-            Ok(EmailDetail {
-                summary,
-                cc,
-                bcc,
-                body,
-                body_truncated,
-                body_length,
-                html_body,
-                html_truncated,
-                html_length,
-                attachments,
-                item_type,
-                is_meeting,
-                meeting,
-            })
+            Ok(email_ids.iter().map(|id| read_email(&ns, id, opts, out_dir.as_deref())).collect())
         })
     }
 
-    fn send_email(
-        &self,
-        to: Vec<String>,
-        subject: String,
-        body: String,
-        cc: Option<Vec<String>>,
-        bcc: Option<Vec<String>>,
-        html: bool,
-        attachments: Option<Vec<String>>,
-        inline_images: Option<Vec<InlineImage>>,
-    ) -> Result<Value, ToolError> {
-        if to.is_empty() {
+    fn send_email(&self, m: NewEmail) -> Result<Value, ToolError> {
+        if m.to.is_empty() {
             return Err(ToolError::new(
                 "send_email requires at least one recipient in 'to'.",
             ));
         }
-        let images = validated_inline_images(inline_images.as_deref(), html)?;
+        // Validate everything before the item is created.
+        let (body, images, importance) = prepare_new_email(&m)?;
         self.with_com(|| {
             let (app, _ns) = mapi()?;
-            let mail = compose(&app, &to, &subject, &body, cc.as_deref(), bcc.as_deref(), html)?;
-            if let Some(atts) = attachments.as_deref() {
+            let mail = compose(&app, &m.to, &m.subject, &body, m.cc.as_deref(), m.bcc.as_deref())?;
+            set_mail_metadata(&mail, m.categories.as_deref(), importance)?;
+            if let Some(atts) = m.attachments.as_deref() {
                 attach_files(&mail, atts)?;
             }
             // Dropped at the end of this closure: temp files outlive Send.
             let mut temp = InlineTempDirs::default();
             attach_inline_images(&mail, &images, &mut temp)?;
             call_method(&mail, "Send", &mut [])?;
-            Ok(json!({"status": "sent", "to": to.join("; "), "subject": subject}))
+            Ok(json!({"status": "sent", "to": m.to.join("; "), "subject": m.subject}))
         })
     }
 
-    fn create_draft(
-        &self,
-        to: Vec<String>,
-        subject: String,
-        body: String,
-        cc: Option<Vec<String>>,
-        bcc: Option<Vec<String>>,
-        html: bool,
-        attachments: Option<Vec<String>>,
-        inline_images: Option<Vec<InlineImage>>,
-    ) -> Result<Value, ToolError> {
-        let images = validated_inline_images(inline_images.as_deref(), html)?;
+    fn create_draft(&self, m: NewEmail) -> Result<Value, ToolError> {
+        let (body, images, importance) = prepare_new_email(&m)?;
         self.with_com(|| {
             let (app, _ns) = mapi()?;
-            let mail = compose(&app, &to, &subject, &body, cc.as_deref(), bcc.as_deref(), html)?;
-            if let Some(atts) = attachments.as_deref() {
+            let mail = compose(&app, &m.to, &m.subject, &body, m.cc.as_deref(), m.bcc.as_deref())?;
+            set_mail_metadata(&mail, m.categories.as_deref(), importance)?;
+            if let Some(atts) = m.attachments.as_deref() {
                 attach_files(&mail, atts)?;
             }
             // Dropped at the end of this closure: temp files outlive Save.
@@ -1428,38 +1617,41 @@ impl OutlookClient for WindowsOutlookClient {
             attach_inline_images(&mail, &images, &mut temp)?;
             call_method(&mail, "Save", &mut [])?; // Save first so EntryID exists
             let id = make_id(&mail)?;
-            Ok(json!({"status": "draft_saved", "id": id, "subject": subject}))
+            Ok(json!({"status": "draft_saved", "id": id, "subject": m.subject}))
         })
     }
 
-    fn reply_email(
-        &self,
-        email_id: String,
-        body: String,
-        reply_all: bool,
-        html: bool,
-        send: bool,
-        attachments: Option<Vec<String>>,
-    ) -> Result<Value, ToolError> {
+    fn reply_email(&self, r: ReplyInput) -> Result<Value, ToolError> {
+        // Validate everything before the reply is created.
+        let importance = parse_importance(r.importance.as_deref())?;
+        check_attachment_paths(r.attachments.as_deref().unwrap_or(&[]))?;
+        let (body, images) = prepare_mail_body(&r.body, r.inline_images.as_deref().unwrap_or(&[]))?;
         self.with_com(|| {
             let (_app, ns) = mapi()?;
-            let item = get_item(&ns, &email_id)?;
+            let item = get_item(&ns, &r.email_id)?;
             let reply = to_disp(call_method(
                 &item,
-                if reply_all { "ReplyAll" } else { "Reply" },
+                if r.reply_all { "ReplyAll" } else { "Reply" },
                 &mut [],
             )?)?;
-            if html {
-                let existing = variant_to_string(&get_property(&reply, "HTMLBody")?);
-                put_property(&reply, "HTMLBody", variant_from_str(&format!("{body}{existing}")))?;
-            } else {
-                let existing = variant_to_string(&get_property(&reply, "Body")?);
-                put_property(&reply, "Body", variant_from_str(&format!("{body}\n\n{existing}")))?;
+            match &body {
+                MailBody::Html(html) => {
+                    let existing = variant_to_string(&get_property(&reply, "HTMLBody")?);
+                    put_property(&reply, "HTMLBody", variant_from_str(&format!("{html}{existing}")))?;
+                }
+                MailBody::Text(text) => {
+                    let existing = variant_to_string(&get_property(&reply, "Body")?);
+                    put_property(&reply, "Body", variant_from_str(&format!("{text}\n\n{existing}")))?;
+                }
             }
-            if let Some(atts) = attachments.as_deref() {
+            set_mail_metadata(&reply, r.categories.as_deref(), importance)?;
+            if let Some(atts) = r.attachments.as_deref() {
                 attach_files(&reply, atts)?;
             }
-            if send {
+            // Dropped at the end of this closure: temp files outlive Send/Save.
+            let mut temp = InlineTempDirs::default();
+            attach_inline_images(&reply, &images, &mut temp)?;
+            if r.send {
                 // Read Subject *before* Send() — Outlook invalidates the COM
                 // item once sent (a well-known lifecycle rule), so reading a
                 // property off `reply` afterward throws "The item has been
@@ -1568,9 +1760,18 @@ impl OutlookClient for WindowsOutlookClient {
     fn update_draft(&self, u: DraftUpdate) -> Result<Value, ToolError> {
         // Validate everything before the item is touched.
         validate_draft_update(&u)?;
+        let importance = parse_importance(u.importance.as_deref())?;
+        let explicit = u.inline_images.as_deref().unwrap_or(&[]);
+        let (html_body, images) = match &u.html_body {
+            Some(html) => {
+                let (html, images) = prepare_html_images(html, explicit)?;
+                (Some(html), images)
+            }
+            None => (None, Vec::new()),
+        };
         self.with_com(|| {
             let (_app, ns) = mapi()?;
-            let item = get_item(&ns, &u.draft_id)?;
+            let item = get_item(&ns, &u.email_id)?;
             // `Sent` is true for anything sent or received; only an unsent
             // draft may be edited.
             if variant_to_bool(&get_property(&item, "Sent")?).unwrap_or(false) {
@@ -1583,14 +1784,11 @@ impl OutlookClient for WindowsOutlookClient {
             if let Some(subject) = &u.subject {
                 put_property(&item, "Subject", variant_from_str(subject))?;
             }
-            // Set BodyFormat before the body so Outlook doesn't re-convert it.
             if let Some(body) = &u.body {
-                put_property(&item, "BodyFormat", variant_from_i32(c::OL_FORMAT_PLAIN))?;
-                put_property(&item, "Body", variant_from_str(body))?;
+                set_mail_body(&item, &MailBody::Text(body.clone()))?;
             }
-            if let Some(html) = &u.html_body {
-                put_property(&item, "BodyFormat", variant_from_i32(c::OL_FORMAT_HTML))?;
-                put_property(&item, "HTMLBody", variant_from_str(html))?;
+            if let Some(html) = html_body {
+                set_mail_body(&item, &MailBody::Html(html))?;
             }
             // Recipients replace that whole line; an empty list clears it.
             if let Some(to) = &u.to {
@@ -1606,10 +1804,38 @@ impl OutlookClient for WindowsOutlookClient {
             if let Some(atts) = u.attachments.as_deref().filter(|a| !a.is_empty()) {
                 attach_files(&item, atts)?;
             }
+            // Dropped at the end of this closure: temp files outlive Save/Send.
+            let mut temp = InlineTempDirs::default();
+            attach_draft_inline_images(&item, &images, explicit.len(), &mut temp)?;
+            if u.add_categories.is_some() || u.remove_categories.is_some() {
+                let cats = merge_categories(
+                    get_item_categories(&item),
+                    u.add_categories.as_deref().unwrap_or(&[]),
+                    u.remove_categories.as_deref().unwrap_or(&[]),
+                );
+                set_item_categories(&item, &cats)?;
+            }
+            if let Some(id) = importance {
+                put_property(&item, "Importance", variant_from_i32(id))?;
+            }
 
-            call_method(&item, "Save", &mut [])?; // one Save for all changes; never Send
+            call_method(&item, "Save", &mut [])?; // one Save for all changes
             let id = make_id(&item)?;
-            Ok(json!({"status": "draft_updated", "id": id, "changed": draft_update_changes(&u)}))
+            let changed = draft_update_changes(&u);
+            if !u.send {
+                return Ok(json!({"status": "draft_updated", "id": id, "changed": changed}));
+            }
+            let recipients = to_disp(get_property(&item, "Recipients")?)?;
+            if variant_to_i32(&get_property(&recipients, "Count")?).unwrap_or(0) == 0 {
+                return Err(ToolError::new(format!(
+                    "the draft has no recipients, so it was saved but not sent (id {id}); \
+                     pass to/cc/bcc to address it"
+                )));
+            }
+            // Read Subject before Send(): the item is invalid afterwards.
+            let subject = variant_to_string(&get_property(&item, "Subject")?);
+            call_method(&item, "Send", &mut [])?;
+            Ok(json!({"status": "sent", "subject": subject, "changed": changed}))
         })
     }
 
@@ -1789,22 +2015,11 @@ impl OutlookClient for WindowsOutlookClient {
         })
     }
 
-    fn get_event(&self, event_id: String) -> Result<EventDetail, ToolError> {
+    fn get_event(&self, event_ids: Vec<String>, opts: &ReadOptions) -> BatchResult<EventDetail> {
+        let out_dir = opts.output_dir.as_deref().map(prepare_output_dir).transpose()?;
         self.with_com(|| {
             let (_app, ns) = mapi()?;
-            let item = get_item(&ns, &event_id)?;
-            let summary = event_summary(&item, None)?;
-            let recurrence = recurrence_info(&item)?;
-            let (body, body_truncated) = truncate(
-                &variant_to_string(&get_property(&item, "Body").unwrap_or_default()),
-                MAX_BODY_CHARS,
-            );
-            Ok(EventDetail {
-                summary,
-                body,
-                body_truncated,
-                recurrence,
-            })
+            Ok(event_ids.iter().map(|id| read_event(&ns, id, opts, out_dir.as_deref())).collect())
         })
     }
 
@@ -2119,30 +2334,10 @@ impl OutlookClient for WindowsOutlookClient {
 
     // ---- Attachments (Task 14) -----------------------------------------
 
-    fn list_attachments(&self, email_id: String) -> Result<Vec<AttachmentInfo>, ToolError> {
+    fn list_attachments(&self, email_ids: Vec<String>) -> BatchResult<Vec<AttachmentInfo>> {
         self.with_com(|| {
             let (_app, ns) = mapi()?;
-            let item = get_item(&ns, &email_id)?;
-            // `getattr(item, "Attachments", None)` then `if attachments:` — an item
-            // with no `Attachments` collection yields an empty list, not a COM error.
-            let attachments = match get_property(&item, "Attachments").ok().map(to_disp) {
-                Some(Ok(a)) => a,
-                _ => return Ok(Vec::new()),
-            };
-            let count = variant_to_i32(&get_property(&attachments, "Count")?).unwrap_or(0);
-            if count == 0 {
-                return Ok(Vec::new());
-            }
-            // Read the HTML body once (only when there are attachments) for
-            // `is_inline`; a plain-text item or an unreadable body counts as "".
-            let html_body = item_html_body(&item);
-            let mut results = Vec::new();
-            for i in 1..=count {
-                // COM collections are 1-based.
-                let att = to_disp(call_method(&attachments, "Item", &mut [variant_from_i32(i)])?)?;
-                results.push(attachment_info(&att, i, &html_body)?);
-            }
-            Ok(results)
+            Ok(email_ids.iter().map(|id| list_item_attachments(&ns, id)).collect())
         })
     }
 
@@ -2151,6 +2346,7 @@ impl OutlookClient for WindowsOutlookClient {
         email_id: String,
         save_dir: String,
         attachment_names: Option<Vec<String>>,
+        inline: Option<bool>,
     ) -> Result<Vec<Value>, ToolError> {
         self.with_com(|| {
             let (_app, ns) = mapi()?;
@@ -2191,6 +2387,9 @@ impl OutlookClient for WindowsOutlookClient {
                         continue;
                     }
                 }
+                if inline.is_some_and(|want| info.is_inline != want) {
+                    continue;
+                }
                 let target = dir.join(safe_filename(&info.filename));
                 let target_str = target.to_string_lossy().into_owned();
                 // Each entry is the attachment's metadata (`index` stays its
@@ -2205,66 +2404,58 @@ impl OutlookClient for WindowsOutlookClient {
             }
             if results.is_empty() {
                 return Err(ToolError::new(
-                    "No attachments matched attachment_names; use list_attachments \
-                     to see the exact file names.",
+                    "No attachments matched attachment_names / inline; use \
+                     list_attachments to see the exact file names and `is_inline`.",
                 ));
             }
             Ok(results)
         })
     }
 
-    fn get_inline_image(&self, email_id: String, content_id: String, context_lines: Option<u32>)
-        -> Result<InlineImageData, ToolError> {
-        let wanted = normalize_cid_request(&content_id).ok_or_else(|| {
-            ToolError::new("content_id must be a non-empty Content-ID (e.g. \"image001.png@01D9...\", optionally prefixed with cid:).")
-        })?;
+    fn get_inline_image(&self, email_id: String, content_ids: Vec<String>,
+        context_lines: Option<u32>, output_dir: Option<String>) -> BatchResult<InlineImageData> {
+        let out_dir = output_dir.as_deref().map(prepare_output_dir).transpose()?;
         self.with_com(|| {
             let (_app, ns) = mapi()?;
             let item = get_item(&ns, &email_id)?;
-            // As in list_attachments, an item without an `Attachments`
-            // collection is treated as having none.
-            let mut candidates: Vec<(IDispatch, AttachmentInfo)> = Vec::new();
-            if let Some(Ok(attachments)) = get_property(&item, "Attachments").ok().map(to_disp) {
-                let count = variant_to_i32(&get_property(&attachments, "Count")?).unwrap_or(0);
-                for i in 1..=count {
-                    let att = to_disp(call_method(&attachments, "Item", &mut [variant_from_i32(i)])?)?;
-                    // `is_inline` isn't part of the result, so skip reading
-                    // HTMLBody just to compute it.
-                    let info = attachment_info(&att, i, "")?;
-                    candidates.push((att, info));
-                }
-            }
-            let content_ids: Vec<Option<String>> =
+            let candidates = attachment_candidates(&item)?;
+            let available: Vec<Option<String>> =
                 candidates.iter().map(|(_, info)| info.content_id.clone()).collect();
-            let (att, info) = &candidates[select_by_content_id(&wanted, &content_ids)?];
-
-            // `Size` is the MAPI attachment size (a bit above the payload), so
-            // it only pre-screens; the real byte count is checked after reading.
-            if usize::try_from(info.size).unwrap_or(0) > MAX_INLINE_IMAGE_BYTES {
-                return Err(inline_image_too_big(info));
-            }
-            let bytes = read_attachment_bytes(att, info)?;
-            if bytes.len() > MAX_INLINE_IMAGE_BYTES {
-                return Err(inline_image_too_big(info));
-            }
-            let mime_type = info
-                .mime_type
-                .clone()
-                .unwrap_or_else(|| "application/octet-stream".to_string());
             // As in get_email, an item without `HTMLBody` reads as empty, so
-            // the image just counts as unreferenced.
-            let context = context_lines.map(|n| {
-                let html = variant_to_string(&get_property(&item, "HTMLBody").unwrap_or_default());
-                text_before_cid(&html, &wanted, n).unwrap_or_default()
-            });
-            Ok(InlineImageData {
-                content_id: info.content_id.clone().unwrap_or_default(),
-                filename: info.filename.clone(),
-                data_uri: data_uri(&mime_type, &bytes),
-                mime_type,
-                size: bytes.len(),
-                context,
-            })
+            // an image just counts as unreferenced. Read once, only when
+            // `context` was asked for.
+            let html = context_lines
+                .map(|_| variant_to_string(&get_property(&item, "HTMLBody").unwrap_or_default()));
+            let fetch = |raw: &String| -> Result<InlineImageData, ToolError> {
+                let wanted = normalize_cid_request(raw).ok_or_else(|| {
+                    ToolError::new("content_id must be a non-empty Content-ID (e.g. \"image001.png@01D9...\", optionally prefixed with cid:).")
+                })?;
+                let (att, info) = &candidates[select_by_content_id(&wanted, &available)?];
+                let bytes = read_inline_image_bytes(att, info)?;
+                let mime_type = inline_mime(info);
+                let context = context_lines
+                    .zip(html.as_deref())
+                    .map(|(n, html)| text_before_cid(html, &wanted, n).unwrap_or_default());
+                let (data_uri, data_file) = match out_dir.as_deref() {
+                    Some(dir) => {
+                        let key = format!("{email_id}\n{}", wanted.to_lowercase());
+                        let ext = image_extension(&mime_type, &info.filename);
+                        let path = output_file_path(dir, "image", &key, "data", &ext);
+                        (None, Some(write_output_file(&path, &bytes)?))
+                    }
+                    None => (Some(data_uri(&mime_type, &bytes)), None),
+                };
+                Ok(InlineImageData {
+                    content_id: info.content_id.clone().unwrap_or_default(),
+                    filename: info.filename.clone(),
+                    data_uri,
+                    data_file,
+                    mime_type,
+                    size: bytes.len(),
+                    context,
+                })
+            };
+            Ok(content_ids.iter().map(fetch).collect())
         })
     }
 
@@ -2358,6 +2549,14 @@ impl OutlookClient for WindowsOutlookClient {
             }
             call_method(&task, "Save", &mut [])?;
             Ok(json!({"status": "created", "id": make_id(&task)?, "subject": subject}))
+        })
+    }
+
+    fn get_task(&self, task_ids: Vec<String>, opts: &ReadOptions) -> BatchResult<TaskDetail> {
+        let out_dir = opts.output_dir.as_deref().map(prepare_output_dir).transpose()?;
+        self.with_com(|| {
+            let (_app, ns) = mapi()?;
+            Ok(task_ids.iter().map(|id| read_task(&ns, id, opts, out_dir.as_deref())).collect())
         })
     }
 
@@ -2477,19 +2676,11 @@ impl OutlookClient for WindowsOutlookClient {
         })
     }
 
-    fn get_note(&self, note_id: String) -> Result<NoteDetail, ToolError> {
+    fn get_note(&self, note_ids: Vec<String>, opts: &ReadOptions) -> BatchResult<NoteDetail> {
+        let out_dir = opts.output_dir.as_deref().map(prepare_output_dir).transpose()?;
         self.with_com(|| {
             let (_app, ns) = mapi()?;
-            let note = get_item(&ns, &note_id)?;
-            let summary = note_summary(&note)?;
-            let (body, body_truncated) =
-                truncate(&variant_to_string(&get_property(&note, "Body")?), MAX_BODY_CHARS);
-            Ok(NoteDetail {
-                summary,
-                body,
-                body_truncated,
-                modified: variant_to_iso_string(&get_property(&note, "LastModificationTime").unwrap_or_default()),
-            })
+            Ok(note_ids.iter().map(|id| read_note(&ns, id, opts, out_dir.as_deref())).collect())
         })
     }
 
@@ -3260,45 +3451,5 @@ mod recipient_filter_tests {
     #[test]
     fn empty_needle_matches_anything_with_a_candidate() {
         assert!(recipient_matches("", &strs(&["x"])));
-    }
-}
-
-#[cfg(test)]
-mod body_limit_tests {
-    use super::*;
-
-    #[test]
-    fn truncate_leaves_short_text_untouched() {
-        assert_eq!(truncate("hello", 10), ("hello".to_string(), false));
-        // Exactly at the limit is not truncated.
-        assert_eq!(truncate("hello", 5), ("hello".to_string(), false));
-        assert_eq!(truncate("", 5), (String::new(), false));
-    }
-
-    #[test]
-    fn truncate_cuts_long_text_and_flags_it() {
-        let (text, truncated) = truncate("abcdefghij", 4);
-        assert!(truncated);
-        assert_eq!(text, "abcd\n\n[... truncated at 4 characters]");
-    }
-
-    #[test]
-    fn truncate_counts_chars_not_bytes() {
-        // Each "é" is 2 bytes; a byte-based cut would split a codepoint.
-        let (text, truncated) = truncate("ééééé", 3);
-        assert!(truncated);
-        assert!(text.starts_with("ééé\n\n"));
-        assert_eq!(truncate("ééé", 3), ("ééé".to_string(), false));
-    }
-
-    #[test]
-    fn clamp_body_limit_defaults_and_clamps() {
-        assert_eq!(clamp_body_limit(None), MAX_BODY_CHARS);
-        assert_eq!(clamp_body_limit(Some(0)), MIN_BODY_CHARS_LIMIT);
-        assert_eq!(clamp_body_limit(Some(999)), MIN_BODY_CHARS_LIMIT);
-        assert_eq!(clamp_body_limit(Some(1_000)), 1_000);
-        assert_eq!(clamp_body_limit(Some(250_000)), 250_000);
-        assert_eq!(clamp_body_limit(Some(5_000_000)), MAX_BODY_CHARS_LIMIT);
-        assert_eq!(clamp_body_limit(Some(u32::MAX)), MAX_BODY_CHARS_LIMIT);
     }
 }

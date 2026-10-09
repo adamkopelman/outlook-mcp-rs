@@ -21,26 +21,49 @@ pub struct EmailSummary {
     pub categories: Vec<String>,
 }
 
+/// `get_email`'s result. The optional fields follow the request's
+/// `include` / `body_format` / `output_dir` (see `read::read_options`):
+/// a body field not requested is omitted along with its `*_truncated` /
+/// `*_length`, and a body written to `output_dir` comes back as
+/// `<field>_file` instead of `<field>`.
 #[derive(Debug, Clone, Serialize)]
 pub struct EmailDetail {
     #[serde(flatten)]
     pub summary: EmailSummary,
     pub cc: String,
     pub bcc: String,
-    pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// Absolute path of the file holding the full plain-text body (`output_dir`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_file: Option<String>,
     /// True when `body` was cut at the caller's `max_body_chars`.
-    pub body_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_truncated: Option<bool>,
     /// Full original length of the body, in characters.
-    pub body_length: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_length: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub html_body: Option<String>,
-    /// Set only with `prefer_html`: whether `html_body` was cut.
+    /// Absolute path of the file holding the full HTML body (`output_dir`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub html_body_file: Option<String>,
+    /// Whether `html_body` was cut.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub html_truncated: Option<bool>,
-    /// Set only with `prefer_html`: full original HTML length, in characters.
+    /// Full HTML length in characters (after `resolve_inline_images`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub html_length: Option<usize>,
-    pub attachments: Vec<String>,
+    /// With `resolve_inline_images`: how many distinct Content-IDs were
+    /// replaced by `data:` URIs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_images_resolved: Option<usize>,
+    /// With `resolve_inline_images`: referenced Content-IDs left as `cid:`
+    /// (no such attachment, over 10 MB, or unreadable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_images_unresolved: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<String>>,
     pub item_type: String,
     pub is_meeting: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,12 +102,19 @@ pub struct EventSummary {
     pub optional_attendees: String,
 }
 
+/// `get_event`'s result; the body fields behave as on [`EmailDetail`].
 #[derive(Debug, Clone, Serialize)]
 pub struct EventDetail {
     #[serde(flatten)]
     pub summary: EventSummary,
-    pub body: String,
-    pub body_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_length: Option<usize>,
     pub recurrence: Option<RecurrenceInfo>,
 }
 
@@ -168,6 +198,31 @@ pub struct TaskSummary {
     pub categories: Vec<String>,
 }
 
+/// `get_task`'s result: the `list_tasks` summary plus the body (fields as
+/// on [`EmailDetail`]) and the remaining scheduling details. Dates are ISO;
+/// Outlook's "none" date comes back as null.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskDetail {
+    #[serde(flatten)]
+    pub summary: TaskSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_length: Option<usize>,
+    pub start_date: Option<String>,
+    pub date_completed: Option<String>,
+    /// 0-100.
+    pub percent_complete: i32,
+    pub reminder_set: bool,
+    pub reminder_time: Option<String>,
+    pub created: Option<String>,
+    pub modified: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct NoteSummary {
     pub id: String,
@@ -176,12 +231,19 @@ pub struct NoteSummary {
     pub categories: Vec<String>,
 }
 
+/// `get_note`'s result; the body fields behave as on [`EmailDetail`].
 #[derive(Debug, Clone, Serialize)]
 pub struct NoteDetail {
     #[serde(flatten)]
     pub summary: NoteSummary,
-    pub body: String,
-    pub body_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_length: Option<usize>,
     pub modified: Option<String>,
 }
 
@@ -219,8 +281,13 @@ pub struct InlineImageData {
     pub mime_type: String,
     /// Actual byte length of the decoded payload.
     pub size: usize,
-    /// `data:<mime_type>;base64,<payload>`.
-    pub data_uri: String,
+    /// `data:<mime_type>;base64,<payload>`; omitted with `output_dir`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_uri: Option<String>,
+    /// With `output_dir`: absolute path of the file holding the decoded
+    /// image bytes (instead of `data_uri`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_file: Option<String>,
     /// Only when `context_lines` was requested: the plain-text lines just
     /// before the first `cid:` reference to this image in the HTML body
     /// (`""` if the body never references it).
@@ -241,9 +308,11 @@ mod tests {
                 received: Some("2026-06-10T12:00:00".into()), unread: true,
                 has_attachments: false, categories: vec![],
             },
-            cc: "".into(), bcc: "".into(), body: "Hello".into(),
-            body_truncated: false, body_length: 5,
-            html_body: None, html_truncated: None, html_length: None, attachments: vec![],
+            cc: "".into(), bcc: "".into(), body: Some("Hello".into()), body_file: None,
+            body_truncated: Some(false), body_length: Some(5),
+            html_body: None, html_body_file: None, html_truncated: None, html_length: None,
+            inline_images_resolved: None, inline_images_unresolved: None,
+            attachments: Some(vec![]),
             item_type: "email".into(), is_meeting: false, meeting: None,
         };
         let value = serde_json::to_value(&detail).unwrap();
@@ -260,5 +329,8 @@ mod tests {
         assert_eq!(value["body_length"], 5);
         assert!(value.get("html_truncated").is_none());
         assert!(value.get("html_length").is_none());
+        assert!(value.get("body_file").is_none());
+        assert!(value.get("inline_images_resolved").is_none());
+        assert_eq!(value["attachments"], serde_json::json!([]));
     }
 }

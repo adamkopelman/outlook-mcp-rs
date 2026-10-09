@@ -77,6 +77,21 @@ before a release:
    attendee addresses with `send_update: false`, so nothing is ever
    delivered — this is why real-recipient delivery still needs a manual check.)
 
+`update_draft` with `send: true` actually sends the draft, so its success
+path is manual-only: create a draft addressed to a recipient you control, call
+`update_draft` with `send: true` (optionally with a change such as a new
+`subject`), and confirm it arrives and leaves Drafts. The automated live test
+`update_draft_send_without_recipients_saves_and_refuses` covers only the
+refusal path (a draft with no recipients is saved, not sent).
+
+The content-writing conventions (`html_body`/`*_file` inputs, `data:` URI
+images converted to inline attachments, `inline_images` on `update_draft` and
+`reply_email`, categories and importance on drafts) are covered by drafts-only
+live tests:
+`cargo test --test live_outlook -- --ignored create_draft_turns_data_uri_into_inline_attachment_with_metadata update_draft_adds_inline_images_categories_and_importance_without_duplicates update_draft_send_without_recipients_saves_and_refuses reply_email_draft_with_data_uri_image`.
+`reply_email_draft_with_data_uri_image` replies (as an unsent draft, then
+deleted) to the newest Inbox item, and skips if the Inbox is empty.
+
 `update_email`'s `flag` field (`follow_up`/`complete`/`clear`) is also
 manual-only. The automated live test (`update_email_applies_state_then_moves`)
 exercises `mark_read`, `add_categories`, `importance`, and `move_to` against a
