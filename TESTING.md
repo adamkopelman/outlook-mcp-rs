@@ -28,6 +28,14 @@ Run them with:
 cargo test --test live_outlook -- --ignored
 ```
 
+The date-filter tests from issue #1
+(`list_events_date_range_is_read_the_same_in_every_locale`,
+`list_events_returns_only_in_range_occurrences_of_an_earlier_series`,
+`list_emails_received_after_matches_an_unfiltered_scan`) are worth running under
+more than one regional format: switch Windows' *Regional format* (e.g. to English
+(Israel) or German, which are day-first) and restart Outlook before each run. They
+create and delete personal appointments in September 2026 and send nothing.
+
 ## Full system tests (one run across many tools)
 
 Besides the per-feature live tests above, there are larger system tests. Each

@@ -48,7 +48,8 @@ permanent delete. Never set `confirm: true` on your own initiative.
 ## Quick reference
 
 - **Dates:** ISO format, local time: `2026-06-10` or `2026-06-10T14:30`. A bare `end_date`
-  includes that whole day.
+  includes that whole day. Date bounds are inclusive and exact to the second, and work
+  the same under any Windows regional date format.
 - **`list_emails`:**
   - `folder` defaults to `inbox`. Accepts `inbox`, `sent`, `drafts`, `deleted`, `outbox`, or a path like `Inbox/Receipts` (see `list_folders`).
   - Results are newest first. `count` defaults to 10, max 200.

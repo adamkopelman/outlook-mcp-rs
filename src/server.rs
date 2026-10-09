@@ -59,10 +59,13 @@ pub struct ListEmailsParams {
     pub to: Option<String>,
     #[serde(default)]
     pub category: Option<String>,
+    /// Only emails received at or after this local time (ISO: "2026-06-10" or "2026-06-10T14:30").
     #[serde(default)]
     pub received_after: Option<String>,
+    /// Only emails received at or before this local time (ISO; a bare date means its midnight).
     #[serde(default)]
     pub received_before: Option<String>,
+    /// Only emails received in the last N days (combined with received_after, the later bound wins).
     #[serde(default)]
     pub since_days: Option<i32>,
     #[serde(default)]
@@ -210,8 +213,10 @@ pub struct EmptyDeletedItemsParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListEventsParams {
+    /// Events starting at or after this local time (ISO: "2026-06-10" or "2026-06-10T14:30"). Default: today.
     #[serde(default)]
     pub start_date: Option<String>,
+    /// Events starting at or before this local time (ISO; a bare date includes that whole day). Default: start_date + 7 days.
     #[serde(default)]
     pub end_date: Option<String>,
     /// Text match on subject + location.

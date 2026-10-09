@@ -1246,3 +1246,113 @@ fn hebrew_subject_and_body_round_trip_through_com() {
     let found = found.expect("list_emails with a Hebrew query should succeed");
     assert!(found.iter().any(|e| e.id == id && e.subject == subject));
 }
+
+// ---- Issue #1: date filters must not depend on the regional date format ----
+//
+// Run these on a day-first locale (en-GB, en-IL, de-DE…) as well as en-US:
+// before the fix, `Restrict` read the US-format filter in the user's order, so
+// 2026-09-11..2026-09-18 returned nothing and 2026-11-09..2026-12-09 returned
+// the September events. Only personal appointments are created (nothing is
+// sent), and every one is deleted before the assertions run.
+
+const ISSUE_1_SUBJECT: &str = "outlook-mcp-rs issue-1 date window probe";
+
+fn issue_1_appointment(c: &WindowsOutlookClient, start: &str, end: &str, recurrence: Option<RecurrenceInput>) -> String {
+    let created = c.create_event(CreateEventInput {
+        subject: ISSUE_1_SUBJECT.to_string(),
+        start: start.to_string(),
+        end: end.to_string(),
+        body: None, location: None, required_attendees: None, optional_attendees: None,
+        all_day: false, reminder_minutes: None, categories: None, show_as: None,
+        send: false,
+        recurrence,
+    }).expect("create_event");
+    created["id"].as_str().expect("event id").to_string()
+}
+
+/// Starts (ISO) of the probe events `list_events` returns for the range.
+fn issue_1_probe_starts(c: &WindowsOutlookClient, start: &str, end: &str) -> Result<Vec<String>, String> {
+    c.list_events(EventQuery {
+        start_date: Some(start.to_string()),
+        end_date: Some(end.to_string()),
+        query: Some(ISSUE_1_SUBJECT.to_string()),
+        ..Default::default()
+    })
+    .map(|events| events.into_iter().filter_map(|e| e.start).collect())
+    .map_err(|e| e.0)
+}
+
+#[test]
+#[ignore]
+fn list_events_date_range_is_read_the_same_in_every_locale() {
+    let c = client();
+    let ids = [
+        issue_1_appointment(&c, "2026-09-10T23:00", "2026-09-10T23:30", None), // day before
+        issue_1_appointment(&c, "2026-09-11T10:00", "2026-09-11T10:30", None), // first day
+        issue_1_appointment(&c, "2026-09-18T16:00", "2026-09-18T16:30", None), // last day
+        issue_1_appointment(&c, "2026-09-19T08:00", "2026-09-19T08:30", None), // day after
+    ];
+    let week = issue_1_probe_starts(&c, "2026-09-11", "2026-09-18");
+    // The day/month-swapped range of the issue's repro.
+    let swapped = issue_1_probe_starts(&c, "2026-11-09", "2026-12-09");
+    // A start with a time: exact to the minute, not just the day.
+    let from_10_30 = issue_1_probe_starts(&c, "2026-09-11T10:30", "2026-09-18");
+    for id in ids {
+        c.delete_event(id, false).expect("cleanup delete_event");
+    }
+    let mut week = week.expect("list_events 2026-09-11..2026-09-18");
+    week.sort();
+    assert_eq!(week, vec!["2026-09-11T10:00:00", "2026-09-18T16:00:00"]);
+    assert_eq!(swapped.expect("list_events 2026-11-09..2026-12-09"), Vec::<String>::new());
+    assert_eq!(from_10_30.expect("list_events from 10:30"), vec!["2026-09-18T16:00:00"]);
+}
+
+#[test]
+#[ignore]
+fn list_events_returns_only_in_range_occurrences_of_an_earlier_series() {
+    // A weekly series that starts weeks before the window: its occurrences
+    // under IncludeRecurrences must be filtered to the window without tripping
+    // the "Outlook misread the date filter" check.
+    let c = client();
+    let id = issue_1_appointment(&c, "2026-08-03T09:00", "2026-08-03T09:30", Some(RecurrenceInput {
+        pattern: "weekly".to_string(),
+        interval: Some(1),
+        days_of_week: Some(vec!["monday".to_string()]),
+        day_of_month: None,
+        until: None,
+        occurrences: Some(10),
+    }));
+    let week = issue_1_probe_starts(&c, "2026-09-11", "2026-09-18");
+    c.delete_event(id, false).expect("cleanup delete_event");
+    assert_eq!(week.expect("list_events over a recurring series"), vec!["2026-09-14T09:00:00"]);
+}
+
+#[test]
+#[ignore]
+fn list_emails_received_after_matches_an_unfiltered_scan() {
+    let c = client();
+    let query = |received_after: Option<String>, since_days: Option<i32>| {
+        c.list_emails(EmailQuery {
+            query: None, folder: "inbox".into(), count: 200, offset: 0, unread_only: false,
+            from: None, to: None, category: None, received_after, received_before: None,
+            since_days, has_attachments: None, flagged: false, high_importance: false,
+        }).expect("list_emails should succeed against a live Outlook")
+    };
+    let cutoff = (chrono::Local::now().naive_local() - chrono::Duration::days(30))
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
+    let all = query(None, None);
+    let expected: Vec<String> = all
+        .iter()
+        .filter(|e| e.received.as_deref().is_some_and(|r| r >= cutoff.as_str()))
+        .map(|e| e.id.clone())
+        .collect();
+    if expected.len() == all.len() {
+        eprintln!("skipping: more than 200 inbox emails in the last 30 days");
+        return;
+    }
+    let filtered: Vec<String> = query(Some(cutoff.clone()), None).into_iter().map(|e| e.id).collect();
+    assert_eq!(filtered, expected, "received_after {cutoff}");
+    let since: Vec<String> = query(None, Some(30)).into_iter().map(|e| e.id).collect();
+    assert_eq!(since, expected, "since_days 30");
+}

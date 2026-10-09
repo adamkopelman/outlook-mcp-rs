@@ -242,6 +242,19 @@ displays the output, typically a Windows console or PowerShell using a non-UTF-8
 code page. Inspect the output in a UTF-8 viewer, or switch the console first with
 `chcp 65001` (cmd) or `[Console]::OutputEncoding = [Text.Encoding]::UTF8` (PowerShell).
 
+### Date filters and regional formats
+
+`list_emails` and `list_events` date filters work under any Windows regional date
+format. Outlook's `Items.Restrict` parses filter dates in the user's own format, so a
+fixed `MM/DD/YYYY` string is silently misread on day-first locales (issue #1). Instead,
+the server pre-filters with a slightly wider date-only window whose bounds are always
+unambiguous dates (day ≥ 13, or day = month, with a 4-digit year), written in the
+user's short-date order and then as ISO `yyyy-mm-dd` if Outlook rejects that. A parser
+that disagrees about the day/month order can only reject such a date, never misread it.
+Each item is then checked against the exact requested bounds. If Outlook can't parse
+the filter, or returns items far outside it, the tool returns an error instead of wrong
+results.
+
 ## Skills for AI assistants
 
 The [`skills/`](skills) folder has two [Agent Skills](https://docs.claude.com/en/docs/agents-and-tools/agent-skills/overview)

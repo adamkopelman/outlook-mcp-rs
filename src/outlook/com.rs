@@ -16,13 +16,6 @@ pub fn parse_item_id(item_id: &str) -> Result<(String, String), ToolError> {
     }
 }
 
-/// JET `Restrict` filters want `MM/DD/YYYY HH:MM AM/PM` (US format, no
-/// seconds) — anything else silently misfilters. Mirrors `_jet_dt` in
-/// `outlook_mcp/outlook/client.py`.
-pub fn jet_datetime(dt: &chrono::NaiveDateTime) -> String {
-    dt.format("%m/%d/%Y %I:%M %p").to_string()
-}
-
 pub fn safe_filename(name: &str) -> String {
     let cleaned: String = name
         .chars()
@@ -159,13 +152,6 @@ mod tests {
         assert!(parse_item_id("no-separator").is_err());
         assert!(parse_item_id("|missing-entry").is_err());
         assert!(parse_item_id("missing-store|").is_err());
-    }
-
-    #[test]
-    fn jet_datetime_formats_us_style_no_seconds() {
-        use chrono::NaiveDate;
-        let dt = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap().and_hms_opt(14, 30, 0).unwrap();
-        assert_eq!(jet_datetime(&dt), "06/10/2026 02:30 PM");
     }
 
     #[test]
@@ -312,6 +298,14 @@ mod tests {
         let dt = NaiveDate::from_ymd_opt(2026, 6, 10).unwrap().and_hms_opt(14, 30, 0).unwrap();
         let v = variant_from_datetime(&dt).expect("variant_from_datetime should succeed");
         assert_eq!(variant_to_iso_string(&v), Some("2026-06-10T14:30:00".to_string()));
+    }
+
+    #[test]
+    fn variant_to_datetime_round_trips_a_vt_date_variant() {
+        use chrono::NaiveDate;
+        let dt = NaiveDate::from_ymd_opt(2026, 9, 11).unwrap().and_hms_opt(23, 59, 30).unwrap();
+        let v = variant_from_datetime(&dt).expect("variant_from_datetime should succeed");
+        assert_eq!(variant_to_datetime(&v), Some(dt));
     }
 
     // Guards the non-VT_DATE fallback path: the fix branches on `vt`, so this
@@ -568,6 +562,12 @@ pub fn variant_to_bool(value: &VARIANT) -> Option<bool> {
 /// `outlook_mcp/outlook/client.py`. Returns `None` if the VARIANT isn't a
 /// date the Win32 `VariantTimeToSystemTime` call can decode.
 pub fn variant_to_iso_string(value: &VARIANT) -> Option<String> {
+    variant_to_datetime(value).map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
+}
+
+/// [`variant_to_iso_string`] as a `NaiveDateTime` (Outlook local time), for
+/// comparing an item's date against a list tool's exact date bounds.
+pub fn variant_to_datetime(value: &VARIANT) -> Option<chrono::NaiveDateTime> {
     // Outlook returns every Date-typed property as VT_DATE, but the crate's
     // `f64::try_from(&VARIANT)` only accepts VT_R8 — it rejects VT_DATE with a
     // type mismatch. Read the OLE Automation date out of the union directly for
@@ -596,5 +596,36 @@ pub fn variant_to_iso_string(value: &VARIANT) -> Option<String> {
                 sys_time.wMilliseconds as u32,
             )
         })
-        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
+}
+
+/// Reads the current user's short-date order and separator
+/// (`LOCALE_SSHORTDATE` for `LOCALE_NAME_USER_DEFAULT`, i.e. the regional
+/// format `Items.Restrict` parses filter dates with), for
+/// `jet_dates::DateFilter::restrict_filters`. Returns `None` — so only ISO
+/// `yyyy-mm-dd` is tried — if the pattern can't be read or parsed, or if the
+/// user's default calendar isn't Gregorian (a Thai Buddhist or Hijri reading
+/// of a Gregorian year would be a valid but different date).
+pub fn user_short_date_order() -> Option<crate::outlook::jet_dates::DateOrder> {
+    use windows::Win32::Globalization::{
+        GetLocaleInfoEx, LOCALE_ICALENDARTYPE, LOCALE_RETURN_NUMBER, LOCALE_SSHORTDATE,
+    };
+    // CAL_GREGORIAN, _US, _ME_FRENCH, _ARABIC, _XLIT_ENGLISH, _XLIT_FRENCH.
+    const GREGORIAN_CALENDARS: [u32; 6] = [1, 2, 9, 10, 11, 12];
+    // A NULL locale name is LOCALE_NAME_USER_DEFAULT (with user overrides).
+    let mut num = [0u16; 2];
+    let n = unsafe {
+        GetLocaleInfoEx(PCWSTR::null(), LOCALE_ICALENDARTYPE | LOCALE_RETURN_NUMBER, Some(&mut num))
+    };
+    let calendar = u32::from(num[0]) | (u32::from(num[1]) << 16);
+    if n <= 0 || !GREGORIAN_CALENDARS.contains(&calendar) {
+        return None;
+    }
+    let mut buf = [0u16; 128];
+    let len = unsafe { GetLocaleInfoEx(PCWSTR::null(), LOCALE_SSHORTDATE, Some(&mut buf)) };
+    if len <= 1 {
+        return None;
+    }
+    // The returned length includes the terminating NUL.
+    let pattern = String::from_utf16_lossy(&buf[..len as usize - 1]);
+    crate::outlook::jet_dates::date_order_from_pattern(&pattern)
 }

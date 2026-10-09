@@ -31,6 +31,8 @@ may still have sent.
 | `no attachments with a Content-ID` | The email has no inline images | `list_attachments` shows its regular attachments |
 | `exceeds the 10 MB limit for get_inline_image` | The attachment is too big to return inline | Use `save_attachments` to write it to disk |
 | `empty_deleted_items permanently deletes EVERYTHING` | `confirm` was not true | Only pass `confirm: true` if the user explicitly asked to empty Deleted Items |
+| `Could not apply the date filter: Outlook rejected every date format tried` | Outlook couldn't parse the date filter in this Windows regional format | Report it with the user's Region settings (short date format, calendar). Meanwhile, fetch without dates and filter by date yourself |
+| `Outlook misread the date filter under this Windows regional format` | Outlook returned items far outside the requested dates, so results could be incomplete | Same as above |
 | `HRESULT 0x80040154` (class not registered) | Classic Outlook isn't installed; the "new Outlook" app has no COM | Tell the user the tools need classic Outlook |
 | `HRESULT 0x80080005` (server execution failed) | Outlook isn't running or is hung, or only one of Outlook and the server runs as administrator | Ask the user to (re)start Outlook normally, with the same elevation as the MCP client |
 | `HRESULT 0x80010001` (call rejected) | Outlook is busy or showing a dialog box | Ask the user to close the dialog, then retry once |
@@ -39,9 +41,11 @@ may still have sent.
 
 - **Calendar or inbox is empty, or items come from the wrong dates**, especially on a
   day-first Windows locale (en-GB, en-IL, de-DE, …).
-  - **Cause:** this version sends date filters in US month/day order, so Outlook can misread them.
+  - **Cause:** versions before the fix for issue #1 sent date filters in US month/day
+    order, so Outlook could misread them. Current versions can't misread them: they
+    return either the right items or an error (below).
   - **Confirm:** compare a date-filtered result with an unfiltered one.
-  - **Workaround:** until a locale-aware build ships, fetch without the date filter and filter by date yourself.
+  - **Workaround on an old version:** fetch without the date filter and filter by date yourself.
 - **Fewer emails than expected:**
   - `list_emails` returns one page: `count` defaults to 10, max 200. Page with `offset`.
   - The mail may also have been filed into a subfolder by a rule; check `list_folders`.

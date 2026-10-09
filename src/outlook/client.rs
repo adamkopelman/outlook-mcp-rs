@@ -16,10 +16,12 @@ use crate::constants as c;
 use crate::error::ToolError;
 use crate::outlook::com::{
     call_method, clean_content_id, create_com_object, format_com_error, get_item_categories,
-    get_mapi_prop, get_property, guess_mime, has_member, is_inline, jet_datetime, make_item_id, normalize_cid_request, parse_item_id, put_property, safe_filename,
-    set_item_categories, variant_from_bool, variant_from_datetime, variant_from_i32, variant_from_str,
-    variant_to_bool, variant_to_i32, variant_to_iso_string, variant_to_string, ComGuard,
+    get_mapi_prop, get_property, guess_mime, has_member, is_inline, make_item_id, normalize_cid_request, parse_item_id, put_property, safe_filename,
+    set_item_categories, user_short_date_order, variant_from_bool, variant_from_datetime, variant_from_i32,
+    variant_from_str, variant_to_bool, variant_to_datetime, variant_to_i32, variant_to_iso_string,
+    variant_to_string, ComGuard,
 };
+use crate::outlook::jet_dates::{DateFilter, Placement};
 use crate::outlook::types::*;
 use chrono::Datelike;
 use unicode_normalization::UnicodeNormalization;
@@ -645,6 +647,63 @@ fn is_transient_unknown_name(err: &ToolError) -> bool {
     err.0.contains(DISP_E_UNKNOWNNAME_HEX)
 }
 
+/// One step of a lazy, filtered scan over an Outlook collection.
+enum Scan<T> {
+    Keep(T),
+    Skip,
+    /// Nothing further can match (the collection is sorted past the range).
+    Stop,
+}
+
+/// Applies a date window to `items` with `Restrict`, trying each rendering in
+/// `filters` (the user's short-date order, then ISO; see `jet_dates`) until
+/// Outlook accepts one: `Restrict` and then `probe` (which forces the filter to
+/// be evaluated) must both succeed. The dates are unambiguous, so a rendering
+/// Outlook parses with a different day/month order is rejected, not misread.
+/// If every rendering is rejected this is an error, never unfiltered results.
+fn restrict_dates(
+    items: &IDispatch,
+    filters: &[String],
+    probe: impl Fn(&IDispatch) -> Result<(), ToolError>,
+) -> Result<IDispatch, ToolError> {
+    if filters.is_empty() {
+        return Ok(items.clone());
+    }
+    let mut last_err = String::new();
+    for flt in filters {
+        let attempt = (|| -> Result<IDispatch, ToolError> {
+            let restricted =
+                to_disp(call_method(items, "Restrict", &mut [variant_from_str(flt)])?)?;
+            probe(&restricted)?;
+            Ok(restricted)
+        })();
+        match attempt {
+            Ok(restricted) => return Ok(restricted),
+            Err(err) => last_err = err.0,
+        }
+    }
+    Err(ToolError::new(format!(
+        "Could not apply the date filter: Outlook rejected every date format tried ({}) \
+         under this Windows regional format, so no results are returned rather than \
+         unfiltered ones. Last error: {last_err}",
+        filters.join(" | ")
+    )))
+}
+
+/// The error for an item `Restrict` returned far outside the date window it
+/// was given (`Placement::OutsideWindow`): Outlook misread the filter, so the
+/// results may be incomplete and are not returned.
+fn date_misread_error(field: &str, found: chrono::NaiveDateTime, f: &DateFilter) -> ToolError {
+    let show = |d: Option<chrono::NaiveDate>| d.map_or("…".to_string(), |d| d.to_string());
+    ToolError::new(format!(
+        "Outlook misread the date filter under this Windows regional format: it returned an \
+         item with {field} {found}, outside the requested window {} .. {}. Returning an \
+         error rather than possibly incomplete results.",
+        show(f.window_start),
+        show(f.window_end)
+    ))
+}
+
 /// Runs the `Restrict` + `GetFirst`/`GetNext` enumeration sequence for
 /// `list_events`.
 ///
@@ -662,26 +721,43 @@ fn is_transient_unknown_name(err: &ToolError) -> bool {
 /// unretried.
 fn enumerate_events_with_retry(
     items: &IDispatch,
-    flt: &str,
+    filters: &[String],
+    date_filter: &DateFilter,
     q: &EventQuery,
     calendar_store_id: &str,
 ) -> Result<Vec<EventSummary>, ToolError> {
     const MAX_ATTEMPTS: u32 = 3;
     for attempt in 1..=MAX_ATTEMPTS {
         let outcome = (|| -> Result<Vec<EventSummary>, ToolError> {
-            let restricted =
-                to_disp(call_method(items, "Restrict", &mut [variant_from_str(flt)])?)?;
+            // `GetFirst` forces Outlook to evaluate the filter.
+            let restricted = restrict_dates(items, filters, |r| {
+                call_method(r, "GetFirst", &mut [])?;
+                Ok(())
+            })?;
             // Enumerate with GetFirst/GetNext (not Count/Item): under
             // IncludeRecurrences the collection can expand without bound, so
-            // we must stream it and stop at MAX_CALENDAR_ITEMS.
+            // we must stream it and stop at MAX_CALENDAR_ITEMS. The `Restrict`
+            // window is up to 12 days wider than the request on each side, so
+            // occurrences outside the exact range are skipped here, before
+            // they count towards the cap.
             let mut results = Vec::new();
             let mut current = call_method(&restricted, "GetFirst", &mut [])?;
             while let Ok(item) = IDispatch::try_from(&current) {
-                let summary = event_summary(&item, Some(calendar_store_id))?;
-                if event_matches(&summary, q) {
-                    results.push(summary);
-                    if results.len() >= MAX_CALENDAR_ITEMS {
-                        break;
+                let start = get_property(&item, "Start").ok().and_then(|v| variant_to_datetime(&v));
+                let in_range = match start.map(|t| (t, date_filter.classify(t))) {
+                    Some((_, Placement::InRange)) => true,
+                    Some((t, Placement::OutsideWindow)) => {
+                        return Err(date_misread_error("Start", t, date_filter));
+                    }
+                    Some((_, Placement::Before | Placement::After)) | None => false,
+                };
+                if in_range {
+                    let summary = event_summary(&item, Some(calendar_store_id))?;
+                    if event_matches(&summary, q) {
+                        results.push(summary);
+                        if results.len() >= MAX_CALENDAR_ITEMS {
+                            break;
+                        }
                     }
                 }
                 current = call_method(&restricted, "GetNext", &mut [])?;
@@ -1158,22 +1234,31 @@ impl OutlookClient for WindowsOutlookClient {
                     &mut [variant_from_str("[Importance] = 2")],
                 )?)?;
             }
-            // Date filters: since_days (relative), received_after/before (absolute).
-            if q.since_days.is_some_and(|d| d != 0) {
-                let cutoff = chrono::Local::now().naive_local()
-                    - chrono::Duration::days(q.since_days.unwrap() as i64);
-                let f = format!("[ReceivedTime] >= '{}'", jet_datetime(&cutoff));
-                items = to_disp(call_method(&items, "Restrict", &mut [variant_from_str(&f)])?)?;
+            // Date filters: since_days (relative) and received_after/before
+            // (absolute) combine into one exact, inclusive range. `Restrict`
+            // only gets a slightly wider, unambiguous date-only window (see
+            // `jet_dates`), so no regional day/month order can misread it;
+            // the exact bounds are applied per item below, before paging.
+            let mut after: Option<chrono::NaiveDateTime> = None;
+            if let Some(days) = q.since_days.filter(|&d| d != 0) {
+                after = Some(chrono::Local::now().naive_local() - chrono::Duration::days(days as i64));
             }
-            if let Some(after) = q.received_after.as_deref().filter(|s| !s.is_empty()) {
-                let dt = parse_dt(after, "received_after")?;
-                let f = format!("[ReceivedTime] >= '{}'", jet_datetime(&dt));
-                items = to_disp(call_method(&items, "Restrict", &mut [variant_from_str(&f)])?)?;
+            if let Some(s) = q.received_after.as_deref().filter(|s| !s.is_empty()) {
+                let dt = parse_dt(s, "received_after")?;
+                after = Some(after.map_or(dt, |a| a.max(dt)));
             }
-            if let Some(before) = q.received_before.as_deref().filter(|s| !s.is_empty()) {
-                let dt = parse_dt(before, "received_before")?;
-                let f = format!("[ReceivedTime] <= '{}'", jet_datetime(&dt));
-                items = to_disp(call_method(&items, "Restrict", &mut [variant_from_str(&f)])?)?;
+            let before = match q.received_before.as_deref().filter(|s| !s.is_empty()) {
+                Some(s) => Some(parse_dt(s, "received_before")?),
+                None => None,
+            };
+            let date_filter = DateFilter::new(after, before);
+            if let Some(f) = &date_filter {
+                let filters = f.restrict_filters("ReceivedTime", user_short_date_order().as_ref());
+                // `Count` forces Outlook to evaluate the filter.
+                items = restrict_dates(&items, &filters, |r| {
+                    get_property(r, "Count")?;
+                    Ok(())
+                })?;
             }
 
             // Text query near-last, so the fallback scan below only walks
@@ -1237,11 +1322,13 @@ impl OutlookClient for WindowsOutlookClient {
                 &mut [variant_from_str("[ReceivedTime]"), variant_from_bool(true)],
             )?;
 
-            // Client-side fuzzy filters: non-ASCII text fallback and `to`
-            // recipient fallback (if active) + category + has_attachments +
-            // flagged. Lazily build each summary and keep it only if it
-            // passes; then `take_page` skips the first `offset` matches (after
-            // these filters, so pages line up) and stops at count.
+            // Client-side filters: the exact date range, non-ASCII text
+            // fallback and `to` recipient fallback (if active) + category +
+            // has_attachments + flagged. Lazily build each summary and keep it
+            // only if it passes; then `take_page` skips the first `offset`
+            // matches (after these filters, so pages line up) and stops at
+            // count. Newest first, so the first item older than the date range
+            // ends the scan.
             let cat_want = q.category.as_deref().map(|c| c.to_lowercase());
             let mut total = variant_to_i32(&get_property(&items, "Count")?).unwrap_or(0);
             if text_fallback.is_some() {
@@ -1253,24 +1340,37 @@ impl OutlookClient for WindowsOutlookClient {
                 // Same for the per-item Recipients walk of the `to` fallback.
                 total = total.min(RECIPIENT_SCAN_LIMIT);
             }
-            let matches = (1..=total).filter_map(|i| {
-                (|| -> Result<Option<EmailSummary>, ToolError> {
+            let matches = (1..=total)
+                .map(|i| (|| -> Result<Scan<EmailSummary>, ToolError> {
                     let item = to_disp(call_method(&items, "Item", &mut [variant_from_i32(i)])?)?;
+                    if let Some(f) = &date_filter {
+                        let received = get_property(&item, "ReceivedTime")
+                            .ok()
+                            .and_then(|v| variant_to_datetime(&v));
+                        match received.map(|t| (t, f.classify(t))) {
+                            Some((_, Placement::InRange)) => {}
+                            Some((_, Placement::Before)) => return Ok(Scan::Stop),
+                            Some((t, Placement::OutsideWindow)) => {
+                                return Err(date_misread_error("ReceivedTime", t, f));
+                            }
+                            Some((_, Placement::After)) | None => return Ok(Scan::Skip),
+                        }
+                    }
                     if text_fallback.as_deref().is_some_and(|query| !email_text_matches(&item, query)) {
-                        return Ok(None);
+                        return Ok(Scan::Skip);
                     }
                     if to_scan.is_some_and(|to| !recipient_matches(to, &recipient_strings(&item))) {
-                        return Ok(None);
+                        return Ok(Scan::Skip);
                     }
                     let summary = email_summary(&item)?;
                     if let Some(want) = &cat_want {
                         if !summary.categories.iter().any(|c| c.to_lowercase() == *want) {
-                            return Ok(None);
+                            return Ok(Scan::Skip);
                         }
                     }
                     if let Some(want_att) = q.has_attachments {
                         if summary.has_attachments != want_att {
-                            return Ok(None);
+                            return Ok(Scan::Skip);
                         }
                     }
                     if q.flagged {
@@ -1281,13 +1381,17 @@ impl OutlookClient for WindowsOutlookClient {
                             variant_to_i32(&get_property(&item, "FlagStatus").unwrap_or_default())
                                 .unwrap_or(0);
                         if flag_status == 0 {
-                            return Ok(None);
+                            return Ok(Scan::Skip);
                         }
                     }
-                    Ok(Some(summary))
-                })()
-                .transpose()
-            });
+                    Ok(Scan::Keep(summary))
+                })())
+                .take_while(|r| !matches!(r, Ok(Scan::Stop)))
+                .filter_map(|r| match r {
+                    Ok(Scan::Keep(summary)) => Some(Ok(summary)),
+                    Ok(_) => None,
+                    Err(e) => Some(Err(e)),
+                });
             take_page(matches, q.offset, count)
         })
     }
@@ -1780,12 +1884,19 @@ impl OutlookClient for WindowsOutlookClient {
             // Must precede Sort/Restrict — setting it afterwards has no effect.
             put_property(&items, "IncludeRecurrences", variant_from_bool(true))?;
             call_method(&items, "Sort", &mut [variant_from_str("[Start]")])?;
-            let flt = format!(
-                "[Start] >= '{}' AND [Start] <= '{}'",
-                jet_datetime(&start),
-                jet_datetime(&end)
-            );
-            enumerate_events_with_retry(&items, &flt, &q, &calendar_store_id)
+            // `Restrict` is still needed to bound the recurrence expansion; it
+            // gets an unambiguous date-only window a little wider than
+            // [start, end] (see `jet_dates`), and the exact range is applied
+            // per occurrence in `enumerate_events_with_retry`.
+            let date_filter = DateFilter::new(Some(start), Some(end))
+                .expect("list_events always has both date bounds");
+            let filters = date_filter.restrict_filters("Start", user_short_date_order().as_ref());
+            if filters.is_empty() {
+                return Err(ToolError::new(format!(
+                    "Invalid date range {start} .. {end}: start_date and end_date must be between the years 1000 and 9999."
+                )));
+            }
+            enumerate_events_with_retry(&items, &filters, &date_filter, &q, &calendar_store_id)
         })
     }
 
