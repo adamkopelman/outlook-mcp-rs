@@ -4,16 +4,49 @@ use serde_json::{json, Value};
 
 use crate::error::ToolError;
 use super::types::*;
+use super::filters::DateRange;
 use super::{
     require_empty_confirm, validate_recurrence_update, CheckAvailabilityInput, CreateEventInput,
     EmailQuery, EmailUpdate, EventQuery, EventUpdate, NoteQuery, NoteUpdate, OutlookClient,
-    TaskQuery, TaskUpdate, draft_update_changes, validate_draft_update, DraftUpdate, InlineImage,
+    TaskQuery, TaskUpdate, draft_update_changes, validate_draft_update, DraftUpdate, NewEmail,
+    ReplyInput, parse_importance, prepare_html_images, prepare_mail_body, ValidatedInlineImage,
 };
+use super::read::{
+    output_file_path, prepare_output_dir, replace_cid_references, shape_field, write_output_file,
+    BatchResult, BodyOut, ReadOptions, ReadTool,
+};
+
+/// The first day of the week the fake's date parsing uses: always Monday,
+/// so tests are deterministic. The real client reads it from the Windows
+/// user's regional settings (`com::user_first_day_of_week`).
+pub const FAKE_WEEK_START: chrono::Weekday = chrono::Weekday::Mon;
 
 pub const EMAIL_ID: &str = "entry-1|store-1";
 pub const EVENT_ID: &str = "entry-2|store-1";
 pub const TASK_ID: &str = "entry-3|store-1";
 pub const NOTE_ID: &str = "entry-4|store-1";
+/// An id every batch read reports as not found (a per-item error).
+pub const MISSING_ID: &str = "missing|store-1";
+/// The one inline image the fake email has (see `get_inline_image` and
+/// `get_email`'s `resolve_inline_images`).
+pub const FAKE_IMAGE_CID: &str = "logo@example";
+pub const FAKE_IMAGE_DATA_URI: &str = "data:image/png;base64,iVBORw==";
+/// The bytes `FAKE_IMAGE_DATA_URI` encodes.
+pub const FAKE_IMAGE_BYTES: &[u8] = b"\x89PNG";
+
+fn not_found(id: &str) -> ToolError {
+    ToolError::new(format!("Item not found: {id}"))
+}
+
+/// What a batch read records: the ids plus the resolved options.
+fn read_args(ids_key: &str, ids: &[String], opts: &ReadOptions) -> Value {
+    json!({
+        ids_key: ids, "body": opts.body, "html_body": opts.html_body,
+        "attachments": opts.attachments, "meeting": opts.meeting,
+        "resolve_inline_images": opts.resolve_inline_images,
+        "max_body_chars": opts.max_body_chars, "output_dir": opts.output_dir,
+    })
+}
 
 /// In-memory stand-in for COM Outlook; records every call. Mirrors
 /// `tests/conftest.py::FakeOutlookClient` in the Python project.
@@ -21,6 +54,7 @@ pub struct FakeOutlookClient {
     calls: Mutex<Vec<(String, Value)>>,
     fail_with: Mutex<Option<String>>,
     email_text: Mutex<Option<EmailText>>,
+    email_html: Mutex<Option<String>>,
 }
 
 /// Custom subject/sender/body returned by `list_emails` and `get_email`
@@ -39,7 +73,13 @@ impl FakeOutlookClient {
             calls: Mutex::new(Vec::new()),
             fail_with: Mutex::new(None),
             email_text: Mutex::new(None),
+            email_html: Mutex::new(None),
         }
+    }
+
+    /// Make `get_email` return this HTML body instead of `<p>Hi there</p>`.
+    pub fn set_email_html(&self, html: impl Into<String>) {
+        *self.email_html.lock().unwrap() = Some(html.into());
     }
 
     /// Make `list_emails` and `get_email` return this subject/sender/body
@@ -79,6 +119,26 @@ impl FakeOutlookClient {
     }
 }
 
+/// The Content-IDs of every inline image a mail tool would attach.
+fn content_ids(images: &[ValidatedInlineImage]) -> Vec<String> {
+    images.iter().map(|i| i.content_id.clone()).collect()
+}
+
+/// Validate a [`NewEmail`] like the real client does (body, inline images,
+/// `data:` URIs, importance) and build the recorded arguments: `body` is the
+/// final body (data URIs rewritten to `cid:`), `html` whether it's HTML, and
+/// `inline_content_ids` every inline image that would be attached.
+fn new_email_args(m: &NewEmail) -> Result<Value, ToolError> {
+    parse_importance(m.importance.as_deref())?;
+    let (body, images) = prepare_mail_body(&m.body, m.inline_images.as_deref().unwrap_or(&[]))?;
+    Ok(json!({
+        "to": m.to, "subject": m.subject, "body": body.as_str(), "html": body.is_html(),
+        "cc": m.cc, "bcc": m.bcc, "attachments": m.attachments,
+        "inline_images": m.inline_images, "inline_content_ids": content_ids(&images),
+        "categories": m.categories, "importance": m.importance,
+    }))
+}
+
 impl OutlookClient for FakeOutlookClient {
     fn list_folders(&self) -> Result<Vec<FolderInfo>, ToolError> {
         self.record("list_folders", json!({}))?;
@@ -88,12 +148,15 @@ impl OutlookClient for FakeOutlookClient {
     }
 
     fn list_emails(&self, q: EmailQuery) -> Result<Vec<EmailSummary>, ToolError> {
+        // Same up-front date validation as the real client.
+        DateRange::parse(q.received_after.as_deref(), q.received_before.as_deref(),
+            "received_after", "received_before", chrono::Local::now().naive_local(), FAKE_WEEK_START)?;
         self.record("list_emails", json!({
             "query": q.query, "folder": q.folder, "count": q.count, "offset": q.offset,
             "unread_only": q.unread_only, "from": q.from, "to": q.to, "category": q.category,
             "received_after": q.received_after, "received_before": q.received_before,
-            "since_days": q.since_days, "has_attachments": q.has_attachments,
-            "flagged": q.flagged, "high_importance": q.high_importance,
+            "has_attachments": q.has_attachments, "item_type": q.item_type,
+            "importance": q.importance, "flag": q.flag,
         }))?;
         let text = self.email_text("Hello", "Ada", "");
         Ok(vec![EmailSummary {
@@ -104,53 +167,77 @@ impl OutlookClient for FakeOutlookClient {
         }])
     }
 
-    fn get_email(&self, email_id: String, prefer_html: bool, max_body_chars: Option<u32>)
-        -> Result<EmailDetail, ToolError> {
-        self.record("get_email", json!({
-            "email_id": email_id, "prefer_html": prefer_html, "max_body_chars": max_body_chars,
-        }))?;
+    fn get_email(&self, email_ids: Vec<String>, opts: &ReadOptions) -> BatchResult<EmailDetail> {
+        self.record("get_email", read_args("email_ids", &email_ids, opts))?;
+        let out_dir = opts.output_dir.as_deref().map(prepare_output_dir).transpose()?;
         let text = self.email_text("Hello", "", "Hi there");
-        Ok(EmailDetail {
-            summary: EmailSummary {
-                id: email_id, subject: text.subject, sender: text.sender,
-                sender_email: "".into(), to: "".into(), received: None,
-                unread: false, has_attachments: false, categories: vec![],
-            },
-            cc: "".into(), bcc: "".into(),
-            body_length: text.body.chars().count(), body_truncated: false, body: text.body,
-            html_body: if prefer_html { Some("<p>Hi there</p>".into()) } else { None },
-            html_truncated: if prefer_html { Some(false) } else { None },
-            html_length: if prefer_html { Some(15) } else { None },
-            attachments: vec![],
-            item_type: "email".to_string(),
-            is_meeting: false,
-            meeting: None,
-        })
+        let html_source =
+            self.email_html.lock().unwrap().clone().unwrap_or_else(|| "<p>Hi there</p>".into());
+        Ok(email_ids.into_iter().map(|id| {
+            if id == MISSING_ID {
+                return Err(not_found(&id));
+            }
+            let shape = |full: &str, field: &str, ext: &str| {
+                shape_field(full, ReadTool::Email, &id, field, ext, opts, out_dir.as_deref())
+            };
+            let body = opts.body.then(|| shape(&text.body, "body", ".txt")).transpose()?;
+            let (mut inline_images_resolved, mut inline_images_unresolved) = (None, None);
+            let html = if opts.html_body {
+                let mut full = html_source.clone();
+                if opts.resolve_inline_images {
+                    let images = [(FAKE_IMAGE_CID.to_string(), FAKE_IMAGE_DATA_URI.to_string())];
+                    let rewrite = replace_cid_references(&full, &images);
+                    inline_images_resolved = Some(rewrite.resolved.len());
+                    inline_images_unresolved = Some(rewrite.unresolved);
+                    full = rewrite.html;
+                }
+                Some(shape(&full, "html_body", ".html")?)
+            } else {
+                None
+            };
+            let (body, body_file, body_truncated, body_length) = BodyOut::into_parts(body);
+            let (html_body, html_body_file, html_truncated, html_length) = BodyOut::into_parts(html);
+            Ok(EmailDetail {
+                summary: EmailSummary {
+                    id: id.clone(), subject: text.subject.clone(), sender: text.sender.clone(),
+                    sender_email: "".into(), to: "".into(), received: None,
+                    unread: false, has_attachments: false, categories: vec![],
+                },
+                cc: "".into(), bcc: "".into(),
+                body, body_file, body_truncated, body_length,
+                html_body, html_body_file, html_truncated, html_length,
+                inline_images_resolved, inline_images_unresolved,
+                attachments: opts.attachments.then(Vec::new),
+                item_type: "email".to_string(),
+                is_meeting: false,
+                meeting: None,
+            })
+        }).collect())
     }
 
-    fn send_email(&self, to: Vec<String>, subject: String, body: String,
-        cc: Option<Vec<String>>, bcc: Option<Vec<String>>, html: bool,
-        attachments: Option<Vec<String>>, inline_images: Option<Vec<InlineImage>>)
-        -> Result<Value, ToolError> {
-        self.record("send_email",
-            json!({"to": to, "subject": subject, "body": body, "cc": cc, "bcc": bcc, "html": html, "attachments": attachments, "inline_images": inline_images}))?;
-        Ok(json!({"status": "sent", "to": to.join("; "), "subject": subject}))
+    fn send_email(&self, m: NewEmail) -> Result<Value, ToolError> {
+        let args = new_email_args(&m)?;
+        self.record("send_email", args)?;
+        Ok(json!({"status": "sent", "to": m.to.join("; "), "subject": m.subject}))
     }
 
-    fn create_draft(&self, to: Vec<String>, subject: String, body: String,
-        cc: Option<Vec<String>>, bcc: Option<Vec<String>>, html: bool,
-        attachments: Option<Vec<String>>, inline_images: Option<Vec<InlineImage>>)
-        -> Result<Value, ToolError> {
-        self.record("create_draft",
-            json!({"to": to, "subject": subject, "body": body, "cc": cc, "bcc": bcc, "html": html, "attachments": attachments, "inline_images": inline_images}))?;
-        Ok(json!({"status": "draft_saved", "id": EMAIL_ID, "subject": subject}))
+    fn create_draft(&self, m: NewEmail) -> Result<Value, ToolError> {
+        let args = new_email_args(&m)?;
+        self.record("create_draft", args)?;
+        Ok(json!({"status": "draft_saved", "id": EMAIL_ID, "subject": m.subject}))
     }
 
-    fn reply_email(&self, email_id: String, body: String, reply_all: bool,
-        html: bool, send: bool, attachments: Option<Vec<String>>) -> Result<Value, ToolError> {
-        self.record("reply_email",
-            json!({"email_id": email_id, "body": body, "reply_all": reply_all, "html": html, "send": send, "attachments": attachments}))?;
-        Ok(json!({"status": if send { "sent" } else { "draft_saved" }}))
+    fn reply_email(&self, r: ReplyInput) -> Result<Value, ToolError> {
+        // Same up-front validation as the real client.
+        parse_importance(r.importance.as_deref())?;
+        let (body, images) = prepare_mail_body(&r.body, r.inline_images.as_deref().unwrap_or(&[]))?;
+        self.record("reply_email", json!({
+            "email_id": r.email_id, "body": body.as_str(), "html": body.is_html(),
+            "reply_all": r.reply_all, "send": r.send, "attachments": r.attachments,
+            "inline_images": r.inline_images, "inline_content_ids": content_ids(&images),
+            "categories": r.categories, "importance": r.importance,
+        }))?;
+        Ok(json!({"status": if r.send { "sent" } else { "draft_saved" }}))
     }
 
     fn update_email(&self, u: EmailUpdate) -> Result<Value, ToolError> {
@@ -179,12 +266,26 @@ impl OutlookClient for FakeOutlookClient {
     fn update_draft(&self, u: DraftUpdate) -> Result<Value, ToolError> {
         // Same up-front validation as the real client.
         validate_draft_update(&u)?;
+        let (html_body, images) = match &u.html_body {
+            Some(html) => {
+                let (html, images) = prepare_html_images(html, u.inline_images.as_deref().unwrap_or(&[]))?;
+                (Some(html), images)
+            }
+            None => (None, Vec::new()),
+        };
         self.record("update_draft", json!({
-            "draft_id": u.draft_id, "subject": u.subject, "body": u.body,
-            "html_body": u.html_body, "to": u.to, "cc": u.cc, "bcc": u.bcc,
-            "attachments": u.attachments,
+            "email_id": u.email_id, "subject": u.subject, "body": u.body,
+            "html_body": html_body, "to": u.to, "cc": u.cc, "bcc": u.bcc,
+            "attachments": u.attachments, "inline_images": u.inline_images,
+            "inline_content_ids": content_ids(&images),
+            "add_categories": u.add_categories, "remove_categories": u.remove_categories,
+            "importance": u.importance, "send": u.send,
         }))?;
-        Ok(json!({"status": "draft_updated", "id": u.draft_id, "changed": draft_update_changes(&u)}))
+        let changed = draft_update_changes(&u);
+        if u.send {
+            return Ok(json!({"status": "sent", "subject": u.subject.unwrap_or_default(), "changed": changed}));
+        }
+        Ok(json!({"status": "draft_updated", "id": u.email_id, "changed": changed}))
     }
 
     fn delete_email(&self, email_id: String, permanent: bool) -> Result<Value, ToolError> {
@@ -200,12 +301,14 @@ impl OutlookClient for FakeOutlookClient {
     }
 
     fn list_events(&self, q: EventQuery) -> Result<Vec<EventSummary>, ToolError> {
+        DateRange::parse(q.start_after.as_deref(), q.start_before.as_deref(),
+            "start_after", "start_before", chrono::Local::now().naive_local(), FAKE_WEEK_START)?;
         self.record("list_events", json!({
-            "start_date": q.start_date, "end_date": q.end_date, "query": q.query,
+            "start_after": q.start_after, "start_before": q.start_before, "query": q.query,
             "category": q.category, "show_as": q.show_as, "my_response": q.my_response,
             "attendees": q.attendees, "attendee_role": q.attendee_role,
             "meetings_only": q.meetings_only, "all_day": q.all_day,
-            "calendar_of": q.calendar_of,
+            "calendar_of": q.calendar_of, "count": q.count, "offset": q.offset,
         }))?;
         Ok(vec![EventSummary {
             id: EVENT_ID.into(), subject: "Standup".into(), start: None, end: None,
@@ -216,20 +319,29 @@ impl OutlookClient for FakeOutlookClient {
         }])
     }
 
-    fn get_event(&self, event_id: String) -> Result<EventDetail, ToolError> {
-        self.record("get_event", json!({"event_id": event_id}))?;
-        Ok(EventDetail {
-            summary: EventSummary {
-                id: event_id, subject: "Standup".into(), start: None, end: None,
-                location: "".into(), organizer: "".into(), all_day: false,
-                is_recurring: false, is_meeting: false, categories: vec![],
-                show_as: "busy".into(), my_response: "accepted".into(),
-                required_attendees: "".into(), optional_attendees: "".into(),
-            },
-            body: "".into(),
-            body_truncated: false,
-            recurrence: None,
-        })
+    fn get_event(&self, event_ids: Vec<String>, opts: &ReadOptions) -> BatchResult<EventDetail> {
+        self.record("get_event", read_args("event_ids", &event_ids, opts))?;
+        let out_dir = opts.output_dir.as_deref().map(prepare_output_dir).transpose()?;
+        Ok(event_ids.into_iter().map(|id| {
+            if id == MISSING_ID {
+                return Err(not_found(&id));
+            }
+            let body = opts.body
+                .then(|| shape_field("", ReadTool::Event, &id, "body", ".txt", opts, out_dir.as_deref()))
+                .transpose()?;
+            let (body, body_file, body_truncated, body_length) = BodyOut::into_parts(body);
+            Ok(EventDetail {
+                summary: EventSummary {
+                    id, subject: "Standup".into(), start: None, end: None,
+                    location: "".into(), organizer: "".into(), all_day: false,
+                    is_recurring: false, is_meeting: false, categories: vec![],
+                    show_as: "busy".into(), my_response: "accepted".into(),
+                    required_attendees: "".into(), optional_attendees: "".into(),
+                },
+                body, body_file, body_truncated, body_length,
+                recurrence: None,
+            })
+        }).collect())
     }
 
     fn create_event(&self, input: CreateEventInput) -> Result<Value, ToolError> {
@@ -325,51 +437,97 @@ impl OutlookClient for FakeOutlookClient {
         Ok(AvailabilityResult { people, common_free })
     }
 
-    fn list_attachments(&self, email_id: String)
-        -> Result<Vec<AttachmentInfo>, ToolError> {
-        self.record("list_attachments", json!({"email_id": email_id}))?;
-        Ok(vec![
-            AttachmentInfo {
-                index: 1, filename: "report.pdf".into(), size: 1234, att_type: "file".into(),
-                content_id: None, mime_type: Some("application/pdf".into()), hidden: false,
-                is_inline: false,
-            },
-            AttachmentInfo {
-                index: 2, filename: "logo.png".into(), size: 512, att_type: "file".into(),
-                content_id: Some("logo@example".into()), mime_type: Some("image/png".into()), hidden: true,
-                is_inline: true,
-            },
-        ])
+    fn list_attachments(&self, email_ids: Vec<String>) -> BatchResult<Vec<AttachmentInfo>> {
+        self.record("list_attachments", json!({"email_ids": email_ids}))?;
+        Ok(email_ids.into_iter().map(|id| {
+            if id == MISSING_ID {
+                return Err(not_found(&id));
+            }
+            Ok(vec![
+                AttachmentInfo {
+                    index: 1, filename: "report.pdf".into(), size: 1234, att_type: "file".into(),
+                    content_id: None, mime_type: Some("application/pdf".into()), hidden: false,
+                    is_inline: false,
+                },
+                AttachmentInfo {
+                    index: 2, filename: "logo.png".into(), size: 512, att_type: "file".into(),
+                    content_id: Some(FAKE_IMAGE_CID.into()), mime_type: Some("image/png".into()), hidden: true,
+                    is_inline: true,
+                },
+            ])
+        }).collect())
     }
 
     fn save_attachments(&self, email_id: String, save_dir: String,
-        attachment_names: Option<Vec<String>>) -> Result<Vec<Value>, ToolError> {
-        self.record("save_attachments",
-            json!({"email_id": email_id, "save_dir": save_dir, "attachment_names": attachment_names}))?;
-        Ok(vec![json!({
-            "index": 1, "filename": "report.pdf", "size": 1234, "type": "file",
-            "content_id": null, "mime_type": "application/pdf", "hidden": false, "is_inline": false,
-            "saved_to": save_dir, "status": "saved",
-        })])
+        attachment_names: Option<Vec<String>>, inline: Option<bool>) -> Result<Vec<Value>, ToolError> {
+        self.record("save_attachments", json!({
+            "email_id": email_id, "save_dir": save_dir, "attachment_names": attachment_names,
+            "inline": inline,
+        }))?;
+        // Same two attachments as list_attachments: a regular file and an
+        // inline image. Only `inline` filters here (names are just recorded).
+        let all = vec![
+            json!({
+                "index": 1, "filename": "report.pdf", "size": 1234, "type": "file",
+                "content_id": null, "mime_type": "application/pdf", "hidden": false,
+                "is_inline": false, "saved_to": save_dir, "status": "saved",
+            }),
+            json!({
+                "index": 2, "filename": "logo.png", "size": 512, "type": "file",
+                "content_id": "logo@example", "mime_type": "image/png", "hidden": true,
+                "is_inline": true, "saved_to": save_dir, "status": "saved",
+            }),
+        ];
+        let results: Vec<Value> = all.into_iter()
+            .filter(|a| inline.is_none_or(|want| a["is_inline"] == want))
+            .collect();
+        if results.is_empty() {
+            return Err(ToolError::new("No attachments matched attachment_names / inline."));
+        }
+        Ok(results)
     }
 
-    fn get_inline_image(&self, email_id: String, content_id: String,
-        context_lines: Option<u32>) -> Result<InlineImageData, ToolError> {
+    fn get_inline_image(&self, email_id: String, content_ids: Vec<String>,
+        context_lines: Option<u32>, output_dir: Option<String>) -> BatchResult<InlineImageData> {
         self.record("get_inline_image", json!({
-            "email_id": email_id, "content_id": content_id, "context_lines": context_lines,
+            "email_id": email_id, "content_ids": content_ids, "context_lines": context_lines,
+            "output_dir": output_dir,
         }))?;
-        Ok(InlineImageData {
-            content_id: "logo@example".into(), filename: "logo.png".into(),
-            mime_type: "image/png".into(), size: 4,
-            data_uri: "data:image/png;base64,iVBORw==".into(),
-            context: context_lines.map(|_| "Here is our new logo:".to_string()),
-        })
+        if email_id == MISSING_ID {
+            return Err(not_found(&email_id));
+        }
+        let out_dir = output_dir.as_deref().map(prepare_output_dir).transpose()?;
+        Ok(content_ids.into_iter().map(|raw| {
+            let wanted = super::normalize_content_id(&raw);
+            if !wanted.eq_ignore_ascii_case(FAKE_IMAGE_CID) {
+                return Err(ToolError::new(format!(
+                    "Content-ID '{wanted}' not found. Available Content-IDs: {FAKE_IMAGE_CID}"
+                )));
+            }
+            let (data_uri, data_file) = match out_dir.as_deref() {
+                Some(dir) => {
+                    let key = format!("{email_id}\n{}", wanted.to_lowercase());
+                    let path = output_file_path(dir, "image", &key, "data", ".png");
+                    (None, Some(write_output_file(&path, FAKE_IMAGE_BYTES)?))
+                }
+                None => (Some(FAKE_IMAGE_DATA_URI.to_string()), None),
+            };
+            Ok(InlineImageData {
+                content_id: FAKE_IMAGE_CID.into(), filename: "logo.png".into(),
+                mime_type: "image/png".into(), size: FAKE_IMAGE_BYTES.len(),
+                data_uri, data_file,
+                context: context_lines.map(|_| "Here is our new logo:".to_string()),
+            })
+        }).collect())
     }
 
     fn list_tasks(&self, q: TaskQuery) -> Result<Vec<TaskSummary>, ToolError> {
+        DateRange::parse(q.due_after.as_deref(), q.due_before.as_deref(),
+            "due_after", "due_before", chrono::Local::now().naive_local(), FAKE_WEEK_START)?;
         self.record("list_tasks", json!({
             "include_completed": q.include_completed, "category": q.category,
-            "importance": q.importance, "query": q.query,
+            "importance": q.importance, "query": q.query, "due_after": q.due_after,
+            "due_before": q.due_before, "count": q.count, "offset": q.offset,
         }))?;
         Ok(vec![TaskSummary {
             id: TASK_ID.into(), subject: "Buy milk".into(), due_date: None,
@@ -385,6 +543,31 @@ impl OutlookClient for FakeOutlookClient {
             "categories": categories, "start_date": start_date, "reminder_time": reminder_time,
         }))?;
         Ok(json!({"status": "created", "id": TASK_ID, "subject": subject}))
+    }
+
+    fn get_task(&self, task_ids: Vec<String>, opts: &ReadOptions) -> BatchResult<TaskDetail> {
+        self.record("get_task", read_args("task_ids", &task_ids, opts))?;
+        let out_dir = opts.output_dir.as_deref().map(prepare_output_dir).transpose()?;
+        Ok(task_ids.into_iter().map(|id| {
+            if id == MISSING_ID {
+                return Err(not_found(&id));
+            }
+            let body = opts.body
+                .then(|| shape_field("2 litres, semi-skimmed", ReadTool::Task, &id, "body", ".txt",
+                    opts, out_dir.as_deref()))
+                .transpose()?;
+            let (body, body_file, body_truncated, body_length) = BodyOut::into_parts(body);
+            Ok(TaskDetail {
+                summary: TaskSummary {
+                    id, subject: "Buy milk".into(), due_date: None, complete: false,
+                    status: "not_started".to_string(), importance: "normal".to_string(),
+                    categories: vec![],
+                },
+                body, body_file, body_truncated, body_length,
+                start_date: None, date_completed: None, percent_complete: 0,
+                reminder_set: false, reminder_time: None, created: None, modified: None,
+            })
+        }).collect())
     }
 
     fn update_task(&self, u: TaskUpdate) -> Result<Value, ToolError> {
@@ -415,18 +598,33 @@ impl OutlookClient for FakeOutlookClient {
     }
 
     fn list_notes(&self, q: NoteQuery) -> Result<Vec<NoteSummary>, ToolError> {
-        self.record("list_notes", json!({"category": q.category, "query": q.query}))?;
+        DateRange::parse(q.created_after.as_deref(), q.created_before.as_deref(),
+            "created_after", "created_before", chrono::Local::now().naive_local(), FAKE_WEEK_START)?;
+        self.record("list_notes", json!({
+            "category": q.category, "query": q.query, "created_after": q.created_after,
+            "created_before": q.created_before, "count": q.count, "offset": q.offset,
+        }))?;
         Ok(vec![NoteSummary { id: NOTE_ID.into(), subject: "Ideas".into(), created: None, categories: vec![] }])
     }
 
-    fn get_note(&self, note_id: String) -> Result<NoteDetail, ToolError> {
-        self.record("get_note", json!({"note_id": note_id}))?;
-        Ok(NoteDetail {
-            summary: NoteSummary { id: note_id, subject: "Ideas".into(), created: None, categories: vec![] },
-            body: "Ideas\n- one".into(),
-            body_truncated: false,
-            modified: None,
-        })
+    fn get_note(&self, note_ids: Vec<String>, opts: &ReadOptions) -> BatchResult<NoteDetail> {
+        self.record("get_note", read_args("note_ids", &note_ids, opts))?;
+        let out_dir = opts.output_dir.as_deref().map(prepare_output_dir).transpose()?;
+        Ok(note_ids.into_iter().map(|id| {
+            if id == MISSING_ID {
+                return Err(not_found(&id));
+            }
+            let body = opts.body
+                .then(|| shape_field("Ideas\n- one", ReadTool::Note, &id, "body", ".txt", opts,
+                    out_dir.as_deref()))
+                .transpose()?;
+            let (body, body_file, body_truncated, body_length) = BodyOut::into_parts(body);
+            Ok(NoteDetail {
+                summary: NoteSummary { id, subject: "Ideas".into(), created: None, categories: vec![] },
+                body, body_file, body_truncated, body_length,
+                modified: None,
+            })
+        }).collect())
     }
 
     fn create_note(&self, body: String, categories: Option<Vec<String>>, color: Option<String>) -> Result<Value, ToolError> {
@@ -458,11 +656,7 @@ mod tests {
     use super::*;
 
     fn basic_query() -> EmailQuery {
-        EmailQuery {
-            query: None, folder: "inbox".into(), count: 10, offset: 0, unread_only: false,
-            from: None, to: None, category: None, received_after: None, received_before: None,
-            since_days: None, has_attachments: None, flagged: false, high_importance: false,
-        }
+        EmailQuery::default()
     }
 
     #[test]
@@ -474,9 +668,9 @@ mod tests {
             ("list_folders".to_string(), json!({})),
             ("list_emails".to_string(), json!({
                 "query": null, "folder": "inbox", "count": 10, "offset": 0, "unread_only": false,
-                "from": null, "to": null, "category": null, "received_after": null,
-                "received_before": null, "since_days": null, "has_attachments": null,
-                "flagged": false, "high_importance": false,
+                "from": [], "to": [], "category": [], "received_after": null,
+                "received_before": null, "has_attachments": null,
+                "item_type": [], "importance": [], "flag": [],
             })),
         ]);
     }
