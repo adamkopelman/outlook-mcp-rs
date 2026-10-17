@@ -3,5 +3,6 @@ pub mod constants;
 pub mod error;
 pub mod friendly;
 pub mod outlook;
+pub mod params;
 pub mod server;
 pub mod transport;

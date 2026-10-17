@@ -1,0 +1,29 @@
+{
+  "name": "outlook-mcp-rs",
+  "displayName": "Outlook (outlook-mcp-rs)",
+  "description": "Drive classic Outlook on Windows from Claude Code: the outlook-mcp-rs MCP server, skills for using it safely, and an optional calendar-autopilot approval hook.",
+  "author": { "name": "outlook-mcp-rs contributors", "url": "https://github.com/adamkopelman/outlook-mcp-rs" },
+  "homepage": "https://github.com/adamkopelman/outlook-mcp-rs#install-as-a-claude-code-plugin",
+  "repository": "https://github.com/adamkopelman/outlook-mcp-rs",
+  "license": "MIT",
+  "keywords": ["outlook", "email", "calendar", "mcp", "windows"],
+  "mcpServers": {
+    "outlook": {
+      "command": "${user_config.server_path}"
+    }
+  },
+  "userConfig": {
+    "server_path": {
+      "type": "file",
+      "title": "outlook-mcp-rs.exe",
+      "description": "Full path to outlook-mcp-rs.exe (from the GitHub release or cargo build --release). Classic Outlook must be running on this machine.",
+      "required": true
+    },
+    "calendar_autopilot": {
+      "type": "boolean",
+      "title": "Calendar autopilot",
+      "description": "Run reads, silent meeting responses (notify: false) and changes to personal appointments (require_no_attendees: true) without asking. Anything that can reach other people still asks.",
+      "default": false
+    }
+  }
+}

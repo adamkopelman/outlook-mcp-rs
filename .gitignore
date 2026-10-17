@@ -2,3 +2,4 @@
 Cargo.lock
 /.worktrees
 /.superpowers
+__pycache__/

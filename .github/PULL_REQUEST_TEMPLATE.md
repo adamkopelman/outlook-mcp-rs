@@ -45,4 +45,5 @@ Keep the PR focused — one logical change per PR is easier to review.
 
 - [ ] I have read the contributing guidance and this change is focused on a single concern.
 - [ ] Documentation (README / tool list) is updated if behavior or tools changed.
+- [ ] `CHANGELOG.md` has an entry for this PR under **Unreleased**.
 - [ ] No private mailbox content or credentials are included in the diff, tests, or logs.

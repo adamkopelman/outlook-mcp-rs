@@ -12,6 +12,17 @@ pub fn importance_word(v: i32) -> &'static str {
     }
 }
 
+/// `update_note`'s `color` word for a `NoteItem.Color` value.
+pub fn note_color_word(v: i32) -> &'static str {
+    match v {
+        c::OL_NOTE_COLOR_BLUE => "blue",
+        c::OL_NOTE_COLOR_GREEN => "green",
+        c::OL_NOTE_COLOR_PINK => "pink",
+        c::OL_NOTE_COLOR_WHITE => "white",
+        _ => "yellow",
+    }
+}
+
 pub fn response_word(v: i32) -> &'static str {
     match v {
         c::OL_RESPONSE_ORGANIZED => "organizer",
@@ -151,6 +162,13 @@ pub fn meeting_type_from_class(class: &str) -> &'static str {
 #[cfg(test)]
 mod class_tests {
     use super::*;
+
+    #[test]
+    fn note_color_words_round_trip() {
+        for w in ["blue", "green", "pink", "yellow", "white"] {
+            assert_eq!(note_color_word(c::note_color_to_id(w).unwrap()), w);
+        }
+    }
 
     #[test]
     fn item_type_mapping() {

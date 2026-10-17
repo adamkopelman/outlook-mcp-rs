@@ -28,6 +28,14 @@ Run them with:
 cargo test --test live_outlook -- --ignored
 ```
 
+The date-filter tests from issue #1
+(`list_events_date_range_is_read_the_same_in_every_locale`,
+`list_events_returns_only_in_range_occurrences_of_an_earlier_series`,
+`list_emails_received_after_matches_an_unfiltered_scan`) are worth running under
+more than one regional format: switch Windows' *Regional format* (e.g. to English
+(Israel) or German, which are day-first) and restart Outlook before each run. They
+create and delete personal appointments in September 2026 and send nothing.
+
 ## Full system tests (one run across many tools)
 
 Besides the per-feature live tests above, there are larger system tests. Each
@@ -41,10 +49,13 @@ Outlook:
 | `cargo test --test system_test_p10_12 -- --ignored --nocapture` | Plans 10–12 (availability, tasks, notes) | `SYSTEM_TEST_PLAN_2026-07-16-P10-12.md`, `SYSTEM_TEST_RESULTS_2026-07-16-P10-12.md` |
 | `cargo test --test system_test_prs -- --ignored --nocapture` | PRs #14–#25: `list_emails` offset/`to`/non-ASCII search, `get_email` truncation flags, `update_draft`, permanent delete, attachment metadata, inline images, `get_inline_image` | `SYSTEM_TEST_PLAN_2026-10-03-PRS.md`, `SYSTEM_TEST_RESULTS_2026-10-03-PRS.md` |
 
-`system_test_prs` sends **one** real email, a self-loop to the mailbox
-owner's own address (`SELF_ADDR` in the test; change it before running on
-another mailbox). Everything else is a draft addressed to
-`nobody@example.invalid`. It never calls `empty_deleted_items(confirm=true)`.
+| `cargo test --test system_test_prs_2026_10_17 -- --ignored --nocapture` | PRs #37–#56: `*_file` inputs, `data:` images, `update_draft` send, batch reads, list conventions and date grammar, locale-proof dates, output controls, occurrence ids, batch writes and `undo`, `require_no_attendees`, tool annotations, permanent delete of events/tasks/notes. Runs through the real MCP tool layer (JSON-RPC over the stdio codec) | `SYSTEM_TEST_PLAN_2026-10-17-PRS.md`, `SYSTEM_TEST_RESULTS_2026-10-17-PRS.md` |
+
+`system_test_prs` and `system_test_prs_2026_10_17` each send **one** real
+email, a self-loop to the mailbox owner's own address (`SELF_ADDR` / `SELF`
+in the test; change it before running on another mailbox). Everything else is
+a draft addressed to `nobody@example.invalid`, or a personal appointment. They
+never call `empty_deleted_items(confirm=true)`.
 
 How these are planned, run, and root-caused is described in the
 `live-outlook-system-test` skill (`.claude/skills/live-outlook-system-test/SKILL.md`).
@@ -77,6 +88,21 @@ before a release:
    attendee addresses with `send_update: false`, so nothing is ever
    delivered — this is why real-recipient delivery still needs a manual check.)
 
+`update_draft` with `send: true` actually sends the draft, so its success
+path is manual-only: create a draft addressed to a recipient you control, call
+`update_draft` with `send: true` (optionally with a change such as a new
+`subject`), and confirm it arrives and leaves Drafts. The automated live test
+`update_draft_send_without_recipients_saves_and_refuses` covers only the
+refusal path (a draft with no recipients is saved, not sent).
+
+The content-writing conventions (`html_body`/`*_file` inputs, `data:` URI
+images converted to inline attachments, `inline_images` on `update_draft` and
+`reply_email`, categories and importance on drafts) are covered by drafts-only
+live tests:
+`cargo test --test live_outlook -- --ignored create_draft_turns_data_uri_into_inline_attachment_with_metadata update_draft_adds_inline_images_categories_and_importance_without_duplicates update_draft_send_without_recipients_saves_and_refuses reply_email_draft_with_data_uri_image`.
+`reply_email_draft_with_data_uri_image` replies (as an unsent draft, then
+deleted) to the newest Inbox item, and skips if the Inbox is empty.
+
 `update_email`'s `flag` field (`follow_up`/`complete`/`clear`) is also
 manual-only. The automated live test (`update_email_applies_state_then_moves`)
 exercises `mark_read`, `add_categories`, `importance`, and `move_to` against a
@@ -106,6 +132,13 @@ subject/sender) is covered by the live suite:
 tool — `mark_complete: true`/`false` on `update_task` now covers completing
 *and* reopening a task) are covered by the live suite:
 `cargo test --test live_outlook -- --ignored list_tasks_filters_and_create_task_additions_round_trip update_task_marks_complete_then_reopens delete_task_removes_it`.
+
+`permanent: true` on `delete_task`, `delete_note` and `delete_event` is covered
+by the live suite (each soft-deletes one probe and finds it in Deleted Items,
+then hard-deletes it from there, and hard-deletes a second probe straight from
+its folder and asserts it never lands in Deleted Items; the meeting probe is
+saved unsent and deleted with `send_cancellation: false`, so nothing is sent):
+`cargo test --test live_outlook -- --ignored permanent_delete_task_skips_deleted_items permanent_delete_note_skips_deleted_items permanent_delete_event_skips_deleted_items permanent_delete_of_unsent_meeting_cancels_quietly_then_skips_deleted_items`.
 `list_tasks`'s `query` filter matching real task body text (not just
 subject) is covered separately by:
 `cargo test --test live_outlook -- --ignored list_tasks_query_matches_real_body_text`.
@@ -116,6 +149,38 @@ real body text, not just a derived subject), `create_note`'s additions
 `update_note`/`delete_note` are covered by the live suite:
 `cargo test --test live_outlook -- --ignored list_notes_filters_and_create_note_additions_round_trip get_note_includes_modified_after_update update_note_manages_categories_and_color delete_note_removes_it`.
 
+The shared `list_*` conventions (date grammar on `received_*`, `item_type`,
+`flag`, scoped/phrase/wildcard `query`, and `count`/`offset` paging on events,
+tasks and notes) are covered by read-only live tests:
+`cargo test --test live_outlook -- --ignored list_emails_relative_dates_bound_received_time list_emails_item_type_filter_matches_get_email list_emails_flag_states_partition_the_folder list_emails_subject_scope_and_phrase_find_a_recent_subject list_events_tasks_notes_pages_tile_without_overlap`.
+Like the issue #1 tests above, the date test is worth running under a day-first
+regional format too.
+
+`list_events`' `user_is_required` / `user_is_optional` (including `null`
+when list expansion hits its bounds), attendee counts, the `is_canceled`
+filter, the skipped role computation, and the time the role computation
+adds (issues #43, #44) are covered by a read-only live test over this
+week's real calendar:
+`cargo test --test live_outlook -- --ignored list_events_user_role_and_compact_fields_on_a_real_week`.
+It prints how many invites the user was found on, how many came back
+unknown, and both timings; check the counts against Outlook, especially for
+meetings sent to a distribution list. `fields` / `compact` / `output_dir`
+on every list tool are covered by the fake-based tool tests.
+
+Occurrence ids (issue #45) are covered by a live test that creates a
+far-future daily series of personal appointments (nothing is sent), reads,
+moves and deletes single occurrences, and deletes the series:
+`cargo test --test live_outlook -- --ignored occurrence_ids_act_on_one_occurrence_only`.
+
+Batch writes and `undo` (issue #46) are covered by the fake-based tool tests
+(lists of ids and `updates` on every write tool, per-item errors, and
+rolling a batch back with its `undo` objects), and by a live test that
+updates a far-future personal appointment and puts it back with its `undo`:
+`cargo test --test live_outlook -- --ignored update_event_undo_restores_the_previous_values`.
+Batch `respond_to_meeting` reuses the single-response client path once per
+id, so it has no separate live test (a live response would notify a real
+organizer).
+
 `check_availability`'s single-mailbox path (resolving your own address and
 reading its free/busy slots, plus the graceful-failure path for an address
 that can't provide free/busy data) is covered by the live suite:
@@ -125,3 +190,14 @@ check, since Outlook must actually have published free/busy for that
 account, which can't be arranged from an automated test. To verify by hand,
 call `check_availability` with a colleague's email address in `people` and
 confirm their slots reflect their real calendar.
+
+The calendar safety features (issue #48) are covered by the fake-based tool
+tests: `require_no_attendees` on `create_event`, `update_event` (including
+inside an `updates` batch, whose undo keeps it) and `delete_event`; the
+shared `notify` flag and its old names; and the MCP safety hints of every
+tool. The `calendar_autopilot` Claude Code hook has its own tests (Python 3,
+standard library only), which also check its tables against the tools' MCP
+hints: `python -m unittest discover hooks`. They also cover the plugin launcher
+and its on/off option. The Claude Code plugin manifests are checked with
+`claude plugin validate .`; the only expected warning is the deliberately
+missing `version`.

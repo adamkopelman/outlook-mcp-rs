@@ -1,0 +1,12 @@
+{
+  "name": "outlook-mcp-rs",
+  "description": "The outlook-mcp-rs Claude Code plugin.",
+  "owner": { "name": "outlook-mcp-rs contributors", "url": "https://github.com/adamkopelman/outlook-mcp-rs" },
+  "plugins": [
+    {
+      "name": "outlook-mcp-rs",
+      "source": "./",
+      "description": "The outlook-mcp-rs MCP server for classic Outlook on Windows, its skills, and an optional calendar-autopilot approval hook."
+    }
+  ]
+}

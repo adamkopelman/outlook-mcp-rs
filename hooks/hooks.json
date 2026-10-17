@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__plugin_outlook-mcp-rs_outlook__.*",
+        "hooks": [
+          { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}\"/hooks/run_calendar_autopilot.sh" }
+        ]
+      }
+    ]
+  }
+}
