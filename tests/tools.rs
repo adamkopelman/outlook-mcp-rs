@@ -1967,7 +1967,9 @@ async fn respond_to_meeting_batch_returns_per_item_results() {
     assert_eq!(v[0], json!({"id": EVENT_ID, "status": "Accept_sent"}));
     assert_eq!(v[1]["id"], "bad|id|x");
     assert!(v[1]["error"].as_str().unwrap().contains("Invalid event id"));
-    assert_eq!(v[2]["id"], OCCURRENCE_ID);
+    // Like a single call: the series' current id, plus the occurrence's id.
+    assert_eq!(v[2]["id"], EVENT_ID);
+    assert_eq!(v[2]["occurrence_id"], OCCURRENCE_ID);
     let calls = fake.calls();
     assert_eq!(calls.len(), 2);
     assert!(calls.iter().all(|(_, a)| a["send"] == false && a["response"] == "Accept"));
@@ -1977,6 +1979,22 @@ async fn respond_to_meeting_batch_returns_per_item_results() {
     let err = server.respond_to_meeting(Parameters(params)).await.unwrap_err();
     assert!(err.message.contains("Invalid response"), "{}", err.message);
     assert_eq!(fake.calls().len(), 2, "a bad response fails before any call");
+}
+
+#[tokio::test]
+async fn a_batch_write_returns_each_items_current_id_like_a_single_call() {
+    // Found live: a batch respond_to_meeting returned the ids it was called
+    // with, but accepting gives the calendar item a new EntryID, so they no
+    // longer opened anything. The same goes for update_email's move_to.
+    let server = OutlookMcpServer::new(Arc::new(FakeOutlookClient::new()));
+    let one: UpdateEmailParams = serde_json::from_value(json!({"email_id": EMAIL_ID, "move_to": "Archive"})).unwrap();
+    let one = result_json(&server.update_email(Parameters(one)).await.unwrap());
+    let many: UpdateEmailParams = serde_json::from_value(json!({"email_id": [EMAIL_ID, EMAIL_ID], "move_to": "Archive"})).unwrap();
+    let many = result_json(&server.update_email(Parameters(many)).await.unwrap());
+    assert_ne!(one["id"], EMAIL_ID, "a move changes the id");
+    assert_eq!(many[0]["id"], one["id"], "{many}");
+    assert_eq!(many[1]["id"], one["id"], "{many}");
+    assert_eq!(many[0]["undo"]["email_id"], one["id"], "undo is addressed by the current id too");
 }
 
 #[tokio::test]

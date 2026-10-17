@@ -239,15 +239,19 @@ where
     batch_content(&ids, many, results, merge_id)
 }
 
-/// A batch item's result with the id it answers first: `{"id", ...v}`.
+/// A batch item's result: exactly what a single call returns, with `id` set
+/// to the id it was called with only when the result has none. A write's own
+/// `id` is the item's current id (#45), which differs from the one it was
+/// called with after e.g. accepting a meeting or `move_to`; the batch order
+/// still says which input each result answers.
 fn merge_id(id: &str, v: Value) -> Value {
-    let mut out = json!({"id": id});
-    if let (Some(o), Value::Object(fields)) = (out.as_object_mut(), v) {
-        for (k, val) in fields {
-            o.entry(k).or_insert(val);
+    match v {
+        Value::Object(mut fields) => {
+            fields.entry("id").or_insert_with(|| json!(id));
+            Value::Object(fields)
         }
+        _ => json!({"id": id}),
     }
-    out
 }
 
 #[derive(Clone)]
