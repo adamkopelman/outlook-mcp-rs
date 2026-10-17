@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import unittest
@@ -131,7 +132,9 @@ class HookProtocolTest(unittest.TestCase):
     def test_launcher_asks_when_no_python_is_found(self):
         launcher = os.path.join(os.path.dirname(__file__), "run_calendar_autopilot.sh")
         event = {"tool_name": "mcp__plugin_outlook-mcp-rs_outlook__send_email", "tool_input": {}}
-        out = self.run_hook(event, {"PATH": "/nonexistent"}, ["/bin/sh", launcher])
+        # Resolve sh before PATH is emptied; on Windows it is Git Bash's sh.exe, not /bin/sh.
+        sh = shutil.which("sh") or "/bin/sh"
+        out = self.run_hook(event, {"PATH": "/nonexistent"}, [sh, launcher])
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
 
     def test_prints_a_pre_tool_use_decision(self):
