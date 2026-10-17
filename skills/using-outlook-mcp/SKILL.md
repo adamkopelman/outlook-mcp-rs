@@ -77,7 +77,8 @@ permanent delete. Never set `confirm: true` on your own initiative.
   `start_of_year`/`end_of_year`; weeks start on the first day of the week in the Windows user's
   regional settings, e.g. Monday or Sunday), an offset from now (`-14d`, `+3h`, `-2w`;
   units `m h d w mo y`), or a keyword plus offsets (`start_of_week-1w`). A bare date in a
-  `*_before` filter includes that whole day.
+  `*_before` filter includes that whole day. Date bounds are inclusive, exact to the second,
+  and read the same under any Windows regional date format.
 - **All `list_*` tools:**
   - Filters AND together. String filters take one value or a list (matching any): `from: ["A", "B"]`.
   - `query`: terms must all match (any case, any language); `"quoted phrase"`; `*` wildcard;

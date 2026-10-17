@@ -279,7 +279,7 @@ Every date parameter on every tool (list filters, `create_event`/`update_event` 
 | Offset from now | `-14d`, `+3h`, `-2w`, `-30m`, `+1mo`, `-1y` | Units: `m` minutes, `h` hours, `d` days, `w` weeks, `mo` months, `y` years |
 | Keyword plus offsets | `today-1d`, `start_of_week-1w`, `tomorrow+9h` | Applied left to right |
 
-Known issue: on a day-first Windows locale, date *filters* can still return the wrong range (issue #1); the grammar above is not affected.
+Date filters read the same under any Windows regional format; see [Date filters and regional formats](#date-filters-and-regional-formats).
 
 ### Reading items
 
@@ -508,6 +508,19 @@ To fix it:
   PowerShell line above. Or inspect it in a UTF-8 viewer.
 - On a remote (`--http`) setup, use a client that honours the `charset` in
   `Content-Type`; any MCP SDK client does.
+
+### Date filters and regional formats
+
+`list_emails` and `list_events` date filters work under any Windows regional date
+format. Outlook's `Items.Restrict` parses filter dates in the user's own format, so a
+fixed `MM/DD/YYYY` string is silently misread on day-first locales (issue #1). Instead,
+the server pre-filters with a slightly wider date-only window whose bounds are always
+unambiguous dates (day ≥ 13, or day = month, with a 4-digit year), written in the
+user's short-date order and then as ISO `yyyy-mm-dd` if Outlook rejects that. A parser
+that disagrees about the day/month order can only reject such a date, never misread it.
+Each item is then checked against the exact requested bounds. If Outlook can't parse
+the filter, or returns items far outside it, the tool returns an error instead of wrong
+results.
 
 ## Skills for AI assistants
 

@@ -32,8 +32,7 @@
 //! it can be unit tested; [`parse_date_param`] is the wrapper the COM client uses.
 //!
 //! The result is a `NaiveDateTime`; turning it into a `Restrict` filter
-//! string is `com::jet_datetime`'s job (and its day-first-locale bug is
-//! issue #1, not this module's).
+//! string that no regional date format can misread is `jet_dates`' job.
 
 use chrono::{Datelike, Duration, Months, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 

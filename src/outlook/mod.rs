@@ -6,6 +6,7 @@ pub mod occurrence;
 pub mod rows;
 pub mod fake;
 pub mod filters;
+pub mod jet_dates;
 pub mod read;
 pub mod text_query;
 pub mod types;

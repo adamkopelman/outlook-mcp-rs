@@ -56,6 +56,7 @@ Notable changes to outlook-mcp-rs. The format follows [Keep a Changelog](https:/
 - `list_emails` search with Hebrew or other non-ASCII text returned nothing; it now falls back to a client-side match ([#15](https://github.com/adamkopelman/outlook-mcp-rs/pull/15)).
 - HTTP mode declares `charset=utf-8` on its responses, so clients no longer decode Hebrew as Latin-1 ([#40](https://github.com/adamkopelman/outlook-mcp-rs/pull/40)).
 - Ids after a write: every tool that changes an item and leaves it in place returns its current id. `respond_to_meeting` returned none, though accepting gives the item a new one; `update_event`, `update_task` and `update_note` echoed the id they were given ([#50](https://github.com/adamkopelman/outlook-mcp-rs/pull/50)).
+- Date filters on day-first Windows locales returned the wrong range: bounds are now written so no regional format can misread them, and items are filtered exactly on their real dates ([#42](https://github.com/adamkopelman/outlook-mcp-rs/pull/42)).
 
 ## [0.3.0] - 2026-07-18
 

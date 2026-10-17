@@ -28,6 +28,14 @@ Run them with:
 cargo test --test live_outlook -- --ignored
 ```
 
+The date-filter tests from issue #1
+(`list_events_date_range_is_read_the_same_in_every_locale`,
+`list_events_returns_only_in_range_occurrences_of_an_earlier_series`,
+`list_emails_received_after_matches_an_unfiltered_scan`) are worth running under
+more than one regional format: switch Windows' *Regional format* (e.g. to English
+(Israel) or German, which are day-first) and restart Outlook before each run. They
+create and delete personal appointments in September 2026 and send nothing.
+
 ## Full system tests (one run across many tools)
 
 Besides the per-feature live tests above, there are larger system tests. Each
@@ -142,8 +150,8 @@ The shared `list_*` conventions (date grammar on `received_*`, `item_type`,
 `flag`, scoped/phrase/wildcard `query`, and `count`/`offset` paging on events,
 tasks and notes) are covered by read-only live tests:
 `cargo test --test live_outlook -- --ignored list_emails_relative_dates_bound_received_time list_emails_item_type_filter_matches_get_email list_emails_flag_states_partition_the_folder list_emails_subject_scope_and_phrase_find_a_recent_subject list_events_tasks_notes_pages_tile_without_overlap`.
-On a day-first Windows locale the date test can still fail because of issue #1
-(`jet_datetime`), which is independent of the grammar.
+Like the issue #1 tests above, the date test is worth running under a day-first
+regional format too.
 
 `list_events`' `user_is_required` / `user_is_optional` (including `null`
 when list expansion hits its bounds), attendee counts, the `is_canceled`
