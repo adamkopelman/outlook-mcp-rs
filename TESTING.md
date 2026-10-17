@@ -49,10 +49,13 @@ Outlook:
 | `cargo test --test system_test_p10_12 -- --ignored --nocapture` | Plans 10–12 (availability, tasks, notes) | `SYSTEM_TEST_PLAN_2026-07-16-P10-12.md`, `SYSTEM_TEST_RESULTS_2026-07-16-P10-12.md` |
 | `cargo test --test system_test_prs -- --ignored --nocapture` | PRs #14–#25: `list_emails` offset/`to`/non-ASCII search, `get_email` truncation flags, `update_draft`, permanent delete, attachment metadata, inline images, `get_inline_image` | `SYSTEM_TEST_PLAN_2026-10-03-PRS.md`, `SYSTEM_TEST_RESULTS_2026-10-03-PRS.md` |
 
-`system_test_prs` sends **one** real email, a self-loop to the mailbox
-owner's own address (`SELF_ADDR` in the test; change it before running on
-another mailbox). Everything else is a draft addressed to
-`nobody@example.invalid`. It never calls `empty_deleted_items(confirm=true)`.
+| `cargo test --test system_test_prs_2026_10_17 -- --ignored --nocapture` | PRs #37–#56: `*_file` inputs, `data:` images, `update_draft` send, batch reads, list conventions and date grammar, locale-proof dates, output controls, occurrence ids, batch writes and `undo`, `require_no_attendees`, tool annotations, permanent delete of events/tasks/notes. Runs through the real MCP tool layer (JSON-RPC over the stdio codec) | `SYSTEM_TEST_PLAN_2026-10-17-PRS.md`, `SYSTEM_TEST_RESULTS_2026-10-17-PRS.md` |
+
+`system_test_prs` and `system_test_prs_2026_10_17` each send **one** real
+email, a self-loop to the mailbox owner's own address (`SELF_ADDR` / `SELF`
+in the test; change it before running on another mailbox). Everything else is
+a draft addressed to `nobody@example.invalid`, or a personal appointment. They
+never call `empty_deleted_items(confirm=true)`.
 
 How these are planned, run, and root-caused is described in the
 `live-outlook-system-test` skill (`.claude/skills/live-outlook-system-test/SKILL.md`).
