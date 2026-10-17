@@ -729,20 +729,30 @@ pub struct CheckAvailabilityInput {
     pub treat_as_free: Vec<String>,
 }
 
+/// The `OlBusyStatus` for one character of a `Recipient.FreeBusy` string.
+/// The string mostly uses `OlBusyStatus`'s digits ('0' free, '1' tentative,
+/// '2' busy, '3' out of office), but reports working elsewhere (status 4) as
+/// '5' (confirmed live: appointments with BusyStatus 0..4 read "01235").
+/// '4' keeps its `OlBusyStatus` meaning (unverified live; in Exchange
+/// free/busy it may mean "no data"). Anything else counts as busy.
+fn freebusy_char_status(ch: char) -> i32 {
+    match ch {
+        '5' => crate::constants::OL_WORKING_ELSEWHERE,
+        _ => ch.to_digit(10).map(|d| d as i32).unwrap_or(crate::constants::OL_BUSY),
+    }
+}
+
 /// Parses Outlook's raw `Recipient.FreeBusy` status-code string (one ASCII
-/// digit per `interval_minutes`-sized slot: `'0'` free, `'1'` tentative,
-/// `'2'` busy, `'3'` out-of-office, `'4'` working-elsewhere — the exact
-/// `OlBusyStatus` numbering `friendly::busy_status_word` already maps) into
-/// the timestamped slots that overlap `[start, end)`.
+/// digit per `interval_minutes`-sized slot, decoded by
+/// [`freebusy_char_status`]) into the timestamped slots that overlap
+/// `[start, end)`.
 ///
 /// The string always begins at 00:00 of `start`'s date, whatever `start`'s
 /// time (confirmed live: a 10:00 appointment is at index 20 of a 30-minute
 /// string for starts of 00:00, 08:00 and 13:00), and it covers a much longer
 /// range than the window (`FreeBusy` has no end parameter). So slots are
 /// aligned to midnight: a window starting off a slot boundary includes the
-/// slot that contains `start`. Any digit outside 0-4 (Outlook shouldn't
-/// produce one, but the string could be malformed) falls back to `"busy"`,
-/// the same catch-all `busy_status_word` uses.
+/// slot that contains `start`.
 pub fn parse_freebusy_slots(
     raw: &str,
     start: &chrono::NaiveDateTime,
@@ -757,7 +767,7 @@ pub fn parse_freebusy_slots(
         .skip_while(|(slot_start, _)| *slot_start + step <= *start)
         .take_while(|(slot_start, _)| slot_start < end)
         .map(|(slot_start, ch)| {
-            let code = ch.to_digit(10).map(|d| d as i32).unwrap_or(crate::constants::OL_BUSY);
+            let code = freebusy_char_status(ch);
             AvailabilitySlot {
                 start: slot_start.format("%Y-%m-%dT%H:%M:%S").to_string(),
                 end: (slot_start + step).format("%Y-%m-%dT%H:%M:%S").to_string(),
@@ -1845,6 +1855,16 @@ mod tests {
         // than the caller's requested [start, end) window.
         let slots = parse_freebusy_slots(&"0".repeat(1392), &dt("2099-01-01T09:00:00"), &dt("2099-01-01T10:30:00"), 30);
         assert_eq!(slots.len(), 3);
+    }
+
+    #[test]
+    fn parse_freebusy_slots_reads_working_elsewhere_as_5() {
+        // Found live: the FreeBusy string reports BusyStatus 4 (working
+        // elsewhere) as '5'; appointments with BusyStatus 0..4 came back as
+        // "01235". It used to fall through to "busy".
+        let slots = parse_freebusy_slots("01235", &dt("2099-01-01T00:00:00"), &dt("2099-01-01T02:30:00"), 30);
+        let got: Vec<&str> = slots.iter().map(|s| s.status.as_str()).collect();
+        assert_eq!(got, vec!["free", "tentative", "busy", "out_of_office", "working_elsewhere"]);
     }
 
     #[test]
