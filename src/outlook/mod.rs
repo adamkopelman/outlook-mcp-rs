@@ -733,29 +733,34 @@ pub struct CheckAvailabilityInput {
 /// digit per `interval_minutes`-sized slot: `'0'` free, `'1'` tentative,
 /// `'2'` busy, `'3'` out-of-office, `'4'` working-elsewhere — the exact
 /// `OlBusyStatus` numbering `friendly::busy_status_word` already maps) into
-/// timestamped slots starting at `start`. `FreeBusy` returns a string
-/// covering a much longer range than the caller's `[start, end)` window (it
-/// has no `end` parameter), so callers must compute `max_slots` themselves
-/// — `(end - start) / interval_minutes`, rounded up — and this function
-/// truncates to it. Any digit outside 0-4 (Outlook shouldn't produce one,
-/// but the string could be malformed) falls back to `"busy"`, the same
-/// catch-all `busy_status_word` uses.
+/// the timestamped slots that overlap `[start, end)`.
+///
+/// The string always begins at 00:00 of `start`'s date, whatever `start`'s
+/// time (confirmed live: a 10:00 appointment is at index 20 of a 30-minute
+/// string for starts of 00:00, 08:00 and 13:00), and it covers a much longer
+/// range than the window (`FreeBusy` has no end parameter). So slots are
+/// aligned to midnight: a window starting off a slot boundary includes the
+/// slot that contains `start`. Any digit outside 0-4 (Outlook shouldn't
+/// produce one, but the string could be malformed) falls back to `"busy"`,
+/// the same catch-all `busy_status_word` uses.
 pub fn parse_freebusy_slots(
     raw: &str,
     start: &chrono::NaiveDateTime,
+    end: &chrono::NaiveDateTime,
     interval_minutes: i32,
-    max_slots: usize,
 ) -> Vec<AvailabilitySlot> {
+    let midnight = start.date().and_hms_opt(0, 0, 0).expect("midnight is a valid time");
+    let step = chrono::Duration::minutes(interval_minutes.max(1) as i64);
     raw.chars()
-        .take(max_slots)
         .enumerate()
-        .map(|(i, ch)| {
+        .map(|(i, ch)| (midnight + step * i as i32, ch))
+        .skip_while(|(slot_start, _)| *slot_start + step <= *start)
+        .take_while(|(slot_start, _)| slot_start < end)
+        .map(|(slot_start, ch)| {
             let code = ch.to_digit(10).map(|d| d as i32).unwrap_or(crate::constants::OL_BUSY);
-            let slot_start = *start + chrono::Duration::minutes(i as i64 * interval_minutes as i64);
-            let slot_end = slot_start + chrono::Duration::minutes(interval_minutes as i64);
             AvailabilitySlot {
                 start: slot_start.format("%Y-%m-%dT%H:%M:%S").to_string(),
-                end: slot_end.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                end: (slot_start + step).format("%Y-%m-%dT%H:%M:%S").to_string(),
                 status: crate::friendly::busy_status_word(code).to_string(),
             }
         })
@@ -1780,10 +1785,19 @@ mod tests {
         chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").unwrap()
     }
 
+    /// A FreeBusy string as Outlook returns it: one char per `interval`
+    /// minutes from 00:00 of the start date, all free except `codes`
+    /// placed at `at_slot`.
+    fn freebusy(at_slot: usize, codes: &str) -> String {
+        format!("{}{codes}{}", "0".repeat(at_slot), "0".repeat(96))
+    }
+
     #[test]
     fn parse_freebusy_slots_maps_codes_to_words_and_times() {
-        // "02143" = free, busy, tentative, working_elsewhere, out_of_office
-        let slots = parse_freebusy_slots("02143", &dt("2099-01-01T09:00:00"), 30, 5);
+        // "02143" = free, busy, tentative, working_elsewhere, out_of_office,
+        // starting at 09:00 = slot 18 of the 30-minute string.
+        let raw = freebusy(18, "02143");
+        let slots = parse_freebusy_slots(&raw, &dt("2099-01-01T09:00:00"), &dt("2099-01-01T11:30:00"), 30);
         assert_eq!(slots.len(), 5);
         assert_eq!(slots[0], AvailabilitySlot {
             start: "2099-01-01T09:00:00".to_string(),
@@ -1799,16 +1813,43 @@ mod tests {
     }
 
     #[test]
-    fn parse_freebusy_slots_truncates_to_max_slots() {
+    fn parse_freebusy_slots_reads_the_string_from_midnight_not_from_start() {
+        // Found live: Recipient.FreeBusy(start, ...) always begins at 00:00 of
+        // start's date, whatever start's time (a 10:00 appointment is at
+        // index 20 for starts of 00:00, 08:00 and 13:00). Reading it from
+        // `start` shifted every slot by start's time of day.
+        let raw = freebusy(20, "2"); // busy 10:00-10:30
+        let slots = parse_freebusy_slots(&raw, &dt("2099-01-01T08:00:00"), &dt("2099-01-01T12:00:00"), 30);
+        assert_eq!(slots.len(), 8);
+        assert_eq!(slots[0].start, "2099-01-01T08:00:00");
+        let busy: Vec<&str> = slots.iter().filter(|s| s.status == "busy").map(|s| s.start.as_str()).collect();
+        assert_eq!(busy, vec!["2099-01-01T10:00:00"]);
+    }
+
+    #[test]
+    fn parse_freebusy_slots_covers_an_unaligned_window() {
+        // 08:10..09:05 overlaps the 08:00, 08:30 and 09:00 slots.
+        let raw = freebusy(16, "120");
+        let slots = parse_freebusy_slots(&raw, &dt("2099-01-01T08:10:00"), &dt("2099-01-01T09:05:00"), 30);
+        let got: Vec<(&str, &str)> = slots.iter().map(|s| (s.start.as_str(), s.status.as_str())).collect();
+        assert_eq!(got, vec![
+            ("2099-01-01T08:00:00", "tentative"),
+            ("2099-01-01T08:30:00", "busy"),
+            ("2099-01-01T09:00:00", "free"),
+        ]);
+    }
+
+    #[test]
+    fn parse_freebusy_slots_truncates_to_the_window() {
         // Outlook's raw FreeBusy string commonly covers a much longer range
         // than the caller's requested [start, end) window.
-        let slots = parse_freebusy_slots("000000000000", &dt("2099-01-01T09:00:00"), 30, 3);
+        let slots = parse_freebusy_slots(&"0".repeat(1392), &dt("2099-01-01T09:00:00"), &dt("2099-01-01T10:30:00"), 30);
         assert_eq!(slots.len(), 3);
     }
 
     #[test]
     fn parse_freebusy_slots_treats_unrecognized_digit_as_busy() {
-        let slots = parse_freebusy_slots("9", &dt("2099-01-01T09:00:00"), 30, 1);
+        let slots = parse_freebusy_slots("9", &dt("2099-01-01T00:00:00"), &dt("2099-01-01T00:30:00"), 30);
         assert_eq!(slots[0].status, "busy");
     }
 

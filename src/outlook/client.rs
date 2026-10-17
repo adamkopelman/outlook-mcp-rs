@@ -2742,11 +2742,6 @@ impl OutlookClient for WindowsOutlookClient {
                 )));
             }
             let interval = input.interval_minutes.max(1);
-            // FreeBusy has no "end" parameter — it returns a string covering a
-            // fixed range from `start`. Compute how many of its slots fall
-            // within [start, end) and truncate to that.
-            let total_minutes = (end - start).num_minutes().max(0);
-            let max_slots = ((total_minutes + interval as i64 - 1) / interval as i64) as usize;
 
             let mut people = Vec::new();
             for person in &input.people {
@@ -2782,7 +2777,9 @@ impl OutlookClient for WindowsOutlookClient {
                         continue;
                     }
                 };
-                let slots = parse_freebusy_slots(&raw, &start, interval, max_slots);
+                // The string starts at 00:00 of start's date and runs past
+                // `end`; parse_freebusy_slots picks the slots of [start, end).
+                let slots = parse_freebusy_slots(&raw, &start, &end, interval);
                 people.push(PersonAvailability { person: person.clone(), resolved: true, slots });
             }
             let common = common_free(&people, &input.treat_as_free);

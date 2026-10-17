@@ -2294,3 +2294,49 @@ fn list_events_one_day_window_finds_a_mid_series_occurrence() {
     assert_eq!(fifteenth.expect("list 2098-03-15"), vec!["2098-03-15T07:00:00"]);
     assert_eq!(fifth.expect("list 2098-03-05"), vec!["2098-03-05T07:00:00"]);
 }
+
+/// The mailbox's own address, for `check_availability` on yourself (change it
+/// before running on another mailbox).
+const AVAILABILITY_SELF: &str = "adamkopelman@outlook.com";
+
+#[test]
+#[ignore]
+fn check_availability_slots_line_up_with_a_known_appointment() {
+    // Recipient.FreeBusy's string always begins at 00:00 of the start date;
+    // reading it from `start` once shifted every slot by start's time of day
+    // (an 08:00 window reported a 10:00 appointment at 18:00). Free/busy is
+    // published asynchronously, so poll for up to two minutes; a shifted
+    // result never matches and still fails. A personal appointment only.
+    let c = client();
+    let created = c.create_event(CreateEventInput {
+        subject: "outlook-mcp-rs availability alignment probe".to_string(),
+        start: "2098-05-10T10:00".to_string(),
+        end: "2098-05-10T10:30".to_string(),
+        body: None, location: None, required_attendees: None, optional_attendees: None,
+        all_day: false, reminder_minutes: None, categories: None, show_as: Some("busy".to_string()),
+        send: false, recurrence: None,
+    }).expect("create_event");
+    let id = created["id"].as_str().expect("event id").to_string();
+    let started = std::time::Instant::now();
+    let mut last = Vec::new();
+    while started.elapsed() < std::time::Duration::from_secs(120) {
+        let r = c.check_availability(CheckAvailabilityInput {
+            people: vec![AVAILABILITY_SELF.to_string()],
+            start: "2098-05-10T08:00".to_string(),
+            end: "2098-05-10T12:00".to_string(),
+            interval_minutes: 30,
+            treat_as_free: vec!["free".to_string()],
+        });
+        last = r.map(|a| a.people[0].slots.iter().map(|s| (s.start.clone(), s.status.clone())).collect())
+            .unwrap_or_default();
+        if last.iter().any(|(_, st)| st != "free") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(10));
+    }
+    c.delete_event(id, false, true, false).expect("cleanup delete_event");
+    assert_eq!(last.len(), 8, "{last:?}");
+    assert_eq!(last[0].0, "2098-05-10T08:00:00");
+    let busy: Vec<&str> = last.iter().filter(|(_, st)| st != "free").map(|(t, _)| t.as_str()).collect();
+    assert_eq!(busy, vec!["2098-05-10T10:00:00"], "{last:?}");
+}
