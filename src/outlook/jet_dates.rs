@@ -193,6 +193,10 @@ pub enum Placement {
 /// window's own edges never trip the misread check.
 const WINDOW_SLACK_DAYS: i64 = 2;
 
+/// Extra days on each side of the requested dates before the `Restrict`
+/// window is snapped to unambiguous dates (see `DateFilter::new`).
+const RECURRENCE_MARGIN_DAYS: i64 = 2;
+
 /// An exact, inclusive date range for a list tool, and the wider date-only
 /// window sent to `Restrict` to pre-filter it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,10 +217,18 @@ impl DateFilter {
         if after.is_none() && before.is_none() {
             return None;
         }
-        let window_start =
-            after.map(|a| unambiguous_floor(a.date())).filter(|d| renderable(*d));
+        // Under IncludeRecurrences, Outlook applies a date-only bound up to a
+        // day late to recurring occurrences (confirmed live: [Start] >=
+        // '3/15/2098' skipped a daily series' 03-15 07:00 occurrence and
+        // returned 03-16's). So the window keeps RECURRENCE_MARGIN_DAYS on
+        // each side before snapping; the exact bounds are applied per item.
+        let margin = chrono::Duration::days(RECURRENCE_MARGIN_DAYS);
+        let window_start = after
+            .and_then(|a| a.date().checked_sub_signed(margin))
+            .map(unambiguous_floor)
+            .filter(|d| renderable(*d));
         let window_end = before
-            .and_then(|b| b.date().succ_opt())
+            .and_then(|b| b.date().checked_add_signed(margin + chrono::Duration::days(1)))
             .map(unambiguous_ceil)
             .filter(|d| renderable(*d));
         Some(Self { after, before, window_start, window_end })
@@ -411,19 +423,20 @@ mod tests {
         let f = DateFilter::new(Some(dt("2026-09-11T00:00:00")), Some(dt("2026-09-18T23:59:59")))
             .unwrap();
         assert_eq!(f.window_start, Some(ymd(2026, 9, 9)));
-        assert_eq!(f.window_end, Some(ymd(2026, 9, 19)));
+        // 09-18 + 1 day + 2 days of recurrence margin = 09-21 (unambiguous).
+        assert_eq!(f.window_end, Some(ymd(2026, 9, 21)));
         let il = date_order_from_pattern("dd/MM/yyyy").unwrap();
         assert_eq!(
             f.restrict_filters("Start", Some(&il)),
             vec![
-                "[Start] >= '09/09/2026' AND [Start] < '19/09/2026'".to_string(),
-                "[Start] >= '2026-09-09' AND [Start] < '2026-09-19'".to_string(),
+                "[Start] >= '09/09/2026' AND [Start] < '21/09/2026'".to_string(),
+                "[Start] >= '2026-09-09' AND [Start] < '2026-09-21'".to_string(),
             ]
         );
         let us = date_order_from_pattern("M/d/yyyy").unwrap();
         assert_eq!(
             f.restrict_filters("Start", Some(&us))[0],
-            "[Start] >= '09/09/2026' AND [Start] < '09/19/2026'"
+            "[Start] >= '09/09/2026' AND [Start] < '09/21/2026'"
         );
     }
 
@@ -446,13 +459,24 @@ mod tests {
     }
 
     #[test]
+    fn the_window_keeps_two_days_of_margin_for_recurring_occurrences() {
+        // Found live: under IncludeRecurrences, Outlook applies a date-only
+        // bound up to a day late to recurring occurrences, so a window starting
+        // on the requested day itself (2098-03-15 is unambiguous) dropped that
+        // day's 07:00 occurrence. The window needs margin on both sides.
+        let f = DateFilter::new(Some(dt("2098-03-15T00:00:00")), Some(dt("2098-03-15T23:59:59"))).unwrap();
+        assert!(f.window_start.unwrap() <= ymd(2098, 3, 13), "{:?}", f.window_start);
+        assert!(f.window_end.unwrap() >= ymd(2098, 3, 18), "{:?}", f.window_end);
+    }
+
+    #[test]
     fn every_window_covers_the_exact_range() {
         for d in every_day(2025, 2027) {
             let after = d.and_hms_opt(17, 45, 30).unwrap();
             let before = after + chrono::Duration::days(3);
             let f = DateFilter::new(Some(after), Some(before)).unwrap();
-            assert!(f.window_start.unwrap().and_hms_opt(0, 0, 0).unwrap() <= after);
-            assert!(f.window_end.unwrap().and_hms_opt(0, 0, 0).unwrap() > before);
+            assert!(f.window_start.unwrap() + chrono::Duration::days(2) <= after.date());
+            assert!(f.window_end.unwrap() >= before.date() + chrono::Duration::days(3));
             assert_eq!(f.classify(after), Placement::InRange);
             assert_eq!(f.classify(before), Placement::InRange);
         }
@@ -466,7 +490,7 @@ mod tests {
         assert_eq!(f.classify(dt("2026-09-11T09:30:00")), Placement::InRange);
         assert_eq!(f.classify(dt("2026-09-18T17:00:00")), Placement::InRange);
         assert_eq!(f.classify(dt("2026-09-18T17:00:01")), Placement::After);
-        // Inside the widened Restrict window (2026-09-09 .. 2026-09-19).
+        // Inside the widened Restrict window (2026-09-09 .. 2026-09-21).
         assert_eq!(f.classify(dt("2026-09-09T00:00:00")), Placement::Before);
         assert_eq!(f.classify(dt("2026-09-20T12:00:00")), Placement::After);
     }
@@ -479,7 +503,7 @@ mod tests {
         assert_eq!(f.classify(dt("2026-11-09T10:00:00")), Placement::OutsideWindow);
         assert_eq!(f.classify(dt("2026-09-06T23:59:59")), Placement::OutsideWindow);
         assert_eq!(f.classify(dt("2026-09-07T00:00:00")), Placement::Before);
-        assert_eq!(f.classify(dt("2026-09-20T23:59:59")), Placement::After);
-        assert_eq!(f.classify(dt("2026-09-21T00:00:00")), Placement::OutsideWindow);
+        assert_eq!(f.classify(dt("2026-09-22T23:59:59")), Placement::After);
+        assert_eq!(f.classify(dt("2026-09-23T00:00:00")), Placement::OutsideWindow);
     }
 }

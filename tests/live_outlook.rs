@@ -2257,3 +2257,40 @@ fn list_emails_received_after_matches_an_unfiltered_scan() {
     let relative: Vec<String> = query(Some("-30d".into())).into_iter().map(|e| e.id).collect();
     assert_eq!(relative, expected, "received_after -30d");
 }
+
+#[test]
+#[ignore]
+fn list_events_one_day_window_finds_a_mid_series_occurrence() {
+    // Under IncludeRecurrences, Outlook applies a date-only Restrict bound up
+    // to a day late to recurring occurrences. A one-day window starting on an
+    // unambiguous date (day >= 13) once dropped that day's occurrence of a
+    // series that started earlier. Personal appointments only; nothing is sent.
+    let c = client();
+    let subject = "outlook-mcp-rs one-day window series probe";
+    let created = c.create_event(CreateEventInput {
+        subject: subject.to_string(),
+        start: "2098-03-01T07:00".to_string(),
+        end: "2098-03-01T07:15".to_string(),
+        body: None, location: None, required_attendees: None, optional_attendees: None,
+        all_day: false, reminder_minutes: None, categories: None, show_as: None,
+        send: false,
+        recurrence: Some(RecurrenceInput {
+            pattern: "daily".to_string(), interval: None, days_of_week: None,
+            day_of_month: None, until: None, occurrences: Some(30),
+        }),
+    }).expect("create_event");
+    let id = created["id"].as_str().expect("event id").to_string();
+    let day = |d: &str| -> Result<Vec<String>, String> {
+        c.list_events(EventQuery {
+            start_after: Some(d.to_string()), start_before: Some(d.to_string()),
+            query: Some(format!("\"{subject}\"")), ..Default::default()
+        })
+        .map(|rows| rows.into_iter().filter_map(|e| e.start).collect())
+        .map_err(|e| e.0)
+    };
+    let fifteenth = day("2098-03-15");
+    let fifth = day("2098-03-05");
+    c.delete_event(id, false, true, false).expect("cleanup delete_event");
+    assert_eq!(fifteenth.expect("list 2098-03-15"), vec!["2098-03-15T07:00:00"]);
+    assert_eq!(fifth.expect("list 2098-03-05"), vec!["2098-03-05T07:00:00"]);
+}
