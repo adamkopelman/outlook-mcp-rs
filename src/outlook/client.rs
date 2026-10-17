@@ -36,7 +36,7 @@ use crate::outlook::{MAX_EMAIL_COUNT, MAX_EVENT_COUNT, MAX_NOTE_COUNT, MAX_TASK_
 use crate::outlook::{
     com_recurrence_interval, common_free, create_event_status, friendly_recurrence_interval,
     parse_freebusy_slots, take_page, validate_recurrence, validate_recurrence_update,
-    CheckAvailabilityInput, permanent_delete_needs_move, require_empty_confirm, CreateEventInput,
+    CheckAvailabilityInput, permanent_delete_plan, PermanentDelete, require_empty_confirm, CreateEventInput,
     deleted_note, delete_event_note, delete_occurrence_note, meeting_is_canceled,
     validate_occurrence_update, check_no_attendees, update_adds_attendees,
     EmailQuery, EmailUpdate, EventQuery, EventUpdate, NoteQuery, NoteUpdate, OutlookClient,
@@ -171,8 +171,8 @@ fn deleted_items_for(ns: &IDispatch, item: &IDispatch) -> Result<IDispatch, Tool
 /// Delete one item. `permanent = false` is a plain `Delete()`, which moves it
 /// to Deleted Items. `permanent = true` hard-deletes it like Outlook's
 /// shift+delete: OOM has no hard-delete call, but `Delete()` on an item
-/// already in Deleted Items is permanent, so the item is moved to its own
-/// store's Deleted Items first (see [`permanent_delete_needs_move`]).
+/// already in Deleted Items is permanent, so the item is first put in its own
+/// store's Deleted Items (see [`permanent_delete_plan`]).
 /// Shared by `delete_email`, `delete_event`, `delete_task` and `delete_note`.
 fn delete_item(ns: &IDispatch, item: &IDispatch, permanent: bool) -> Result<(), ToolError> {
     if !permanent {
@@ -181,31 +181,87 @@ fn delete_item(ns: &IDispatch, item: &IDispatch, permanent: bool) -> Result<(), 
     }
     let deleted = deleted_items_for(ns, item)?;
     let deleted_id = variant_to_string(&get_property(&deleted, "EntryID")?);
-    // An unreadable parent id just means "move first" (always safe).
+    // An unreadable parent id just means "not in Deleted Items yet".
     let parent_id = (|| -> Result<String, ToolError> {
         let parent = to_disp(get_property(item, "Parent")?)?;
         Ok(variant_to_string(&get_property(&parent, "EntryID")?))
     })()
     .unwrap_or_default();
-    if permanent_delete_needs_move(&parent_id, &deleted_id) {
-        // Move returns the item in its new home, but Delete() on that
-        // returned object is a silent no-op (confirmed with a raw
-        // PowerShell COM probe on an Outlook.com store, with or
-        // without a delay): the item stays in Deleted Items. Re-open
-        // the moved item by EntryID and delete that fresh object.
-        let moved = to_disp(call_method(item, "Move", &mut [VARIANT::from(deleted.clone())])?)?;
-        let moved_id = variant_to_string(&get_property(&moved, "EntryID")?);
-        let store_id = variant_to_string(&get_property(&deleted, "StoreID")?);
-        let fresh = to_disp(call_method(
-            ns,
-            "GetItemFromID",
-            &mut [variant_from_str(&moved_id), variant_from_str(&store_id)],
-        )?)?;
-        call_method(&fresh, "Delete", &mut [])?;
-    } else {
-        call_method(item, "Delete", &mut [])?;
+    let class = variant_to_i32(&get_property(item, "Class")?).unwrap_or(0);
+    match permanent_delete_plan(class, &parent_id, &deleted_id) {
+        PermanentDelete::Direct => {
+            call_method(item, "Delete", &mut [])?;
+        }
+        PermanentDelete::MoveThenDelete => {
+            // Move returns the item in its new home, but Delete() on that
+            // returned object is a silent no-op (confirmed with a raw
+            // PowerShell COM probe on an Outlook.com store, with or
+            // without a delay): the item stays in Deleted Items. Re-open
+            // the moved item by EntryID and delete that fresh object.
+            let moved = to_disp(call_method(item, "Move", &mut [VARIANT::from(deleted.clone())])?)?;
+            let moved_id = variant_to_string(&get_property(&moved, "EntryID")?);
+            let store_id = variant_to_string(&get_property(&deleted, "StoreID")?);
+            let fresh = to_disp(call_method(
+                ns,
+                "GetItemFromID",
+                &mut [variant_from_str(&moved_id), variant_from_str(&store_id)],
+            )?)?;
+            call_method(&fresh, "Delete", &mut [])?;
+        }
+        PermanentDelete::SoftDeleteThenPurge => soft_delete_then_purge(item, &deleted)?,
     }
     Ok(())
+}
+
+/// [`PermanentDelete::SoftDeleteThenPurge`]: `Delete()` the item into
+/// `deleted` (its store's Deleted Items), then find it there by
+/// `PR_SEARCH_KEY` and delete it again. Only candidates of the same
+/// `MessageClass` are read, newest change first, so the item just deleted is
+/// normally the first one checked.
+fn soft_delete_then_purge(item: &IDispatch, deleted: &IDispatch) -> Result<(), ToolError> {
+    /// How many same-class Deleted Items candidates to check before giving up.
+    const MAX_CANDIDATES: i32 = 500;
+    // Read everything needed to find the item again before deleting it, so
+    // a failure here leaves the item untouched.
+    let key = search_key(item)?;
+    if key.is_empty() {
+        return Err(ToolError::new(
+            "Could not permanently delete this item: it has no search key to find it by \
+             in Deleted Items. Nothing was deleted; delete it with permanent=false instead.",
+        ));
+    }
+    let message_class = variant_to_string(&get_property(item, "MessageClass")?);
+    call_method(item, "Delete", &mut [])?;
+    let not_found = || {
+        ToolError::new(
+            "The item was moved to Deleted Items, but could not be found there to delete it \
+             permanently. Delete it from Deleted Items to finish.",
+        )
+    };
+    let items = to_disp(get_property(deleted, "Items")?)?;
+    let filter = format!("[MessageClass] = '{}'", message_class.replace('\'', "''"));
+    let candidates = to_disp(call_method(&items, "Restrict", &mut [variant_from_str(&filter)])?)?;
+    call_method(
+        &candidates,
+        "Sort",
+        &mut [variant_from_str("[LastModificationTime]"), variant_from_bool(true)],
+    )?;
+    let total = variant_to_i32(&get_property(&candidates, "Count")?).unwrap_or(0);
+    for i in 1..=total.min(MAX_CANDIDATES) {
+        let candidate = to_disp(call_method(&candidates, "Item", &mut [variant_from_i32(i)])?)?;
+        if search_key(&candidate).is_ok_and(|k| k == key) {
+            call_method(&candidate, "Delete", &mut [])?;
+            return Ok(());
+        }
+    }
+    Err(not_found())
+}
+
+/// An item's `PR_SEARCH_KEY` as a hex string (empty if it has none).
+fn search_key(item: &IDispatch) -> Result<String, ToolError> {
+    let accessor = to_disp(get_property(item, "PropertyAccessor")?)?;
+    let raw = call_method(&accessor, "GetProperty", &mut [variant_from_str(c::PR_SEARCH_KEY)])?;
+    Ok(variant_to_string(&call_method(&accessor, "BinaryToString", &mut [raw])?))
 }
 
 /// `client.py::_resolve_folder`: a well-known folder name maps to a default

@@ -466,13 +466,38 @@ pub fn require_empty_confirm(confirm: bool) -> Result<(), ToolError> {
     ))
 }
 
-/// Whether a permanent delete (`delete_email`/`delete_event`/`delete_task`/
-/// `delete_note`) must first move the item into Deleted
-/// Items. The object model has no hard-delete call, but `Delete()` on an item
-/// already in Deleted Items is permanent; so move there unless the item's
-/// parent folder already is that folder (EntryIDs compared exactly).
-pub fn permanent_delete_needs_move(parent_entry_id: &str, deleted_items_entry_id: &str) -> bool {
-    parent_entry_id.is_empty() || parent_entry_id != deleted_items_entry_id
+/// How a permanent delete (`delete_email`/`delete_event`/`delete_task`/
+/// `delete_note`) gets an item into Deleted Items, where one more `Delete()`
+/// is permanent (the object model has no hard-delete call).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermanentDelete {
+    /// Already in Deleted Items: `Delete()` it.
+    Direct,
+    /// Mail: `Move` it there, re-open the moved item by EntryID, delete that.
+    MoveThenDelete,
+    /// Anything else: `Delete()` it (a soft delete into Deleted Items), find
+    /// it there again by `PR_SEARCH_KEY`, and delete that. On an Outlook.com
+    /// store, `Move(Deleted Items)` of an appointment, task or note does move
+    /// it, but also creates a junk mail draft with the same subject in Drafts
+    /// and returns that draft instead of the moved item.
+    SoftDeleteThenPurge,
+}
+
+/// [`PermanentDelete`] for an item of OlObjectClass `item_class` whose parent
+/// folder has `parent_entry_id`. EntryIDs are compared exactly, and an
+/// unreadable (empty) parent id never counts as "already in Deleted Items".
+pub fn permanent_delete_plan(
+    item_class: i32,
+    parent_entry_id: &str,
+    deleted_items_entry_id: &str,
+) -> PermanentDelete {
+    if !parent_entry_id.is_empty() && parent_entry_id == deleted_items_entry_id {
+        PermanentDelete::Direct
+    } else if item_class == crate::constants::OL_CLASS_MAIL {
+        PermanentDelete::MoveThenDelete
+    } else {
+        PermanentDelete::SoftDeleteThenPurge
+    }
 }
 
 /// The `note` every `delete_*` tool returns for where the item went.
@@ -1463,7 +1488,7 @@ mod tests {
     use super::{
         com_recurrence_interval, common_free, create_event_status, friendly_recurrence_interval,
         parse_freebusy_slots, take_page, validate_recurrence, validate_recurrence_update,
-        EventUpdate, RecurrenceInput, permanent_delete_needs_move, require_empty_confirm,
+        EventUpdate, RecurrenceInput, permanent_delete_plan, require_empty_confirm, PermanentDelete,
         deleted_note, delete_event_note, delete_occurrence_note, validate_occurrence_update,
         check_no_attendees,
         draft_update_changes, validate_draft_update, DraftUpdate, InlineImage, merge_categories,
@@ -1609,11 +1634,25 @@ mod tests {
     }
 
     #[test]
-    fn permanent_delete_skips_move_only_when_already_in_deleted_items() {
-        assert!(!permanent_delete_needs_move("DELETED-ID", "DELETED-ID"));
-        assert!(permanent_delete_needs_move("DRAFTS-ID", "DELETED-ID"));
-        // An unreadable (empty) parent id never counts as "already there".
-        assert!(permanent_delete_needs_move("", ""));
+    fn permanent_delete_moves_only_mail_and_soft_deletes_everything_else() {
+        const MAIL: i32 = 43;
+        const APPOINTMENT: i32 = 26;
+        const TASK: i32 = 48;
+        const NOTE: i32 = 44;
+        assert_eq!(permanent_delete_plan(MAIL, "DRAFTS-ID", "DELETED-ID"), PermanentDelete::MoveThenDelete);
+        for class in [APPOINTMENT, TASK, NOTE, 0] {
+            assert_eq!(
+                permanent_delete_plan(class, "FOLDER-ID", "DELETED-ID"),
+                PermanentDelete::SoftDeleteThenPurge,
+                "class {class}"
+            );
+        }
+        // Already in Deleted Items: one Delete() is permanent for any class.
+        for class in [MAIL, APPOINTMENT, TASK, NOTE] {
+            assert_eq!(permanent_delete_plan(class, "DELETED-ID", "DELETED-ID"), PermanentDelete::Direct);
+        }
+        // An unreadable parent id never counts as "already there".
+        assert_eq!(permanent_delete_plan(TASK, "", ""), PermanentDelete::SoftDeleteThenPurge);
     }
 
     #[test]

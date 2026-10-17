@@ -108,11 +108,15 @@ fn permanent_delete_of_draft_skips_deleted_items() {
 /// (list_emails reads any item class there, including tasks, notes and
 /// appointments).
 fn deleted_items_with_subject(c: &WindowsOutlookClient, subject: &str) -> Vec<String> {
+    items_with_subject(c, "deleted", subject)
+}
+
+fn items_with_subject(c: &WindowsOutlookClient, folder: &str, subject: &str) -> Vec<String> {
     c.list_emails(EmailQuery {
-        query: Some(subject.to_string()), folder: "deleted".into(), count: 50,
+        query: Some(subject.to_string()), folder: folder.into(), count: 50,
         ..Default::default()
     })
-    .expect("list_emails on Deleted Items should succeed")
+    .unwrap_or_else(|e| panic!("list_emails on {folder} should succeed: {}", e.0))
     .into_iter()
     .filter(|e| e.subject == subject)
     .map(|e| e.id)
@@ -150,6 +154,12 @@ fn assert_permanent_delete_skips_deleted_items(
     assert!(
         deleted_items_with_subject(c, subject).is_empty(),
         "a permanently deleted item must not remain in Deleted Items"
+    );
+    // On Outlook.com, Move(Deleted Items) of a task/note/appointment also
+    // leaves a junk mail draft with the same subject in Drafts.
+    assert!(
+        items_with_subject(c, "drafts", subject).is_empty(),
+        "a permanent delete must not leave a draft behind in Drafts"
     );
 }
 
@@ -248,6 +258,10 @@ fn permanent_delete_of_unsent_meeting_cancels_quietly_then_skips_deleted_items()
     assert!(
         deleted_items_with_subject(&c, subject).is_empty(),
         "a permanently deleted meeting must not remain in Deleted Items"
+    );
+    assert!(
+        items_with_subject(&c, "drafts", subject).is_empty(),
+        "a permanent delete must not leave a draft behind in Drafts"
     );
 }
 

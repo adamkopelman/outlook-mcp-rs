@@ -16,6 +16,9 @@ pub const OL_APPOINTMENT_ITEM: i32 = 1;
 pub const OL_TASK_ITEM: i32 = 3;
 pub const OL_NOTE_ITEM: i32 = 5;
 
+// OlObjectClass (Item.Class)
+pub const OL_CLASS_MAIL: i32 = 43;
+
 // OlBodyFormat
 pub const OL_FORMAT_PLAIN: i32 = 1;
 pub const OL_FORMAT_HTML: i32 = 2;
@@ -117,6 +120,10 @@ pub const OL_OLE: i32 = 6;
 pub const PR_ATTACH_CONTENT_ID: &str = "http://schemas.microsoft.com/mapi/proptag/0x3712001F";
 pub const PR_ATTACH_MIME_TAG: &str = "http://schemas.microsoft.com/mapi/proptag/0x370E001F";
 pub const PR_ATTACHMENT_HIDDEN: &str = "http://schemas.microsoft.com/mapi/proptag/0x7FFE000B";
+
+// MAPI item property (0102 = PT_BINARY). Unlike the EntryID, it survives a
+// soft delete into Deleted Items, so a permanent delete can find the item there.
+pub const PR_SEARCH_KEY: &str = "http://schemas.microsoft.com/mapi/proptag/0x300B0102";
 
 pub fn folder_name_to_id(name: &str) -> Option<i32> {
     match name.to_lowercase().as_str() {
