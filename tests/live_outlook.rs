@@ -913,13 +913,22 @@ fn update_email_applies_state_then_moves() {
     assert!(changed.iter().any(|v| v == "importance"));
     assert!(changed.iter().any(|v| v == "add_categories"));
 
-    // Verify importance + category landed.
+    // Verify importance + category landed. Email results have no importance
+    // field (they never had one), so read it back through list_emails'
+    // importance filter, with a negative case so the check can fail.
     let detail = single(c.get_email(vec![id.clone()], &ReadOptions::default())).expect("get_email");
-    let dv = serde_json::to_value(&detail).unwrap();
-    assert_eq!(dv["summary"]["importance"], "high");
-    assert!(dv["summary"]["categories"].as_array().unwrap().iter().any(|v| v == "Work"));
+    let drafts_with = |importance: &str| -> Vec<String> {
+        c.list_emails(EmailQuery {
+            folder: "drafts".into(), query: Some("\"outlook-mcp-rs update_email live test\"".into()),
+            importance: vec![importance.to_string()], count: 50, ..Default::default()
+        }).expect("list_emails by importance").into_iter().map(|e| e.id).collect()
+    };
+    assert!(drafts_with("high").contains(&id), "importance should now be high");
+    assert!(!drafts_with("normal").contains(&id), "importance should no longer be normal");
+    // Typed fields, not JSON: EmailDetail flattens `summary` when serialized.
+    assert!(detail.summary.categories.iter().any(|v| v == "Work"));
     // mark_read(true) → the item must now read as read (unread == false).
-    assert_eq!(dv["summary"]["unread"], false);
+    assert!(!detail.summary.unread);
 
     // A standalone mark_read (no other field, so nothing else Saves afterward)
     // must still persist — set it back to unread and confirm it stuck.
@@ -930,8 +939,7 @@ fn update_email_applies_state_then_moves() {
     }).expect("update_email mark unread");
     assert_eq!(unread["changed"], serde_json::json!(["mark_read"]));
     let redetail = single(c.get_email(vec![id.clone()], &ReadOptions::default())).expect("get_email after unread");
-    let rv = serde_json::to_value(&redetail).unwrap();
-    assert_eq!(rv["summary"]["unread"], true);
+    assert!(redetail.summary.unread);
 
     // Now move it; the id must change, then delete via the new id for cleanup.
     let moved = c.update_email(EmailUpdate {
@@ -941,7 +949,8 @@ fn update_email_applies_state_then_moves() {
     }).expect("update_email move");
     assert_eq!(moved["changed"], serde_json::json!(["move_to"]));
     let new_id = moved["id"].as_str().expect("moved id").to_string();
-    c.delete_email(new_id, false).expect("cleanup delete");
+    // The move put it in Deleted Items already; this deletes it for good.
+    c.delete_email(new_id, true).expect("cleanup delete");
 }
 
 #[test]
