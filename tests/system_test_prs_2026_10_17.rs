@@ -12,12 +12,12 @@
 //!
 //!     cargo test --test system_test_prs_2026_10_17 -- --ignored --nocapture
 
-use std::sync::Arc;
+mod common;
+
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use outlook_mcp_rs::outlook::client::WindowsOutlookClient;
-use outlook_mcp_rs::server::OutlookMcpServer;
+use common::{ids_of, s, subjects_of, temp_dir, Log, Wire};
 use serde_json::{json, Value};
 
 const TAG: &str = "[outlook-mcp-rs systest 1017]";
@@ -25,113 +25,6 @@ const SELF: &str = "adamkopelman@outlook.com";
 const NOBODY: &str = "nobody@example.invalid";
 const HE: &str = "שלום עולם בדיקה";
 const PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
-
-// ---- JSON-RPC over the stdio codec ------------------------------------------
-
-struct Wire {
-    reader: tokio::io::BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
-    writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
-    next_id: u64,
-}
-
-impl Wire {
-    async fn start(server: OutlookMcpServer) -> Self {
-        use rmcp::ServiceExt;
-        let (client_io, server_io) = tokio::io::duplex(16 * 1024 * 1024);
-        tokio::spawn(async move {
-            if let Ok(running) = server.serve(server_io).await {
-                let _ = running.waiting().await;
-            }
-        });
-        let (read_half, writer) = tokio::io::split(client_io);
-        let mut w = Wire { reader: tokio::io::BufReader::new(read_half), writer, next_id: 1 };
-        w.request("initialize", json!({
-            "protocolVersion": "2025-06-18", "capabilities": {},
-            "clientInfo": {"name": "systest-1017", "version": "0"}}))
-            .await
-            .expect("initialize");
-        w.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).await;
-        w
-    }
-
-    async fn send(&mut self, msg: &Value) {
-        use tokio::io::AsyncWriteExt;
-        let mut bytes = serde_json::to_vec(msg).unwrap();
-        bytes.push(b'\n');
-        self.writer.write_all(&bytes).await.unwrap();
-    }
-
-    /// One request; Err if the wire text isn't UTF-8 or the server closed.
-    async fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
-        use tokio::io::AsyncBufReadExt;
-        let id = self.next_id;
-        self.next_id += 1;
-        self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})).await;
-        loop {
-            let mut line = Vec::new();
-            let n = self.reader.read_until(b'\n', &mut line).await.map_err(|e| e.to_string())?;
-            if n == 0 {
-                return Err("server closed".into());
-            }
-            let wire = String::from_utf8(line).map_err(|_| "response is not valid UTF-8".to_string())?;
-            let msg: Value = serde_json::from_str(&wire).map_err(|e| e.to_string())?;
-            if msg["id"] == id {
-                return Ok(msg);
-            }
-        }
-    }
-
-    /// `tools/call`: Ok(parsed result) or Err(error text), whether the tool
-    /// failed with a JSON-RPC error or an `isError` result.
-    async fn call(&mut self, tool: &str, args: Value) -> Result<Value, String> {
-        let msg = self.request("tools/call", json!({"name": tool, "arguments": args})).await?;
-        if let Some(e) = msg.get("error") {
-            return Err(e["message"].as_str().unwrap_or("").to_string());
-        }
-        let r = &msg["result"];
-        let text = r["content"][0]["text"].as_str().unwrap_or("").to_string();
-        if r["isError"] == true {
-            return Err(text);
-        }
-        Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
-    }
-}
-
-// ---- results log ------------------------------------------------------------
-
-#[derive(Default)]
-struct Log(Vec<(String, bool, String)>);
-
-impl Log {
-    fn check(&mut self, id: &str, ok: bool, detail: impl Into<String>) -> bool {
-        let detail = detail.into();
-        println!("[{}] {id}: {detail}", if ok { "PASS" } else { "FAIL" });
-        self.0.push((id.to_string(), ok, detail));
-        ok
-    }
-    fn fail(&mut self, id: &str, detail: impl Into<String>) {
-        self.check(id, false, detail);
-    }
-}
-
-fn s(v: &Value, k: &str) -> String {
-    v[k].as_str().unwrap_or("").to_string()
-}
-
-fn ids_of(rows: &Value) -> Vec<String> {
-    rows.as_array().map(|a| a.iter().map(|r| s(r, "id")).collect()).unwrap_or_default()
-}
-
-fn subjects_of(rows: &Value) -> Vec<String> {
-    rows.as_array().map(|a| a.iter().map(|r| s(r, "subject")).collect()).unwrap_or_default()
-}
-
-fn temp_dir(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("outlook-mcp-rs-systest-1017-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 /// Items the test created, by tool family, with their latest known id.
 #[derive(Default)]
@@ -147,8 +40,7 @@ struct Created {
 async fn system_test_prs_2026_10_17() {
     let run = format!("r{}", chrono::Local::now().timestamp());
     let t = |label: &str| format!("{TAG} {run} {label}");
-    let server = OutlookMcpServer::new(Arc::new(WindowsOutlookClient::new()));
-    let mut w = Wire::start(server).await;
+    let mut w = common::connect("systest-1017").await;
     let mut log = Log::default();
     let mut made = Created::default();
     println!("run token {run}");
