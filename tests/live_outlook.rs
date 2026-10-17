@@ -71,7 +71,7 @@ fn create_draft_then_delete_round_trips() {
         ..Default::default()
     }).expect("create_draft should succeed");
     let id = created["id"].as_str().expect("create_draft returns an id").to_string();
-    c.delete_email(id, false).expect("cleanup: delete_email should succeed");
+    c.delete_email(id, true).expect("cleanup: delete_email should succeed");
 }
 
 #[test]
@@ -109,6 +109,21 @@ fn permanent_delete_of_draft_skips_deleted_items() {
 /// appointments).
 fn deleted_items_with_subject(c: &WindowsOutlookClient, subject: &str) -> Vec<String> {
     items_with_subject(c, "deleted", subject)
+}
+
+/// `label` plus a token unique to this run, so a purge by subject can only
+/// match what this run created (older runs left items with the bare labels).
+fn run_unique(label: &str) -> String {
+    format!("{label} {}", chrono::Local::now().format("%Y%m%d%H%M%S%f"))
+}
+
+/// After a test has checked a soft delete, permanently removes its item from
+/// Deleted Items (matched by exact subject, which must be `run_unique`) so
+/// runs leave nothing behind.
+fn purge_from_deleted_items(c: &WindowsOutlookClient, subject: &str) {
+    for id in deleted_items_with_subject(c, subject) {
+        c.delete_email(id, true).expect("purge from Deleted Items");
+    }
 }
 
 fn items_with_subject(c: &WindowsOutlookClient, folder: &str, subject: &str) -> Vec<String> {
@@ -279,7 +294,7 @@ fn create_task_update_task_marks_complete() {
     let tasks = c.list_tasks(TaskQuery { include_completed: true, ..Default::default() })
         .expect("list_tasks should succeed");
     assert!(tasks.iter().any(|t| t.id == id && t.complete));
-    c.delete_task(id, false).expect("cleanup delete_task");
+    c.delete_task(id, true).expect("cleanup delete_task");
 }
 
 #[test]
@@ -289,7 +304,8 @@ fn create_note_then_get_it_back() {
     let created = c.create_note("outlook-mcp-rs live test note".to_string(), None, None)
         .expect("create_note should succeed");
     let id = created["id"].as_str().unwrap().to_string();
-    let note = single(c.get_note(vec![id], &ReadOptions::default())).expect("get_note should succeed");
+    let note = single(c.get_note(vec![id.clone()], &ReadOptions::default())).expect("get_note should succeed");
+    c.delete_note(id, true).expect("cleanup delete_note");
     assert!(note.body.as_deref().unwrap_or_default().starts_with("outlook-mcp-rs live test note"));
 }
 
@@ -308,7 +324,7 @@ fn create_event_then_delete_it() {
     }).expect("create_event should succeed");
     let id = created["id"].as_str().unwrap().to_string();
     let _ = single(c.get_event(vec![id.clone()], &ReadOptions::default())).expect("get_event should round-trip before cleanup");
-    c.delete_event(id, true, false, false).expect("cleanup delete_event");
+    c.delete_event(id, true, true, false).expect("cleanup delete_event");
 }
 
 #[test]
@@ -340,7 +356,7 @@ fn create_event_with_tiers_categories_and_show_as() {
     assert!(detail.summary.categories.iter().any(|cat| cat == "Work"));
     assert_eq!(detail.summary.show_as, "tentative");
     assert!(detail.summary.is_meeting);
-    c.delete_event(id, false, false, false).expect("cleanup delete_event");
+    c.delete_event(id, false, true, false).expect("cleanup delete_event");
 }
 
 #[test]
@@ -393,15 +409,16 @@ fn update_event_edits_fields_and_manages_attendees() {
     assert!(!detail.summary.required_attendees.contains("required-probe@example.com"));
     assert!(detail.summary.optional_attendees.contains("optional-probe@example.com"));
 
-    c.delete_event(id, false, false, false).expect("cleanup delete_event");
+    c.delete_event(id, false, true, false).expect("cleanup delete_event");
 }
 
 #[test]
 #[ignore]
 fn delete_event_removes_a_personal_appointment() {
     let c = client();
+    let subject = run_unique("outlook-mcp-rs P8 delete probe");
     let created = c.create_event(CreateEventInput {
-        subject: "outlook-mcp-rs P8 delete probe".to_string(),
+        subject: subject.clone(),
         start: "2099-01-08T09:00".to_string(),
         end: "2099-01-08T09:30".to_string(),
         body: None, location: None, required_attendees: None, optional_attendees: None,
@@ -418,6 +435,7 @@ fn delete_event_removes_a_personal_appointment() {
     // Soft-deleted: get_event on the original id should now fail (moved to
     // Deleted Items changes its EntryID, same as delete_email's behavior).
     assert!(single(c.get_event(vec![id], &ReadOptions::default())).is_err());
+    purge_from_deleted_items(&c, &subject);
 }
 
 #[test]
@@ -458,7 +476,7 @@ fn list_events_filters_by_query_and_category() {
     assert!(!misses.iter().any(|e| e.id == id), "non-matching query must exclude the probe");
 
     // Cleanup: delete the probe.
-    c.delete_email(id, false).expect("cleanup delete");
+    c.delete_email(id, true).expect("cleanup delete");
 }
 
 #[test]
@@ -582,7 +600,7 @@ fn list_emails_query_matches_real_body_text() {
         received_before: None, item_type: vec![], importance: vec![], flag: vec![], has_attachments: None,
     }).expect("list_emails query should succeed");
 
-    c.delete_email(id.clone(), false).expect("cleanup: delete the draft");
+    c.delete_email(id.clone(), true).expect("cleanup: delete the draft");
 
     assert!(
         found.iter().any(|e| e.id == id),
@@ -650,7 +668,7 @@ fn create_draft_with_attachment_round_trips() {
         ..Default::default()
     }).expect("create_draft with attachment should succeed");
     let id = created["id"].as_str().expect("draft id").to_string();
-    c.delete_email(id, false).expect("cleanup: delete the draft");
+    c.delete_email(id, true).expect("cleanup: delete the draft");
     let _ = std::fs::remove_file(&path);
 }
 
@@ -700,7 +718,7 @@ fn create_draft_with_inline_base64_image_sets_content_id() {
     let id = created["id"].as_str().expect("draft id").to_string();
     // Read back before asserting so cleanup still runs on a mismatch.
     let read_back = std::panic::catch_unwind(|| first_attachment_cid_and_hidden(&id));
-    c.delete_email(id, false).expect("cleanup: delete the draft");
+    c.delete_email(id, true).expect("cleanup: delete the draft");
     let (cid, hidden) = read_back.expect("reading the attachment's MAPI properties should succeed");
     assert_eq!(cid, "pixel");
     // Not asserted: whether PR_ATTACHMENT_HIDDEN survives Save varies by
@@ -728,7 +746,7 @@ fn list_attachments_reports_metadata_for_a_draft_attachment() {
 
     // Capture the result before cleanup so a failed assertion doesn't leak the draft.
     let listed = single(c.list_attachments(vec![id.clone()]));
-    c.delete_email(id, false).expect("cleanup: delete the draft");
+    c.delete_email(id, true).expect("cleanup: delete the draft");
     let _ = std::fs::remove_file(&path);
 
     let atts = listed.expect("list_attachments should succeed");
@@ -872,7 +890,7 @@ fn get_email_reports_truncation_and_honours_max_body_chars() {
         assert!(plain.html_truncated.is_none() && plain.html_length.is_none());
     };
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(result));
-    c.delete_email(id, false).expect("cleanup delete");
+    c.delete_email(id, true).expect("cleanup delete");
     if let Err(panic) = outcome {
         std::panic::resume_unwind(panic);
     }
@@ -975,7 +993,7 @@ fn update_draft_edits_subject_body_and_recipients() {
     });
     // Read back before asserting so a failure still cleans up.
     let detail = single(c.get_email(vec![id.clone()], &ReadOptions::default()));
-    c.delete_email(id.clone(), false).expect("cleanup: delete the draft");
+    c.delete_email(id.clone(), true).expect("cleanup: delete the draft");
 
     let res = res.expect("update_draft");
     assert_eq!(res["status"], "draft_updated");
@@ -1171,7 +1189,7 @@ fn create_event_weekly_recurrence_round_trips() {
     assert_eq!(recurrence.occurrences, Some(10));
     assert!(!recurrence.no_end);
 
-    c.delete_event(id, false, false, false).expect("cleanup delete_event");
+    c.delete_event(id, false, true, false).expect("cleanup delete_event");
 }
 
 /// An `EventUpdate` for `event_id` that changes nothing and notifies nobody.
@@ -1340,7 +1358,7 @@ fn create_event_monthly_recurrence_with_until_round_trips() {
     // here rather than asserted absent.
     assert_eq!(recurrence.occurrences, Some(6));
 
-    c.delete_event(id, false, false, false).expect("cleanup delete_event");
+    c.delete_event(id, false, true, false).expect("cleanup delete_event");
 }
 
 #[test]
@@ -1374,7 +1392,7 @@ fn create_event_yearly_recurrence_with_no_end_round_trips() {
     assert!(recurrence.until.is_none());
     assert!(recurrence.occurrences.is_none());
 
-    c.delete_event(id, false, false, false).expect("cleanup delete_event");
+    c.delete_event(id, false, true, false).expect("cleanup delete_event");
 }
 
 #[test]
@@ -1434,7 +1452,7 @@ fn update_event_changes_then_clears_recurrence() {
     assert!(!detail.summary.is_recurring);
     assert!(detail.recurrence.is_none());
 
-    c.delete_event(id, false, false, false).expect("cleanup delete_event");
+    c.delete_event(id, false, true, false).expect("cleanup delete_event");
 }
 
 #[test]
@@ -1519,7 +1537,7 @@ fn list_tasks_filters_and_create_task_additions_round_trip() {
     }).expect("list_tasks should succeed");
     assert!(found.iter().any(|t| t.id == id), "filtered list_tasks should find the new task");
 
-    c.delete_task(id, false).expect("cleanup delete_task");
+    c.delete_task(id, true).expect("cleanup delete_task");
 }
 
 #[test]
@@ -1539,7 +1557,7 @@ fn list_tasks_query_matches_real_body_text() {
         ..Default::default()
     }).expect("list_tasks query should succeed");
 
-    c.delete_task(id.clone(), false).expect("cleanup: delete the task");
+    c.delete_task(id.clone(), true).expect("cleanup: delete the task");
 
     assert!(
         found.iter().any(|t| t.id == id),
@@ -1577,21 +1595,23 @@ fn update_task_marks_complete_then_reopens() {
     }).expect("update_task reopen should succeed");
     assert!(reopened["changed"].as_array().unwrap().iter().any(|v| v == "mark_complete"));
 
-    c.delete_task(id, false).expect("cleanup delete_task");
+    c.delete_task(id, true).expect("cleanup delete_task");
 }
 
 #[test]
 #[ignore]
 fn delete_task_removes_it() {
     let c = client();
+    let subject = run_unique("[outlook-mcp-rs P11 live] delete probe");
     let created = c.create_task(
-        "[outlook-mcp-rs P11 live] delete probe".to_string(),
+        subject.clone(),
         None, None, "normal".to_string(), None, None, None,
     ).expect("create_task should succeed");
     let id = created["id"].as_str().unwrap().to_string();
 
     let deleted = c.delete_task(id, false).expect("delete_task should succeed");
     assert_eq!(deleted["status"], "deleted");
+    purge_from_deleted_items(&c, &subject);
 }
 
 #[test]
@@ -1612,7 +1632,7 @@ fn list_notes_filters_and_create_note_additions_round_trip() {
     }).expect("list_notes should succeed");
     assert!(found.iter().any(|n| n.id == id), "filtered list_notes should find the new note");
 
-    c.delete_note(id, false).expect("cleanup delete_note");
+    c.delete_note(id, true).expect("cleanup delete_note");
 }
 
 #[test]
@@ -1645,7 +1665,7 @@ fn get_note_includes_modified_after_update() {
         "modified ({after_modified}) should not go backwards after update_note ({before_modified})");
     assert!(note.body.as_deref().unwrap_or_default().starts_with("outlook-mcp-rs P12 live modified probe (edited)"));
 
-    c.delete_note(id, false).expect("cleanup delete_note");
+    c.delete_note(id, true).expect("cleanup delete_note");
 }
 
 #[test]
@@ -1669,20 +1689,22 @@ fn update_note_manages_categories_and_color() {
     let note = single(c.get_note(vec![id.clone()], &ReadOptions::default())).expect("get_note should succeed");
     assert!(note.summary.categories.iter().any(|cat| cat == "Blue Category"));
 
-    c.delete_note(id, false).expect("cleanup delete_note");
+    c.delete_note(id, true).expect("cleanup delete_note");
 }
 
 #[test]
 #[ignore]
 fn delete_note_removes_it() {
     let c = client();
+    let subject = run_unique("outlook-mcp-rs P12 live delete probe");
     let created = c.create_note(
-        "outlook-mcp-rs P12 live delete probe".to_string(), None, None,
+        subject.clone(), None, None,
     ).expect("create_note should succeed");
     let id = created["id"].as_str().unwrap().to_string();
 
     let deleted = c.delete_note(id, false).expect("delete_note should succeed");
     assert_eq!(deleted["status"], "deleted");
+    purge_from_deleted_items(&c, &subject);
 }
 
 #[test]
@@ -1705,7 +1727,7 @@ fn list_emails_to_filter_matches_draft_recipient() {
     let hit = c.list_emails(query("nobody@example.invalid"));
     let miss = c.list_emails(query("someone-else@example.invalid"));
 
-    c.delete_email(id.clone(), false).expect("cleanup: delete the draft");
+    c.delete_email(id.clone(), true).expect("cleanup: delete the draft");
 
     let hit = hit.expect("list_emails to=nobody should succeed");
     let miss = miss.expect("list_emails to=someone-else should succeed");
@@ -1736,7 +1758,7 @@ fn hebrew_subject_and_body_round_trip_through_com() {
         received_before: None, item_type: vec![], importance: vec![], flag: vec![], has_attachments: None,
     });
 
-    c.delete_email(id.clone(), false).expect("cleanup: delete the draft");
+    c.delete_email(id.clone(), true).expect("cleanup: delete the draft");
 
     let detail = detail.expect("get_email should succeed");
     assert_eq!(detail.summary.subject.as_bytes(), subject.as_bytes());
