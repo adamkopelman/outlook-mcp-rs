@@ -1838,6 +1838,9 @@ impl OutlookClient for WindowsOutlookClient {
                     items = matched;
                 }
             }
+            // An inner `*` (`status*update`) reaches DASL as unordered pieces
+            // (a superset), so those hits are checked client-side too.
+            let text_check = text_fallback || text.needs_client_check();
 
             // Recipient: applied last so the fallback below scans an
             // already-narrowed set. First try DASL on the To/CC display
@@ -1925,7 +1928,7 @@ impl OutlookClient for WindowsOutlookClient {
                             return Ok(Scan::Skip);
                         }
                     }
-                    if text_fallback
+                    if text_check
                         && !text.matches(filters::EMAIL_QUERY_DEFAULTS, |field| email_query_field(&item, field))
                     {
                         return Ok(Scan::Skip);

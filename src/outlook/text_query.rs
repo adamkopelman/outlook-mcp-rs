@@ -120,10 +120,25 @@ impl TextQuery {
         })
     }
 
-    /// The DASL `@SQL=` filter equivalent to [`TextQuery::matches`]: each
-    /// term becomes `(col LIKE '%text%' OR ...)` over the DASL columns its
-    /// field maps to in `columns`, and the terms are ANDed. `*` becomes
-    /// `%`; `'` is doubled. `None` when there are no terms.
+    /// True when a term has a `*` between two pieces of text. [`to_dasl`]
+    /// can't keep such pieces in order, so its result is a superset that
+    /// must be re-checked with [`TextQuery::matches`].
+    ///
+    /// [`to_dasl`]: TextQuery::to_dasl
+    pub fn needs_client_check(&self) -> bool {
+        self.terms.iter().any(|t| t.text.split('*').filter(|p| !p.is_empty()).count() > 1)
+    }
+
+    /// The DASL `@SQL=` filter for [`TextQuery::matches`]: each term becomes
+    /// `(col LIKE '%text%' OR ...)` over the DASL columns its field maps to
+    /// in `columns`, and the terms are ANDed; `'` is doubled. `None` when
+    /// there are no terms.
+    ///
+    /// Outlook.com's DASL LIKE only honours `%` at the start and end of a
+    /// pattern (`'%a%b%'` silently matches nothing), so a `*` splits the term
+    /// into pieces that must all occur in the same column, in any order. That
+    /// is a superset when a term has two or more pieces; see
+    /// [`TextQuery::needs_client_check`].
     pub fn to_dasl(&self, defaults: &[&str], columns: &[(&str, &[&str])]) -> Option<String> {
         let cols_for = |field: &str| -> Vec<&str> {
             columns.iter().filter(|(f, _)| *f == field).flat_map(|(_, c)| c.iter().copied()).collect()
@@ -131,15 +146,28 @@ impl TextQuery {
         let clauses: Vec<String> = self
             .terms
             .iter()
-            .map(|term| {
-                let like = term.text.replace('\'', "''").replace('*', "%");
+            .filter_map(|term| {
+                let escaped = term.text.replace('\'', "''");
+                let pieces: Vec<&str> = escaped.split('*').filter(|p| !p.is_empty()).collect();
+                if pieces.is_empty() {
+                    return None; // only `*`: matches everything
+                }
                 let cols: Vec<&str> = match &term.field {
                     Some(f) => cols_for(f),
                     None => defaults.iter().flat_map(|f| cols_for(f)).collect(),
                 };
-                let ors: Vec<String> =
-                    cols.iter().map(|c| format!("\"{c}\" LIKE '%{like}%'")).collect();
-                format!("({})", ors.join(" OR "))
+                let ors: Vec<String> = cols
+                    .iter()
+                    .map(|c| {
+                        let likes: Vec<String> =
+                            pieces.iter().map(|p| format!("\"{c}\" LIKE '%{p}%'")).collect();
+                        match likes.len() {
+                            1 => likes[0].clone(),
+                            _ => format!("({})", likes.join(" AND ")),
+                        }
+                    })
+                    .collect();
+                Some(format!("({})", ors.join(" OR ")))
             })
             .collect();
         if clauses.is_empty() {
@@ -301,11 +329,34 @@ mod tests {
             q("subject:\"it's done\"").to_dasl(DEFAULTS, cols).unwrap(),
             "@SQL=(\"urn:subject\" LIKE '%it''s done%')"
         );
+        // An inner `*` splits the term into pieces that must all occur in the
+        // same column: Outlook.com's DASL LIKE ignores a `%` that isn't at
+        // the start or end of the pattern (it matches nothing).
         assert_eq!(
             q("q3*plan from:ada").to_dasl(&["subject", "body"], cols).unwrap(),
-            "@SQL=(\"urn:subject\" LIKE '%q3%plan%' OR \"urn:body\" LIKE '%q3%plan%') AND \
+            "@SQL=((\"urn:subject\" LIKE '%q3%' AND \"urn:subject\" LIKE '%plan%') OR \
+             (\"urn:body\" LIKE '%q3%' AND \"urn:body\" LIKE '%plan%')) AND \
              (\"urn:fromname\" LIKE '%ada%' OR \"urn:fromemail\" LIKE '%ada%')"
         );
+        // Leading/trailing `*` add nothing: terms are substring matches.
+        assert_eq!(
+            q("subject:*plan*").to_dasl(DEFAULTS, cols).unwrap(),
+            "@SQL=(\"urn:subject\" LIKE '%plan%')"
+        );
+        // A term that is only `*` matches everything, so it adds no clause.
+        assert_eq!(q("*").to_dasl(DEFAULTS, cols), None);
+        assert_eq!(
+            q("** subject:plan").to_dasl(DEFAULTS, cols).unwrap(),
+            "@SQL=(\"urn:subject\" LIKE '%plan%')"
+        );
+    }
+
+    #[test]
+    fn only_an_inner_wildcard_needs_a_client_side_check() {
+        assert!(!q("plan").needs_client_check());
+        assert!(!q("*plan* \"two words\"").needs_client_check());
+        assert!(q("alpha q3*plan").needs_client_check());
+        assert!(q("subject:\"status * update\"").needs_client_check());
     }
 
     #[test]
