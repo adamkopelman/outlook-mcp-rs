@@ -1001,7 +1001,7 @@ fn create_draft_turns_data_uri_into_inline_attachment_with_metadata() {
     // Read back before asserting so cleanup still runs on a mismatch.
     let atts = single(c.list_attachments(vec![id.clone()]));
     let detail = single(c.get_email(vec![id.clone()], &ReadOptions { html_body: true, ..ReadOptions::default() }));
-    c.delete_email(id, false).expect("cleanup: delete the draft");
+    c.delete_email(id, true).expect("cleanup: delete the draft");
 
     let atts = atts.expect("list_attachments");
     assert_eq!(atts.len(), 1, "the same image twice is attached once: {atts:?}");
@@ -1045,7 +1045,7 @@ fn update_draft_adds_inline_images_categories_and_importance_without_duplicates(
     let second = c.update_draft(update());
     let atts = single(c.list_attachments(vec![id.clone()]));
     let detail = single(c.get_email(vec![id.clone()], &ReadOptions { html_body: true, ..ReadOptions::default() }));
-    c.delete_email(id.clone(), false).expect("cleanup: delete the draft");
+    c.delete_email(id.clone(), true).expect("cleanup: delete the draft");
 
     let first = first.expect("first update_draft");
     assert_eq!(first["status"], "draft_updated");
@@ -1079,7 +1079,7 @@ fn update_draft_send_without_recipients_saves_and_refuses() {
         send: true, ..Default::default()
     });
     let detail = single(c.get_email(vec![id.clone()], &ReadOptions::default()));
-    c.delete_email(id, false).expect("cleanup: delete the draft");
+    c.delete_email(id, true).expect("cleanup: delete the draft");
     let err = res.expect_err("send=true on a draft with no recipients must fail");
     assert!(err.to_string().contains("no recipients"), "{err}");
     assert_eq!(detail.expect("draft still exists").summary.subject, "outlook-mcp-rs send refusal (edited)");
@@ -1108,7 +1108,8 @@ fn reply_email_draft_with_data_uri_image() {
     assert_eq!(res["status"], "draft_saved");
     let id = res["id"].as_str().expect("draft id").to_string();
     let atts = single(c.list_attachments(vec![id.clone()]));
-    c.delete_email(id, false).expect("cleanup: delete the reply draft");
+    // Permanent: a reply's subject is "RE: <real subject>", so no tag sweep finds it.
+    c.delete_email(id, true).expect("cleanup: delete the reply draft");
     let atts = atts.expect("list_attachments");
     assert!(
         atts.iter().any(|a| a.content_id.as_deref().is_some_and(|c| c.starts_with("img-"))),
@@ -1237,7 +1238,7 @@ fn occurrence_ids_act_on_one_occurrence_only() {
     assert_eq!(deleted["occurrence"], true);
     assert_eq!(list(&c).len(), 4);
 
-    c.delete_event(series, false, false, false).expect("cleanup: delete the series");
+    c.delete_event(series, false, true, false).expect("cleanup: delete the series");
     assert!(list(&c).is_empty());
 }
 
@@ -1291,7 +1292,7 @@ fn update_event_undo_restores_the_previous_values() {
     assert_eq!(detail.summary.location, "Room A");
     assert_eq!(detail.summary.show_as, "busy");
     assert_eq!(detail.summary.categories, vec!["Blue".to_string()]);
-    c.delete_event(id, false, false, false).expect("cleanup");
+    c.delete_event(id, false, true, false).expect("cleanup");
 }
 
 #[test]
