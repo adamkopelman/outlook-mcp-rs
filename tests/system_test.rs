@@ -790,7 +790,9 @@ fn system_test_plans_1_to_9() {
     if let Some(id) = b2_id.clone() {
         match c.update_event(EventUpdate {
             event_id: id.clone(), add_required_attendees: Some(vec![EXTERNAL_ADDR.to_string()]),
-            send_update: true,
+            // Quiet, like the removal below: a sent invite whose removal is
+            // quiet left an orphan event in the attendee's calendar every run.
+            send_update: false,
             subject: None, start: None, end: None, location: None, body: None, all_day: None,
             reminder_minutes: None, show_as: None, add_categories: None, remove_categories: None,
             add_optional_attendees: None, remove_attendees: None, recurrence: None, clear_recurrence: false, require_no_attendees: false,
