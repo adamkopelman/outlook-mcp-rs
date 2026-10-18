@@ -18,6 +18,14 @@ ROOT = Path(__file__).resolve().parent.parent
 
 SUITES = [
     {
+        "target": "system_test_edge",
+        "title": "Edge cases (2026-10-18)",
+        "plan": "SYSTEM_TEST_PLAN_2026-10-18-EDGE.md",
+        "covers": "Code-review hypotheses: clashing attachment names, commas in categories, DASL wildcards, all-day and DST boundaries, "
+                  "odd availability intervals, recurrence edges, permanent deletes, paging under mutation, folders, attendees, limits, flags, stale ids.",
+        "traffic": "One self-loop email and its reply-all; everything else drafts, personal appointments and unsent meetings.",
+    },
+    {
         "target": "system_test_big_calendar",
         "title": "Big calendar",
         "plan": "SYSTEM_TEST_PLAN_2026-10-17-BIG-CALENDAR.md",
@@ -68,6 +76,38 @@ SUITES = [
 ]
 
 BUGS = [
+    ("save_attachments (open)", "Two attachments with the same safe file name overwrite each other, and both report \"saved\"",
+     "`client.rs:2848` joins `safe_filename(name)` with no de-duplication: two `a.txt`, or `a_b.txt` and `.a_b.txt` "
+     "(`safe_filename` trims the leading dot, `com.rs:25`), land on one path; the first file's bytes are lost.", "Edge AT1, AT2"),
+    ("categories (open)", "A category name with a comma is silently split into two",
+     "Outlook stores categories as one comma-separated string (raw COM: `\"Smith, John, Red Category\"`). `join_categories` "
+     "(`com.rs:46`) writes the name as is and `parse_categories` (`com.rs:37`) splits it back, so the item gets `Smith` and `John`; "
+     "the category filter and `remove_categories` then miss it. Nothing rejects the comma.", "Edge CT1, CT2, CT3"),
+    ("check_availability (open)", "On a DST day every slot after the transition is labelled an hour off",
+     "Raw `FreeBusy` counts real elapsed time from local midnight (a probe put the 10:00 event at index 18 on the 23-hour day). "
+     "`parse_freebusy_slots` (`mod.rs:766`) labels slot i as midnight + i × interval in naive local time, so after spring-forward "
+     "busy times show an hour early (after fall-back an hour late), and the day always gets 48 half-hour slots.", "Edge DST3a, DST3b"),
+    ("create_event / list_events (open)", "An event in the skipped DST hour fails to save and leaves a broken item that breaks list_events",
+     "Outlook converts 02:30 on the spring-forward day as 03:30, so End 03:00 is before Start and Save fails with \"The end date you "
+     "entered occurs before the start date\". The unsaved item stays in the Calendar (later in Sync Issues/Local Failures, where only "
+     "`Items.Remove` deletes it), and every `list_events` window covering that day fails with the same error. `create_event` "
+     "(`client.rs:2424`) neither rejects a nonexistent local time nor discards the item on failure.", "Edge DST1a, DST1d"),
+    ("create_event recurrence (open)", "A yearly series starting on Feb 29 can't be created",
+     "Outlook already derives MonthOfYear 2 / DayOfMonth 29 from the start, then rejects any explicit write of them (zero-write probe). "
+     "`apply_recurrence` always writes both (`client.rs:353-354`), so it fails with \"The recurrence pattern is not valid\".", "Edge RC3"),
+    ("update_event undo (open)", "Undoing an all_day change doesn't restore the times",
+     "The undo records only `all_day` (`client.rs:2581`). Outlook rewrites Start/End when AllDayEvent changes (clearing it gives "
+     "08:00–08:30), so 10:00–11:00 → all-day → undo ends at 08:00–08:30.", "Edge AD4"),
+    ("create_event all_day (open)", "all_day with start = end makes a zero-length all-day event",
+     "`create_event` sets Start/End and then AllDayEvent (`client.rs:2424-2427`) and never extends the end; Outlook accepts a "
+     "0-minute all-day event (probe: Duration 0), so the event ends at 07-01 00:00, not 07-02 00:00.", "Edge AD1"),
+    ("get_event / get_task (open)", "An id of the wrong item type returns that item as the wrong type",
+     "`read_event` (`client.rs:1369`) and `read_task` (`client.rs:1400`) open any id without checking the item class: a task id "
+     "comes back as an event starting 1899-12-30, an event id as a not_started task.", "Edge ID3"),
+    ("minor (open)", "Unclear or missing validation: interval_minutes 0, no way to clear a reminder, respond_to_meeting on a draft",
+     "`check_availability` silently uses 1-minute slots for 0 (`client.rs:2744`); `reminder_minutes` always sets ReminderSet "
+     "(`client.rs:2592`), so 0 means \"at start\", never \"none\"; `respond_to_meeting` calls Respond on a mail item and returns "
+     "\"Unknown name\" (`client.rs:2509`).", "Edge AV1a, G4b, ID5"),
     ("#42 / list_events", "A one-day window dropped recurring occurrences on its first day",
      "Under IncludeRecurrences Outlook applies a date-only Restrict bound up to a day late to recurring occurrences; #42's "
      "window had no margin when the range started on an \"unambiguous\" date (day ≥ 13).", "Big calendar EXC, BC1, BC3, R1"),
@@ -388,7 +428,8 @@ body.hide-actual td.actual, body.hide-actual th:nth-child(4) {{ display:none; }}
 <main>
 <h2>Suites</h2>
 <div class="scroll"><table><thead><tr><th>Suite</th><th>What it covers</th><th>Real traffic</th><th>Result</th></tr></thead><tbody>{overview}</tbody></table></div>
-<h2>Bugs these tests found today (all fixed)</h2>
+<h2>Bugs these tests found</h2>
+<p class="meta">Entries marked <b>open</b> come from the 2026-10-18 edge suite and are not fixed yet; the rest (2026-10-17) are fixed.</p>
 <div class="scroll"><table><thead><tr><th>Where</th><th>Bug</th><th>Found by</th></tr></thead><tbody>{bugs}</tbody></table></div>
 {suites}
 </main>
