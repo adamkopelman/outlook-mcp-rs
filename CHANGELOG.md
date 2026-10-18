@@ -19,6 +19,7 @@ Notable changes to outlook-mcp-rs. The format follows [Keep a Changelog](https:/
 - `is_inline` on attachments: inline `cid:` content vs. a regular attachment ([#23](https://github.com/adamkopelman/outlook-mcp-rs/pull/23)).
 - `get_inline_image` tool: an attachment by Content-ID as a base64 `data:` URI ([#24](https://github.com/adamkopelman/outlook-mcp-rs/pull/24)), with optional `context_lines` (the text before the image) ([#25](https://github.com/adamkopelman/outlook-mcp-rs/pull/25)).
 - A system test for PRs #14–#25, and guidance for testing a batch of PRs ([#26](https://github.com/adamkopelman/outlook-mcp-rs/pull/26)).
+- Live system tests for a big calendar, real inbound mail and invites, and edge cases, plus an HTML review page of every system test's input, expected and actual output (`docs/system-tests.html`) ([#58](https://github.com/adamkopelman/outlook-mcp-rs/pull/58)).
 - User-facing skills (`using-outlook-mcp`, `troubleshooting-outlook-mcp`), and README / CONTRIBUTING brought up to date ([#27](https://github.com/adamkopelman/outlook-mcp-rs/pull/27)).
 - This changelog; every PR adds its entry under Unreleased ([#56](https://github.com/adamkopelman/outlook-mcp-rs/pull/56)).
 - Content-writing tools share one input convention: exactly one of `body` / `html_body` / `body_file` / `html_body_file` on the mail tools, `body_file` on event, task and note tools; `categories` / `importance` on `send_email`, `create_draft`, `reply_email` and `update_draft`; `inline_images` on `reply_email` and `update_draft`; `update_draft` can `send`. ([#37](https://github.com/adamkopelman/outlook-mcp-rs/pull/37))
@@ -43,6 +44,7 @@ Notable changes to outlook-mcp-rs. The format follows [Keep a Changelog](https:/
 - HTTP mode answers a request body over 64 MiB with `413` and a compressed body with `415`, instead of a generic error ([#37](https://github.com/adamkopelman/outlook-mcp-rs/pull/37)).
 - A multi-word unquoted `query` matches all words in any order; a bare date in `*_before` includes that whole day; tasks and notes page at 500 ([#39](https://github.com/adamkopelman/outlook-mcp-rs/pull/39)).
 - The calendar tools share one notify flag, `notify`, on `create_event`, `respond_to_meeting`, `update_event` and `delete_event` ([#53](https://github.com/adamkopelman/outlook-mcp-rs/pull/53)).
+- `reminder_minutes: -1` on `create_event` / `update_event` turns the reminder off (0 still reminds at the start), so the `undo` of a reminder change can restore "no reminder" ([#58](https://github.com/adamkopelman/outlook-mcp-rs/pull/58)).
 
 ### Deprecated
 
@@ -57,6 +59,15 @@ Notable changes to outlook-mcp-rs. The format follows [Keep a Changelog](https:/
 - HTTP mode declares `charset=utf-8` on its responses, so clients no longer decode Hebrew as Latin-1 ([#40](https://github.com/adamkopelman/outlook-mcp-rs/pull/40)).
 - Ids after a write: every tool that changes an item and leaves it in place returns its current id. `respond_to_meeting` returned none, though accepting gives the item a new one; `update_event`, `update_task` and `update_note` echoed the id they were given ([#50](https://github.com/adamkopelman/outlook-mcp-rs/pull/50)).
 - Date filters on day-first Windows locales returned the wrong range: bounds are now written so no regional format can misread them, and items are filtered exactly on their real dates ([#42](https://github.com/adamkopelman/outlook-mcp-rs/pull/42)).
+- `list_events` dropped recurring occurrences on the first day of a window; `check_availability` shifted every slot by the window's start time and reported "working elsewhere" as busy; batch writes returned stale ids ([#58](https://github.com/adamkopelman/outlook-mcp-rs/pull/58)).
+- `check_availability` is exact on daylight-saving days: slots are real elapsed time, so a 23-hour day has 46 half-hour slots and a 25-hour day 50, each at its true local time ([#58](https://github.com/adamkopelman/outlook-mcp-rs/pull/58)).
+- `create_event` / `update_event` refuse a start or end in the hour skipped by daylight saving time. It used to fail and leave a broken item that made every `list_events` over that day fail ([#58](https://github.com/adamkopelman/outlook-mcp-rs/pull/58)).
+- `save_attachments` numbers attachments whose names collide (`a.txt`, `a (2).txt`) instead of overwriting the first one ([#58](https://github.com/adamkopelman/outlook-mcp-rs/pull/58)).
+- Category names containing a comma are refused on every tool that writes categories: Outlook stored them as two categories ([#58](https://github.com/adamkopelman/outlook-mcp-rs/pull/58)).
+- A yearly series starting on February 29 can be created ([#58](https://github.com/adamkopelman/outlook-mcp-rs/pull/58)).
+- An all-day event with start = end lasts one day instead of zero, and the `undo` of an `all_day` change restores the event's times ([#58](https://github.com/adamkopelman/outlook-mcp-rs/pull/58)).
+- `get_event`, `get_task`, `get_note` and their update and delete tools refuse an id of another kind of item; a task id given to `get_event` came back as an event starting 1899-12-30. `respond_to_meeting` says plainly when the id isn't a meeting invite ([#58](https://github.com/adamkopelman/outlook-mcp-rs/pull/58)).
+- `check_availability` refuses `interval_minutes` below 1 (0 was read as 1) ([#58](https://github.com/adamkopelman/outlook-mcp-rs/pull/58)).
 
 ## [0.3.0] - 2026-07-18
 

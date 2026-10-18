@@ -15,7 +15,7 @@ use crate::outlook::read::{read_options, ReadRequest, ReadTool};
 use crate::outlook::{DEFAULT_EMAIL_COUNT, MAX_EVENT_COUNT, MAX_NOTE_COUNT, MAX_TASK_COUNT};
 use crate::params::OneOrMany;
 use serde_json::{json, Value};
-use crate::outlook::check_no_attendees;
+use crate::outlook::{check_category_names, check_interval_minutes, check_no_attendees};
 use crate::outlook::{CheckAvailabilityInput, CreateEventInput, DraftUpdate, EmailQuery, EmailUpdate, EventQuery, EventUpdate, NoteQuery, NoteUpdate, OutlookClient, RecurrenceInput, TaskQuery, TaskUpdate, InlineImage};
 use crate::outlook::{require_mail_body, resolve_mail_body, resolve_text_input, BodyInputs, MailBody, NewEmail, ReplyInput};
 
@@ -725,6 +725,7 @@ pub struct CreateEventParams {
     pub optional_attendees: Option<Vec<String>>,
     #[serde(default)]
     pub all_day: bool,
+    /// Reminder, in minutes before the start (0 = at the start); -1 turns the reminder off.
     #[serde(default)]
     pub reminder_minutes: Option<i32>,
     #[serde(default)]
@@ -786,6 +787,7 @@ pub struct UpdateEventParams {
     pub body_file: Option<String>,
     #[serde(default)]
     pub all_day: Option<bool>,
+    /// Reminder, in minutes before the start (0 = at the start); -1 turns the reminder off.
     #[serde(default)]
     pub reminder_minutes: Option<i32>,
     /// "free" | "tentative" | "busy" | "out_of_office" | "working_elsewhere".
@@ -859,6 +861,7 @@ pub struct CheckAvailabilityParams {
     pub start: String,
     /// Window end (any date form).
     pub end: String,
+    /// Slot length in minutes (at least 1; default 30).
     #[serde(default = "default_interval_minutes")]
     pub interval_minutes: i32,
     #[serde(default = "default_treat_as_free")]
@@ -1257,6 +1260,7 @@ impl OutlookMcpServer {
         &self,
         Parameters(p): Parameters<SendEmailParams>,
     ) -> Result<CallToolResult, McpError> {
+        check_category_names(&[p.categories.as_ref()])?;
         let client = self.client.clone();
         let result = run_blocking(move || {
             let body = require_mail_body(BodyInputs {
@@ -1277,6 +1281,7 @@ impl OutlookMcpServer {
         &self,
         Parameters(p): Parameters<CreateDraftParams>,
     ) -> Result<CallToolResult, McpError> {
+        check_category_names(&[p.categories.as_ref()])?;
         let client = self.client.clone();
         let result = run_blocking(move || {
             let body = require_mail_body(BodyInputs {
@@ -1297,6 +1302,7 @@ impl OutlookMcpServer {
         &self,
         Parameters(p): Parameters<ReplyEmailParams>,
     ) -> Result<CallToolResult, McpError> {
+        check_category_names(&[p.categories.as_ref()])?;
         let client = self.client.clone();
         let result = run_blocking(move || {
             let body = require_mail_body(BodyInputs {
@@ -1319,11 +1325,14 @@ impl OutlookMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let (items, many) = write_items(p)?;
         let client = self.client.clone();
-        run_writes(items, many, move |email_id, p| client.update_email(EmailUpdate {
-            email_id, move_to: p.move_to, mark_read: p.mark_read,
-            flag: p.flag, add_categories: p.add_categories,
-            remove_categories: p.remove_categories, importance: p.importance,
-        })).await
+        run_writes(items, many, move |email_id, p| {
+            check_category_names(&[p.add_categories.as_ref(), p.remove_categories.as_ref()])?;
+            client.update_email(EmailUpdate {
+                email_id, move_to: p.move_to, mark_read: p.mark_read,
+                flag: p.flag, add_categories: p.add_categories,
+                remove_categories: p.remove_categories, importance: p.importance,
+            })
+        }).await
     }
 
     #[tool(description = "Edit an existing unsent draft (e.g. one from create_draft or reply_email with send=false) by `email_id` (`draft_id` is a deprecated alias), save it, and optionally send it (send=true; default false). Only the fields you pass change: subject; the body, as at most one of `body` (plain text), `html_body`, `body_file` or `html_body_file` (local UTF-8 file paths; use these for large bodies), replaces the current body; to/cc/bcc replace that recipient line entirely (an empty list clears it); attachments are local file paths appended to the existing ones; add_categories/remove_categories; importance (low/normal/high). `data:` image URIs in a new HTML body become hidden Content-ID attachments, and `inline_images` (needs an HTML body) adds images referenced as <img src=\"cid:CONTENT_ID\">. send=true alone sends the draft as is. Sent or received emails are rejected. Returns the draft id and the list of changed fields (status \"draft_updated\"), or status \"sent\" when sent. Several items in one call: email_id as a list applies the same changes to each, or updates: [{email_id, ...}] gives each item its own changes (at most 100); the result is then a list in the same order, and a failed item becomes {\"id\", \"error\"} without stopping the rest. Each result has undo: the update_draft call that reverts it (addressed by the current id); pass a batch's undo objects as updates to roll it back. not_undoable lists changes undo can't revert (bodies, attachments, recurrence, removed attendees).", annotations(read_only_hint = false, destructive_hint = true, open_world_hint = true))]
@@ -1334,6 +1343,7 @@ impl OutlookMcpServer {
         let (items, many) = write_items(p)?;
         let client = self.client.clone();
         run_writes(items, many, move |email_id, p| {
+            check_category_names(&[p.add_categories.as_ref(), p.remove_categories.as_ref()])?;
             let body = resolve_mail_body(BodyInputs {
                 body: p.body, html_body: p.html_body, body_file: p.body_file,
                 html_body_file: p.html_body_file, html: None,
@@ -1426,6 +1436,7 @@ impl OutlookMcpServer {
             .iter()
             .any(|list| list.as_ref().is_some_and(|l| !l.is_empty()));
         check_no_attendees(require_no_attendees, false, invites, &subject)?;
+        check_category_names(&[categories.as_ref()])?;
         let client = self.client.clone();
         let body = run_blocking(move || resolve_text_input(body, body_file, "body", "body_file")).await?;
         // `attendees` is a legacy alias for the required tier; merge it in.
@@ -1469,6 +1480,7 @@ impl OutlookMcpServer {
         let (items, many) = write_items(p)?;
         let client = self.client.clone();
         run_writes(items, many, move |event_id, p| {
+            check_category_names(&[p.add_categories.as_ref(), p.remove_categories.as_ref()])?;
         let recurrence = p.recurrence.map(|r| RecurrenceInput {
             pattern: r.pattern, interval: r.interval, days_of_week: r.days_of_week,
             day_of_month: r.day_of_month, until: r.until, occurrences: r.occurrences,
@@ -1507,6 +1519,7 @@ impl OutlookMcpServer {
         Parameters(CheckAvailabilityParams { people, start, end, interval_minutes, treat_as_free }):
             Parameters<CheckAvailabilityParams>,
     ) -> Result<CallToolResult, McpError> {
+        check_interval_minutes(interval_minutes)?;
         let client = self.client.clone();
         let input = CheckAvailabilityInput { people, start, end, interval_minutes, treat_as_free };
         let result = run_blocking(move || client.check_availability(input)).await?;
@@ -1594,6 +1607,7 @@ impl OutlookMcpServer {
             subject, body, body_file, due_date, importance, categories, start_date, reminder_time,
         }): Parameters<CreateTaskParams>,
     ) -> Result<CallToolResult, McpError> {
+        check_category_names(&[categories.as_ref()])?;
         let client = self.client.clone();
         let result = run_blocking(move || {
             let body = resolve_text_input(body, body_file, "body", "body_file")?;
@@ -1626,6 +1640,7 @@ impl OutlookMcpServer {
         let (items, many) = write_items(p)?;
         let client = self.client.clone();
         run_writes(items, many, move |task_id, p| {
+            check_category_names(&[p.add_categories.as_ref(), p.remove_categories.as_ref()])?;
             let body = resolve_text_input(p.body, p.body_file, "body", "body_file")?;
             client.update_task(TaskUpdate {
                 task_id, mark_complete: p.mark_complete, subject: p.subject,
@@ -1686,6 +1701,7 @@ impl OutlookMcpServer {
         &self,
         Parameters(CreateNoteParams { body, body_file, categories, color }): Parameters<CreateNoteParams>,
     ) -> Result<CallToolResult, McpError> {
+        check_category_names(&[categories.as_ref()])?;
         let client = self.client.clone();
         let result = run_blocking(move || {
             let body = resolve_text_input(body, body_file, "body", "body_file")?.ok_or_else(|| {
@@ -1704,6 +1720,7 @@ impl OutlookMcpServer {
         let (items, many) = write_items(p)?;
         let client = self.client.clone();
         run_writes(items, many, move |note_id, p| {
+            check_category_names(&[p.add_categories.as_ref(), p.remove_categories.as_ref()])?;
             let body = resolve_text_input(p.body, p.body_file, "body", "body_file")?;
             client.update_note(NoteUpdate {
                 note_id, body, add_categories: p.add_categories,

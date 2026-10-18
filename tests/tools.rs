@@ -3327,3 +3327,35 @@ async fn get_inline_image_output_dir_writes_image_bytes() {
     assert_eq!(v["size"], 4);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn category_names_with_a_comma_are_refused_before_any_write() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let p: CreateTaskParams = serde_json::from_value(json!({
+        "subject": "t", "categories": ["Smith, John", "Red Category"]
+    })).unwrap();
+    let e = err_text(server.create_task(Parameters(p)).await.unwrap_err());
+    assert!(e.contains("comma") && e.contains("Smith, John"), "{e}");
+    let p: UpdateEventParams = serde_json::from_value(json!({
+        "event_id": "e", "add_categories": ["Smith, John"]
+    })).unwrap();
+    let e = err_text(server.update_event(Parameters(p)).await.unwrap_err());
+    assert!(e.contains("comma"), "{e}");
+    assert!(fake.calls().is_empty(), "nothing reaches the client: {:?}", fake.calls());
+}
+
+#[tokio::test]
+async fn check_availability_refuses_a_zero_interval() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let e = err_text(server.check_availability(Parameters(CheckAvailabilityParams {
+        people: vec!["alice@example.com".to_string()],
+        start: "2099-01-01T09:00".to_string(),
+        end: "2099-01-01T17:00".to_string(),
+        interval_minutes: 0,
+        treat_as_free: vec!["free".to_string()],
+    })).await.unwrap_err());
+    assert!(e.contains("interval_minutes"), "{e}");
+    assert!(fake.calls().is_empty());
+}

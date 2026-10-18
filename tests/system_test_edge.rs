@@ -356,35 +356,39 @@ async fn body(w: &mut Wire, log: &mut Log, c: &mut Ctx) {
         Err(e) => { for id in ["AT1", "AT2", "AT3"] { log.fail(id, format!("no attachments draft: {e}")); } }
     }
 
-    // ---- CT: categories containing a comma --------------------------------------------
-    let want_cats = vec!["Red Category".to_string(), "Smith, John".to_string()];
-    let ev = event(w, c, "CT1-commas", "2099-02-11T10:00", "2099-02-11T10:30", json!({"categories": ["Smith, John", "Red Category"]})).await;
-    let tk = w.call("create_task", json!({"subject": c.t("CT1-commas task"), "categories": ["Smith, John", "Red Category"]})).await
+    // ---- CT: categories containing a comma ---------------------------------------------
+    // Outlook can't store a comma in a category name (it separates categories
+    // with commas), so every tool that writes categories refuses one.
+    let comma = |r: &Result<Value, String>| r.as_ref().is_err_and(|e| e.contains("comma"));
+    let bad_ev = w.call("create_event", json!({"subject": c.t("CT1-commas"), "start": "2099-02-11T10:00",
+        "end": "2099-02-11T10:30", "categories": ["Smith, John", "Red Category"], "notify": false})).await;
+    let bad_tk = w.call("create_task", json!({"subject": c.t("CT1-commas task"), "categories": ["Smith, John", "Red Category"]})).await;
+    if let Ok(v) = &bad_ev { c.events.push(s(v, "id")); }
+    if let Ok(v) = &bad_tk { c.tasks.push(s(v, "id")); }
+    let left = evs(w, c, "CT1-commas", "2099-02-11", "2099-02-11", json!({})).await.map(|r| r.len());
+    log.check("CT1", comma(&bad_ev) && comma(&bad_tk) && left == Ok(0),
+        format!("create_event -> {:?}; create_task -> {:?}; events created: {left:?}", bad_ev.as_ref().err(), bad_tk.as_ref().err()));
+    let ev = event(w, c, "CT2-cats", "2099-02-11T11:00", "2099-02-11T11:30", json!({"categories": ["Red Category"]})).await;
+    let tk = w.call("create_task", json!({"subject": c.t("CT2-cats task"), "categories": ["Red Category"]})).await
         .map(|v| s(&v, "id"));
     if let Ok(id) = &tk { c.tasks.push(id.clone()); }
     match (&ev, &tk) {
         (Ok(e), Ok(t)) => {
-            let ge = w.call("get_event", json!({"event_id": e, "include": []})).await.unwrap_or_default();
-            let gt = w.call("get_task", json!({"task_id": t, "include": []})).await.unwrap_or_default();
-            let (eid, sid) = eid_sid(e);
-            let raw = ps(format!("$ns.GetItemFromID({}, {}).Categories", psq(&eid), psq(&sid))).await;
-            log.check("CT1", cats(&ge) == want_cats && cats(&gt) == want_cats,
-                format!("get_event categories {:?}, get_task categories {:?}; raw COM Categories {raw:?}", cats(&ge), cats(&gt)));
-            let le = evs(w, c, "CT1-commas", "2099-02-11", "2099-02-11", json!({"category": "Smith, John"})).await;
-            let lt = w.call("list_tasks", json!({"query": c.q("CT1-commas"), "category": "Smith, John"})).await;
-            let e_hit = le.as_ref().is_ok_and(|r| r.iter().any(|x| s(x, "id") == *e));
-            let t_hit = lt.as_ref().is_ok_and(|v| ids_of(v).contains(t));
-            log.check("CT2", e_hit && t_hit, format!("category \"Smith, John\": event found {e_hit}, task found {t_hit}; {:?} {:?}",
-                le.err(), lt.err()));
-            let ue = w.call("update_event", json!({"event_id": e, "remove_categories": ["Smith, John"], "notify": false})).await;
-            let ut = w.call("update_task", json!({"task_id": t, "remove_categories": ["Smith, John"]})).await;
-            let ge = w.call("get_event", json!({"event_id": e, "include": []})).await.unwrap_or_default();
-            let gt = w.call("get_task", json!({"task_id": t, "include": []})).await.unwrap_or_default();
             let red = vec!["Red Category".to_string()];
-            log.check("CT3", ue.is_ok() && ut.is_ok() && cats(&ge) == red && cats(&gt) == red,
-                format!("remove \"Smith, John\": event {:?}, task {:?}; {:?} {:?}", cats(&ge), cats(&gt), ue.err(), ut.err()));
+            let ue = w.call("update_event", json!({"event_id": e, "add_categories": ["Smith, John"], "notify": false})).await;
+            let ut = w.call("update_task", json!({"task_id": t, "add_categories": ["Smith, John"]})).await;
+            let ge = w.call("get_event", json!({"event_id": e, "include": []})).await.unwrap_or_default();
+            let gt = w.call("get_task", json!({"task_id": t, "include": []})).await.unwrap_or_default();
+            log.check("CT2", comma(&ue) && comma(&ut) && cats(&ge) == red && cats(&gt) == red,
+                format!("add \"Smith, John\": event {:?} -> {:?}; task {:?} -> {:?}", ue.as_ref().err(), cats(&ge), ut.as_ref().err(), cats(&gt)));
+            let ue = w.call("update_event", json!({"event_id": e, "remove_categories": ["Red Category"], "notify": false})).await;
+            let ut = w.call("update_task", json!({"task_id": t, "remove_categories": ["Red Category"]})).await;
+            let ge = w.call("get_event", json!({"event_id": e, "include": []})).await.unwrap_or_default();
+            let gt = w.call("get_task", json!({"task_id": t, "include": []})).await.unwrap_or_default();
+            log.check("CT3", ue.is_ok() && ut.is_ok() && cats(&ge).is_empty() && cats(&gt).is_empty(),
+                format!("remove \"Red Category\": event {:?}, task {:?}; {:?} {:?}", cats(&ge), cats(&gt), ue.err(), ut.err()));
         }
-        _ => { for id in ["CT1", "CT2", "CT3"] { log.fail(id, format!("seed failed: {:?} {:?}", ev, tk)); } }
+        _ => { for id in ["CT2", "CT3"] { log.fail(id, format!("seed failed: {:?} {:?}", ev, tk)); } }
     }
 
     // ---- Q: wildcard and quote characters in queries ------------------------------------
@@ -544,12 +548,14 @@ async fn body(w: &mut Wire, log: &mut Log, c: &mut Ctx) {
         for (id, label, a, b) in [("DST1a", "DST1-skipped", "2099-03-27T02:30", "2099-03-27T03:00"),
                                   ("DST1b", "DST1-skipped-long", "2099-03-27T02:30", "2099-03-27T04:00"),
                                   ("DST1c", "DST1-repeated", "2099-10-25T01:30", "2099-10-25T02:00")] {
+            // A start in the skipped hour doesn't exist on the local clock: refused.
+            let skipped = id != "DST1c";
             match event(w, c, label, a, b, json!({})).await {
                 Ok(eid) => {
                     let (st, en, _) = times(w, &eid).await;
-                    log.check(id, !st.starts_with("ERR"), format!("{a}..{b} -> stored {st} .. {en}"));
+                    log.check(id, !skipped && !st.starts_with("ERR"), format!("{a}..{b} -> stored {st} .. {en}"));
                 }
-                Err(e) => log.fail(id, format!("{a}..{b} -> create failed: {e}")),
+                Err(e) => { log.check(id, skipped && e.contains("doesn't exist"), format!("{a}..{b} -> refused: {e}")); }
             }
         }
         // After a failed skipped-hour create: does the day still list, and is anything left behind?
@@ -571,9 +577,11 @@ async fn body(w: &mut Wire, log: &mut Log, c: &mut Ctx) {
     let started = Instant::now();
     let mut published = false;
     while started.elapsed().as_secs() < 180 {
-        if let Ok(v) = w.call("check_availability", json!({"people": [SELF], "start": "2099-08-04T08:00", "end": "2099-08-04T12:00", "interval_minutes": 30})).await {
+        // Both AV1 days: one day can publish well before the other (seen live).
+        if let Ok(v) = w.call("check_availability", json!({"people": [SELF], "start": "2099-08-04T08:00", "end": "2099-08-05T12:00", "interval_minutes": 30})).await {
             let g = got_slots(&v, 0);
-            if g.iter().any(|(st, x)| st == "2099-08-04T09:00:00" && x == "busy") { published = true; break; }
+            let busy = |at: &str| g.iter().any(|(st, x)| st == at && x == "busy");
+            if busy("2099-08-04T09:00:00") && busy("2099-08-05T09:00:00") { published = true; break; }
         }
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
@@ -626,7 +634,18 @@ async fn body(w: &mut Wire, log: &mut Log, c: &mut Ctx) {
         format!("you: {}; nobody@example.invalid: (resolved, slots) {nob:?}; {:?}", slot_diff(&g, &want), r.as_ref().err()));
     if zone_ok {
         for (id, day, next) in [("DST3a", at(2099, 3, 27, 0, 0), at(2099, 3, 28, 0, 0)), ("DST3b", at(2099, 10, 25, 0, 0), at(2099, 10, 26, 0, 0))] {
-            let r = avail(w, &[SELF], iso(day), iso(next), 30).await;
+            // Each day's free/busy can publish later than AV1's (seen once:
+            // August and December published, both DST days still all free).
+            // Wait until the day shows anything busy.
+            let waited = Instant::now();
+            let mut r = avail(w, &[SELF], iso(day), iso(next), 30).await;
+            while waited.elapsed().as_secs() < 180
+                && r.as_ref().map(|v| got_slots(v, 0)).unwrap_or_default().iter().all(|x| x.1 == "free")
+            {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                r = avail(w, &[SELF], iso(day), iso(next), 30).await;
+            }
+            println!("{id}: free/busy for {} after {:.0}s", iso(day), waited.elapsed().as_secs_f64());
             let g = r.as_ref().map(|v| got_slots(v, 0)).unwrap_or_default();
             let status = |h: u32, m: u32| g.iter().find(|x| x.0 == iso(day.date().and_hms_opt(h, m, 0).unwrap())).map(|x| x.1.clone()).unwrap_or_default();
             let real_hours = if day.month() == 3 { 23 } else { 25 };
@@ -982,7 +1001,9 @@ async fn body(w: &mut Wire, log: &mut Log, c: &mut Ctx) {
             let id = s(&v, "id");
             c.emails.push(id.clone());
             let g = w.call("get_email", json!({"email_id": id, "include": []})).await.unwrap_or_default();
-            log.check("L2", s(&g, "subject") == long_subj, format!("300-char subject reads back exactly: {} ({} chars)", s(&g, "subject") == long_subj, s(&g, "subject").chars().count()));
+            // Outlook keeps the first 255 characters of a subject (its own limit).
+            let want: String = long_subj.chars().take(255).collect();
+            log.check("L2", s(&g, "subject") == want, format!("300-char subject reads back as its first 255 characters (Outlook's limit): {} ({} chars)", s(&g, "subject") == want, s(&g, "subject").chars().count()));
         }
         Err(e) => log.fail("L2", e),
     }
@@ -1122,12 +1143,12 @@ async fn body(w: &mut Wire, log: &mut Log, c: &mut Ctx) {
             let a = ps(probe.clone()).await;
             let g = w.call("get_event", json!({"event_id": id, "include": []})).await.unwrap_or_default();
             let has_field = g.as_object().is_some_and(|o| o.keys().any(|k| k.contains("reminder")));
-            let u = w.call("update_event", json!({"event_id": id, "reminder_minutes": 0, "notify": false})).await;
+            let u = w.call("update_event", json!({"event_id": id, "reminder_minutes": -1, "notify": false})).await;
             let b = ps(probe).await;
             log.check("G4a", a.as_ref().is_ok_and(|x| x == "True|15"),
                 format!("reminder_minutes 15 -> raw COM (ReminderSet|minutes) {a:?}; get_event has a reminder field: {has_field} (it documents none)"));
             log.check("G4b", u.is_ok() && b.as_ref().is_ok_and(|x| x.starts_with("False")),
-                format!("update reminder_minutes 0 -> raw COM {b:?} (want no reminder); {:?}", u.err()));
+                format!("update reminder_minutes -1 -> raw COM {b:?} (want no reminder); {:?}", u.err()));
         }
         Err(e) => { log.fail("G4a", e.clone()); log.fail("G4b", e); }
     }
@@ -1206,7 +1227,7 @@ async fn body(w: &mut Wire, log: &mut Log, c: &mut Ctx) {
                 match &a { Ok(v) => format!("returned {:?} (start {:?})", s(v, "subject"), v["start"]), Err(e) => format!("error {e:?}") },
                 match &b { Ok(v) => format!("returned {:?} (status {:?})", s(v, "subject"), v["status"]), Err(e) => format!("error {e:?}") }));
         }
-        _ => log.fail("ID3", "CT1's task or event is missing"),
+        _ => log.fail("ID3", "CT2's task or event is missing"),
     }
     match event(w, c, "ID4-series", "2099-11-26T09:00", "2099-11-26T09:30", json!({"recurrence": {"pattern": "daily", "occurrences": 2}})).await {
         Ok(id) => {
