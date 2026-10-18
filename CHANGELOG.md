@@ -6,6 +6,8 @@ Notable changes to outlook-mcp-rs. The format follows [Keep a Changelog](https:/
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-18
+
 ### Added
 
 - `list_emails`: `offset` paging; the `count` cap is raised to 200 ([#14](https://github.com/adamkopelman/outlook-mcp-rs/pull/14)).
@@ -97,7 +99,8 @@ Notable changes to outlook-mcp-rs. The format follows [Keep a Changelog](https:/
 
 - First release: email, calendar, attachment, task and note tools over stdio, driving classic Outlook through COM, with a fake client for tests, live-Outlook system tests, and CI release builds.
 
-[Unreleased]: https://github.com/adamkopelman/outlook-mcp-rs/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/adamkopelman/outlook-mcp-rs/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/adamkopelman/outlook-mcp-rs/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/adamkopelman/outlook-mcp-rs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/adamkopelman/outlook-mcp-rs/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/adamkopelman/outlook-mcp-rs/compare/v0.1.0...v0.1.1
