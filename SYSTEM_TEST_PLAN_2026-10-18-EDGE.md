@@ -37,9 +37,9 @@ A test whose hypothesis is confirmed records `[FAIL]` with the observed behaviou
 - **AT3** `CON.txt` and `...` → each saved under a usable name, or a clear per-file error; never a reported save of a file that is not on disk.
 
 ### Categories containing a comma
-- **CT1** `create_event` and `create_task` with `categories: ["Smith, John", "Red Category"]`, then `get_event` / `get_task` → exactly those 2 categories. Hypothesis: `parse_categories` (`com.rs:37`) splits on `,`, so the name comes back as `Smith` and `John`.
-- **CT2** `list_events` and `list_tasks` with `category: "Smith, John"` → the seeded item.
-- **CT3** `update_event` / `update_task` with `remove_categories: ["Smith, John"]` → only `Red Category` is left.
+- **CT1** `create_event` and `create_task` with `categories: ["Smith, John", "Red Category"]` → both refused with an error about the comma; nothing is created. (Outlook stores categories as one comma-separated string, so such a name read back as two categories; found by the first run, fixed.)
+- **CT2** an event and a task with `["Red Category"]`; `add_categories: ["Smith, John"]` on each → refused; the categories stay `["Red Category"]`.
+- **CT3** `remove_categories: ["Red Category"]` on both → no categories left (the update path still works).
 
 ### Wildcard and quote characters in queries
 - **Q1** `list_emails` `query: "50% off"` → exactly the `50% off` draft. Hypothesis: `text_query.rs:150` escapes only `'`, so `%` is a wildcard.
@@ -58,7 +58,7 @@ A test whose hypothesis is confirmed records `[FAIL]` with the observed behaviou
 - **AD5** an all-day daily series of 5 occurrences → 5 all-day rows, one per day.
 
 ### Daylight saving time
-- **DST1** find the local zone's 2099 spring-forward and fall-back dates (`[TimeZoneInfo]::Local.GetAdjustmentRules()`; if the zone has no DST, record every DST test as `[PASS] ... skipped: zone has no DST`). Create an event that starts in the skipped hour and one in the repeated hour → `get_event` returns the times as Outlook stored them; the result doc records them.
+- **DST1** find the local zone's 2099 spring-forward and fall-back dates (`[TimeZoneInfo]::Local.GetAdjustmentRules()`; if the zone has no DST, record every DST test as `[PASS] ... skipped: zone has no DST`). An event starting in the skipped hour, ending in it (DST1a) or after it (DST1b) → refused: the time doesn't exist on the local clock. One in the repeated hour (DST1c) → created. DST1d: `list_events` over the spring-forward day still works, and nothing titled DST1-skipped is left in the Calendar or Sync Issues.
 - **DST2** a daily series across each transition → one occurrence per day, distinct `occurrence_id`s, the same local wall-clock time on both sides.
 - **DST3** `check_availability` for yourself in 30-minute slots over each transition day → the slot count matches the day's real length (23 or 25 hours) or the documented behaviour, and the seeded event's slots are busy at the right times. Hypothesis: the free/busy parsing assumes 1440 minutes a day.
 - **DST4** `list_events` over each transition day → the seeded events, once each.
@@ -109,7 +109,7 @@ A test whose hypothesis is confirmed records `[FAIL]` with the observed behaviou
 
 ### Size limits
 - **L1** a draft with a 1 MB body; `get_email` with `max_body_chars` 999, 1000 and 5,000,001 → each clamped or rejected as the tool text documents; 1000 gives exactly 1000 characters and a truncation flag.
-- **L2** a 300-character subject → reads back exactly.
+- **L2** a 300-character subject → reads back as its first 255 characters (Outlook's own subject limit; the first run confirmed it on an unsaved item).
 - **L3** a draft with a 12 MB inline image; `get_inline_image` → a clear "too large" error (the limit is 10 MB), not a crash or a truncated image.
 - **L4** `get_email` with 201 ids → the batch-limit error. With 200 ids (tagged drafts) → 200 results.
 
@@ -129,7 +129,7 @@ A test whose hypothesis is confirmed records `[FAIL]` with the observed behaviou
 - **G1** `get_email` with `include: ["meeting"]` on an organized unsent meeting's item, and on a plain draft → meeting fields for the first; none (or a documented empty value) for the second.
 - **G2** `list_folders` with nested folders → the subfolder appears with its parent path.
 - **G3** `reply_email(reply_all: true)` on the self-loop email → the reply is in Sent Items addressed only to `SELF`.
-- **G4** `create_event` with `reminder_minutes: 15`, then `get_event` → 15; update to 0 → no reminder.
+- **G4** `create_event` with `reminder_minutes: 15` → a 15-minute reminder (G4a); update to `-1` → no reminder (G4b).
 - **G5** `list_emails(received_before: <self-loop received time + 1 min>)` → includes it; a minute before → excludes it.
 - **G6** `list_events` with `importance: high` on one high and one normal seeded event → only the high one.
 - **G7** `list_events` with `attendees` and `attendee_role: optional` on a meeting with one required and one optional `example.invalid` attendee → it matches the optional attendee, not the required one.

@@ -7,7 +7,28 @@
 - **Mechanism:** the real MCP tool layer (see `tests/common`). Raw Outlook COM from PowerShell is used only for what the tools don't expose: creating and removing the test folders, attaching an item to a draft, reading reminders and the raw `Categories` string, and the final tag count.
 - **Traffic:** one self-loop email and its reply-all, both only to the mailbox itself. The reply-all was saved as a draft first, and sent only after its recipients were checked. Everything else was a draft to `nobody@example.invalid`, a personal appointment, or an unsent meeting saved with `notify: false`.
 
-## Outcome
+## After the fixes (PR #58)
+
+**85/85 pass** on the fixed code (log on the review page). `system_test_big_calendar` (34/34) and `system_test_p10_12` (13/13) were re-run live on the fixed code too, and the offline tests pass.
+
+| Bug | Fix | Now |
+|---|---|---|
+| 1. `save_attachments` name collisions | names are made unique within a call: `a.txt`, `a (2).txt` (`unique_file_name`) | AT1, AT2 pass |
+| 2. Commas in category names | refused, with a clear error, by every tool that writes categories (`check_category_names`) | CT1–CT3 (re-planned) pass |
+| 3. Free/busy on DST days | slots are counted in real time from local midnight and labelled in local time | DST3a: 46 slots, DST3b: 50, busy at the right times |
+| 4. Event in the skipped DST hour | `create_event` / `update_event` refuse a start or end that doesn't exist on the local clock (`check_local_time_exists`), before anything is created | DST1a, DST1b refused; DST1d: the day lists, nothing left behind |
+| 5. Yearly from Feb 29 | `MonthOfYear` / `DayOfMonth` are written only when they differ from what Outlook derived | RC3: 2096-02-29, 2097-02-28, 2098-02-28 |
+| 6. Undo of `all_day` | the undo records start and end too; clearing `all_day` is applied before explicit times | AD4 passes both ways |
+| 7. Zero-length all-day | an empty all-day range becomes the single day of its start (`all_day_end`) | AD1 passes |
+| 8. Wrong item type | event, task and note tools check the item's class (`check_item_class`) | ID3: "This id is a task, not a calendar event. Use an id from list_events." |
+| AV1a | `interval_minutes` below 1 is refused | passes |
+| G4b | `reminder_minutes: -1` turns the reminder off (the test now uses -1) | passes |
+| ID5 | `respond_to_meeting` names what the id is | "This id is an email, not a meeting invite…" |
+| L2 | not a bug: the test now expects Outlook's 255-character limit | passes |
+
+Two test-only changes made the free/busy checks wait for what they test: Outlook.com published one AV1 day before the other in one run, and the DST days late in another. AV1's wait now requires both days, and DST3 waits until its own day shows busy (it took 0 s in the final run).
+
+## Outcome of the first run (before the fixes)
 
 **68/85 result lines pass.** Every failure below was root-caused with a zero-write probe (unsaved items, discarded) or with the run's own raw COM reads.
 
@@ -115,7 +136,7 @@ All four are fixed in the test, and run 2 is the log on the review page.
 | ID5 | **FAIL** | `respond_to_meeting` with a draft id → "Outlook error: Unknown name." (an error, but not a clear one) |
 | CLEAN | PASS | 89 emails, 96 events and 1 task deleted by id, 5 more swept; folders removed; raw COM count of the run's tag: 0 |
 
-## Confirmed bugs (not fixed; this suite only reports)
+## Confirmed bugs (all fixed in PR #58, see above)
 
 ### 1. `save_attachments` overwrites attachments whose safe names collide (AT1, AT2)
 
