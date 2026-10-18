@@ -51,6 +51,14 @@ Outlook:
 
 | `cargo test --test system_test_prs_2026_10_17 -- --ignored --nocapture` | PRs #37–#56: `*_file` inputs, `data:` images, `update_draft` send, batch reads, list conventions and date grammar, locale-proof dates, output controls, occurrence ids, batch writes and `undo`, `require_no_attendees`, tool annotations, permanent delete of events/tasks/notes. Runs through the real MCP tool layer (JSON-RPC over the stdio codec) | `SYSTEM_TEST_PLAN_2026-10-17-PRS.md`, `SYSTEM_TEST_RESULTS_2026-10-17-PRS.md` |
 
+| `cargo test --test system_test_big_calendar -- --ignored --nocapture` | A big calendar (~490 events, 500 occurrences): the 250-row cap, paging, recurrence expansion, #42's date window, a #43-size week, filters before paging, Hebrew, 100-item batch writes with undo, exact free/busy. Sends nothing | `SYSTEM_TEST_PLAN_2026-10-17-BIG-CALENDAR.md`, `SYSTEM_TEST_RESULTS_2026-10-17-BIG-CALENDAR-INBOUND.md` |
+| `SYSTEST_INBOUND_RUN=r<token> cargo test --test system_test_inbound -- --ignored --nocapture` | Real external mail and Google Calendar invites (Hebrew, inline images, attachments, replies to Gmail, `respond_to_meeting` with notify on/off). Needs the connector step described in its plan first | `SYSTEM_TEST_PLAN_2026-10-17-INBOUND.md`, `SYSTEM_TEST_RESULTS_2026-10-17-BIG-CALENDAR-INBOUND.md` |
+| `cargo test --test system_test_edge -- --ignored --nocapture` | Edge cases from a code review: clashing attachment names, commas in categories, DASL wildcards, all-day and DST boundaries, odd availability intervals, recurrence edges, permanent deletes, paging under mutation, non-default folders, attendees, size limits, flags, stale ids. One self-loop email and its reply-all. Records confirmed bugs as `[FAIL]` (17 open on 2026-10-18) | `SYSTEM_TEST_PLAN_2026-10-18-EDGE.md`, `SYSTEM_TEST_RESULTS_2026-10-18-EDGE.md` |
+
+`docs/system-tests.html` lists every system test's input, expected and actual
+output; regenerate it from the suites' `--nocapture` logs with
+`python scripts/system_test_report.py <logs-dir> docs/system-tests.html`.
+
 `system_test_prs` and `system_test_prs_2026_10_17` each send **one** real
 email, a self-loop to the mailbox owner's own address (`SELF_ADDR` / `SELF`
 in the test; change it before running on another mailbox). Everything else is

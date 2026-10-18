@@ -36,6 +36,7 @@ use crate::outlook::{MAX_EMAIL_COUNT, MAX_EVENT_COUNT, MAX_NOTE_COUNT, MAX_TASK_
 use crate::outlook::{
     com_recurrence_interval, common_free, create_event_status, friendly_recurrence_interval,
     parse_freebusy_slots, take_page, validate_recurrence, validate_recurrence_update,
+    all_day_end, check_interval_minutes, check_item_class, check_local_time_exists, unique_file_name,
     CheckAvailabilityInput, permanent_delete_plan, PermanentDelete, require_empty_confirm, CreateEventInput,
     deleted_note, delete_event_note, delete_occurrence_note, meeting_is_canceled,
     validate_occurrence_update, check_no_attendees, update_adds_attendees,
@@ -147,6 +148,21 @@ fn get_item(ns: &IDispatch, item_id: &str) -> Result<IDispatch, ToolError> {
         ))
     })?;
     to_disp(item)
+}
+
+/// Refuses an item that isn't one of the `allowed` Outlook classes, e.g. a
+/// task id given to `get_event` (see [`check_item_class`]).
+fn require_class(item: &IDispatch, allowed: &[i32], wanted: &str, where_from: &str) -> Result<(), ToolError> {
+    let class = variant_to_i32(&get_property(item, "Class")?).unwrap_or(0);
+    check_item_class(class, allowed, wanted, where_from)
+}
+
+/// [`get_item`] for the task and note tools: the item must be of that class.
+fn get_typed_item(ns: &IDispatch, item_id: &str, class: i32, wanted: &str, where_from: &str)
+    -> Result<IDispatch, ToolError> {
+    let item = get_item(ns, item_id)?;
+    require_class(&item, &[class], wanted, where_from)?;
+    Ok(item)
 }
 
 /// The Deleted Items folder of the item's own store, so a hard delete of an
@@ -312,12 +328,32 @@ fn parse_dt(value: &str, field: &str) -> Result<chrono::NaiveDateTime, ToolError
     Ok(crate::outlook::dates::parse_date_param(value, field, com::user_first_day_of_week())?.at)
 }
 
+/// [`parse_dt`] for an event's start or end, which must exist on the local
+/// clock (not in a DST gap).
+fn parse_event_time(value: &str, field: &str) -> Result<chrono::NaiveDateTime, ToolError> {
+    let at = parse_dt(value, field)?;
+    check_local_time_exists(&at, field, &chrono::Local)?;
+    Ok(at)
+}
+
 /// Adds `address` to `recipients` and marks it required or optional. The
 /// `Recipient` object `Recipients.Add()` returns must have its `.Type` set
 /// explicitly — Outlook does not infer tier from call order.
 fn add_meeting_recipient(recipients: &IDispatch, address: &str, role: i32) -> Result<(), ToolError> {
     let recipient = to_disp(call_method(recipients, "Add", &mut [variant_from_str(address)])?)?;
     put_property(&recipient, "Type", variant_from_i32(role))?;
+    Ok(())
+}
+
+/// `reminder_minutes`: minutes before the start (0 reminds at the start); a
+/// negative value turns the reminder off.
+fn set_reminder(appt: &IDispatch, minutes: i32) -> Result<(), ToolError> {
+    if minutes < 0 {
+        put_property(appt, "ReminderSet", variant_from_bool(false))?;
+        return Ok(());
+    }
+    put_property(appt, "ReminderSet", variant_from_bool(true))?;
+    put_property(appt, "ReminderMinutesBeforeStart", variant_from_i32(minutes))?;
     Ok(())
 }
 
@@ -350,8 +386,14 @@ fn apply_recurrence(appt: &IDispatch, r: &RecurrenceInput) -> Result<(), ToolErr
                 chrono::NaiveDateTime::parse_from_str(&start_iso, "%Y-%m-%dT%H:%M:%S").map_err(|_| {
                     ToolError::new("could not parse Start to derive the yearly recurrence date")
                 })?;
-            put_property(&pattern, "MonthOfYear", variant_from_i32(start_dt.month() as i32))?;
-            put_property(&pattern, "DayOfMonth", variant_from_i32(start_dt.day() as i32))?;
+            // Outlook derives both from Start when RecurrenceType is set, and
+            // rejects writing them again for Feb 29 ("The recurrence pattern
+            // is not valid", found live, RC3): write only what differs.
+            for (prop, want) in [("MonthOfYear", start_dt.month() as i32), ("DayOfMonth", start_dt.day() as i32)] {
+                if variant_to_i32(&get_property(&pattern, prop)?) != Some(want) {
+                    put_property(&pattern, prop, variant_from_i32(want))?;
+                }
+            }
         }
         _ => {}
     }
@@ -1367,6 +1409,7 @@ fn with_ids(ids: Value, rest: Value) -> Value {
 fn read_event(ns: &IDispatch, event_id: &str, opts: &ReadOptions,
     out_dir: Option<&std::path::Path>, rows: &mut EventRows) -> Result<EventDetail, ToolError> {
     let (item, parsed) = open_event(ns, event_id)?;
+    require_class(&item, &[c::OL_CLASS_APPOINTMENT], "a calendar event", "list_events")?;
     // An occurrence's Parent.StoreID is as unreliable as an enumerated
     // item's (see `event_summary`): use the store from the id.
     rows.calendar_store_id = parsed.is_occurrence().then(|| parsed.store_id.clone());
@@ -1380,7 +1423,7 @@ fn read_event(ns: &IDispatch, event_id: &str, opts: &ReadOptions,
 /// One `get_note` result.
 fn read_note(ns: &IDispatch, note_id: &str, opts: &ReadOptions,
     out_dir: Option<&std::path::Path>) -> Result<NoteDetail, ToolError> {
-    let note = get_item(ns, note_id)?;
+    let note = get_typed_item(ns, note_id, c::OL_CLASS_NOTE, "a note", "list_notes")?;
     let summary = note_summary(&note)?;
     let body = read_plain_body(&note, ReadTool::Note, note_id, opts, out_dir)?;
     let (body, body_file, body_truncated, body_length) = BodyOut::into_parts(body);
@@ -1397,7 +1440,7 @@ fn read_note(ns: &IDispatch, note_id: &str, opts: &ReadOptions,
 /// One `get_task` result: the `list_tasks` summary plus body and details.
 fn read_task(ns: &IDispatch, task_id: &str, opts: &ReadOptions,
     out_dir: Option<&std::path::Path>) -> Result<TaskDetail, ToolError> {
-    let task = get_item(ns, task_id)?;
+    let task = get_typed_item(ns, task_id, c::OL_CLASS_TASK, "a task", "list_tasks")?;
     let summary = task_summary(&task)?;
     let body = read_plain_body(&task, ReadTool::Task, task_id, opts, out_dir)?;
     let (body, body_file, body_truncated, body_length) = BodyOut::into_parts(body);
@@ -2420,9 +2463,14 @@ impl OutlookClient for WindowsOutlookClient {
                 "CreateItem",
                 &mut [variant_from_i32(c::OL_APPOINTMENT_ITEM)],
             )?)?;
+            let start = parse_event_time(&input.start, "start")?;
+            let mut end = parse_event_time(&input.end, "end")?;
+            if input.all_day {
+                end = all_day_end(&start, &end);
+            }
             put_property(&appt, "Subject", variant_from_str(&input.subject))?;
-            put_property(&appt, "Start", variant_from_datetime(&parse_dt(&input.start, "start")?)?)?;
-            put_property(&appt, "End", variant_from_datetime(&parse_dt(&input.end, "end")?)?)?;
+            put_property(&appt, "Start", variant_from_datetime(&start)?)?;
+            put_property(&appt, "End", variant_from_datetime(&end)?)?;
             if input.all_day {
                 put_property(&appt, "AllDayEvent", variant_from_bool(true))?;
             }
@@ -2433,8 +2481,7 @@ impl OutlookClient for WindowsOutlookClient {
                 put_property(&appt, "Location", variant_from_str(location))?;
             }
             if let Some(minutes) = input.reminder_minutes {
-                put_property(&appt, "ReminderSet", variant_from_bool(true))?;
-                put_property(&appt, "ReminderMinutesBeforeStart", variant_from_i32(minutes))?;
+                set_reminder(&appt, minutes)?;
             }
             if let Some(categories) = input.categories.as_ref().filter(|c| !c.is_empty()) {
                 set_item_categories(&appt, categories)?;
@@ -2492,9 +2539,18 @@ impl OutlookClient for WindowsOutlookClient {
         self.with_com(|| {
             let (_app, ns) = mapi()?;
             let (mut item, mut parsed) = open_event(&ns, &event_id)?;
+            require_class(&item, &[c::OL_CLASS_APPOINTMENT, c::OL_CLASS_MEETING_REQUEST], "a meeting invite", "list_events, or a meeting request from list_emails")?;
+            let is_request = has_member(&item, "GetAssociatedAppointment");
+            if !is_request
+                && variant_to_i32(&get_property(&item, "MeetingStatus")?).unwrap_or(c::OL_NONMEETING) == c::OL_NONMEETING
+            {
+                return Err(ToolError::new(
+                    "This id is a personal appointment, not a meeting invite: there is no organizer to respond to.",
+                ));
+            }
             // A meeting request from the inbox resolves to a MeetingItem; get
             // its appointment. Calendar ids resolve straight to appointments.
-            if has_member(&item, "GetAssociatedAppointment") {
+            if is_request {
                 item = to_disp(call_method(
                     &item,
                     "GetAssociatedAppointment",
@@ -2534,6 +2590,7 @@ impl OutlookClient for WindowsOutlookClient {
         self.with_com(|| {
             let (_app, ns) = mapi()?;
             let (item, parsed) = open_event(&ns, &u.event_id)?;
+            require_class(&item, &[c::OL_CLASS_APPOINTMENT], "a calendar event", "list_events")?;
             if u.require_no_attendees {
                 let status = variant_to_i32(&get_property(&item, "MeetingStatus")?)
                     .unwrap_or(c::OL_NONMEETING);
@@ -2554,18 +2611,37 @@ impl OutlookClient for WindowsOutlookClient {
                 put_property(&item, "Subject", variant_from_str(subject))?;
                 changed.push("subject");
             }
-            if u.start.is_some() || u.end.is_some() {
+            if u.start.is_some() || u.end.is_some() || u.all_day.is_some() {
                 // Setting Start also shifts End, so put both back together.
+                // Changing AllDayEvent rewrites both too (clearing it gives
+                // 08:00-08:30, found live, AD4), so its undo carries them.
                 undo.set("start", old_iso("Start")?);
                 undo.set("end", old_iso("End")?);
             }
-            if let Some(start) = &u.start {
-                put_property(&item, "Start", variant_from_datetime(&parse_dt(start, "start")?)?)?;
+            let start = u.start.as_deref().map(|s| parse_event_time(s, "start")).transpose()?;
+            let end = u.end.as_deref().map(|e| parse_event_time(e, "end")).transpose()?;
+            // Clearing all_day must come before explicit times, or Outlook
+            // replaces them; setting it comes after, so it rounds them out to
+            // whole days.
+            let set_all_day = |changed: &mut Vec<&str>, undo: &mut Undo, all_day: bool| -> Result<(), ToolError> {
+                undo.set("all_day", variant_to_bool(&get_property(&item, "AllDayEvent")?).unwrap_or(false));
+                put_property(&item, "AllDayEvent", variant_from_bool(all_day))?;
+                changed.push("all_day");
+                Ok(())
+            };
+            if u.all_day == Some(false) {
+                set_all_day(&mut changed, &mut undo, false)?;
+            }
+            if let Some(start) = &start {
+                put_property(&item, "Start", variant_from_datetime(start)?)?;
                 changed.push("start");
             }
-            if let Some(end) = &u.end {
-                put_property(&item, "End", variant_from_datetime(&parse_dt(end, "end")?)?)?;
+            if let Some(end) = &end {
+                put_property(&item, "End", variant_from_datetime(end)?)?;
                 changed.push("end");
+            }
+            if u.all_day == Some(true) {
+                set_all_day(&mut changed, &mut undo, true)?;
             }
             if let Some(location) = &u.location {
                 undo.set("location", old_str("Location")?);
@@ -2577,20 +2653,14 @@ impl OutlookClient for WindowsOutlookClient {
                 put_property(&item, "Body", variant_from_str(body))?;
                 changed.push("body");
             }
-            if let Some(all_day) = u.all_day {
-                undo.set("all_day", variant_to_bool(&get_property(&item, "AllDayEvent")?).unwrap_or(false));
-                put_property(&item, "AllDayEvent", variant_from_bool(all_day))?;
-                changed.push("all_day");
-            }
             if let Some(minutes) = u.reminder_minutes {
-                if variant_to_bool(&get_property(&item, "ReminderSet")?).unwrap_or(false) {
-                    undo.set("reminder_minutes",
-                        variant_to_i32(&get_property(&item, "ReminderMinutesBeforeStart")?).unwrap_or(15));
+                let old = if variant_to_bool(&get_property(&item, "ReminderSet")?).unwrap_or(false) {
+                    variant_to_i32(&get_property(&item, "ReminderMinutesBeforeStart")?).unwrap_or(15)
                 } else {
-                    undo.not_undoable("reminder_minutes"); // There was no reminder to restore.
-                }
-                put_property(&item, "ReminderSet", variant_from_bool(true))?;
-                put_property(&item, "ReminderMinutesBeforeStart", variant_from_i32(minutes))?;
+                    -1 // No reminder: the undo turns it off again.
+                };
+                undo.set("reminder_minutes", old);
+                set_reminder(&item, minutes)?;
                 changed.push("reminder_minutes");
             }
             if let Some(show_as) = u.show_as.as_deref().filter(|s| !s.is_empty()) {
@@ -2699,6 +2769,7 @@ impl OutlookClient for WindowsOutlookClient {
             // A series id (`id` from list_events) deletes the whole series,
             // soft or permanent; an occurrence_id deletes that one date.
             let (item, parsed) = open_event(&ns, &event_id)?;
+            require_class(&item, &[c::OL_CLASS_APPOINTMENT], "a calendar event", "list_events")?;
             let subject = variant_to_string(&get_property(&item, "Subject")?);
             let meeting_status =
                 variant_to_i32(&get_property(&item, "MeetingStatus")?).unwrap_or(c::OL_NONMEETING);
@@ -2741,12 +2812,8 @@ impl OutlookClient for WindowsOutlookClient {
                     input.end, input.start
                 )));
             }
-            let interval = input.interval_minutes.max(1);
-            // FreeBusy has no "end" parameter — it returns a string covering a
-            // fixed range from `start`. Compute how many of its slots fall
-            // within [start, end) and truncate to that.
-            let total_minutes = (end - start).num_minutes().max(0);
-            let max_slots = ((total_minutes + interval as i64 - 1) / interval as i64) as usize;
+            check_interval_minutes(input.interval_minutes)?;
+            let interval = input.interval_minutes;
 
             let mut people = Vec::new();
             for person in &input.people {
@@ -2782,7 +2849,9 @@ impl OutlookClient for WindowsOutlookClient {
                         continue;
                     }
                 };
-                let slots = parse_freebusy_slots(&raw, &start, interval, max_slots);
+                // The string starts at 00:00 of start's date and runs past
+                // `end`; parse_freebusy_slots picks the slots of [start, end).
+                let slots = parse_freebusy_slots(&raw, &start, &end, interval, &chrono::Local);
                 people.push(PersonAvailability { person: person.clone(), resolved: true, slots });
             }
             let common = common_free(&people, &input.treat_as_free);
@@ -2834,6 +2903,7 @@ impl OutlookClient for WindowsOutlookClient {
             // `is_inline`; a plain-text item or an unreadable body counts as "".
             let html_body = item_html_body(&item);
             let mut results = Vec::new();
+            let mut used_names = std::collections::HashSet::new();
             for i in 1..=count {
                 let att = to_disp(call_method(&attachments, "Item", &mut [variant_from_i32(i)])?)?;
                 let mut info = attachment_info(&att, i, &html_body)?;
@@ -2848,7 +2918,7 @@ impl OutlookClient for WindowsOutlookClient {
                 if inline.is_some_and(|want| info.is_inline != want) {
                     continue;
                 }
-                let target = dir.join(safe_filename(&info.filename));
+                let target = dir.join(unique_file_name(&safe_filename(&info.filename), &mut used_names));
                 let target_str = target.to_string_lossy().into_owned();
                 // Each entry is the attachment's metadata (`index` stays its
                 // original COM position even when filtering) plus the outcome.
@@ -3026,7 +3096,7 @@ impl OutlookClient for WindowsOutlookClient {
     fn update_task(&self, u: TaskUpdate) -> Result<Value, ToolError> {
         self.with_com(|| {
             let (_app, ns) = mapi()?;
-            let task = get_item(&ns, &u.task_id)?;
+            let task = get_typed_item(&ns, &u.task_id, c::OL_CLASS_TASK, "a task", "list_tasks")?;
             let mut changed: Vec<&str> = Vec::new();
             let mut undo = Undo::new();
             // A date the task has, as the undo value; Outlook's "none" date
@@ -3131,7 +3201,7 @@ impl OutlookClient for WindowsOutlookClient {
     fn delete_task(&self, task_id: String, permanent: bool) -> Result<Value, ToolError> {
         self.with_com(|| {
             let (_app, ns) = mapi()?;
-            let item = get_item(&ns, &task_id)?;
+            let item = get_typed_item(&ns, &task_id, c::OL_CLASS_TASK, "a task", "list_tasks")?;
             let subject = variant_to_string(&get_property(&item, "Subject")?);
             delete_item(&ns, &item, permanent)?;
             Ok(json!({
@@ -3218,7 +3288,7 @@ impl OutlookClient for WindowsOutlookClient {
     fn update_note(&self, u: NoteUpdate) -> Result<Value, ToolError> {
         self.with_com(|| {
             let (_app, ns) = mapi()?;
-            let note = get_item(&ns, &u.note_id)?;
+            let note = get_typed_item(&ns, &u.note_id, c::OL_CLASS_NOTE, "a note", "list_notes")?;
             let mut changed: Vec<&str> = Vec::new();
             let mut undo = Undo::new();
 
@@ -3266,7 +3336,7 @@ impl OutlookClient for WindowsOutlookClient {
     fn delete_note(&self, note_id: String, permanent: bool) -> Result<Value, ToolError> {
         self.with_com(|| {
             let (_app, ns) = mapi()?;
-            let item = get_item(&ns, &note_id)?;
+            let item = get_typed_item(&ns, &note_id, c::OL_CLASS_NOTE, "a note", "list_notes")?;
             delete_item(&ns, &item, permanent)?;
             Ok(json!({"status": "deleted", "permanent": permanent, "note": deleted_note(permanent)}))
         })

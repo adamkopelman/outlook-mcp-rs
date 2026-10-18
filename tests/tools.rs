@@ -1967,7 +1967,9 @@ async fn respond_to_meeting_batch_returns_per_item_results() {
     assert_eq!(v[0], json!({"id": EVENT_ID, "status": "Accept_sent"}));
     assert_eq!(v[1]["id"], "bad|id|x");
     assert!(v[1]["error"].as_str().unwrap().contains("Invalid event id"));
-    assert_eq!(v[2]["id"], OCCURRENCE_ID);
+    // Like a single call: the series' current id, plus the occurrence's id.
+    assert_eq!(v[2]["id"], EVENT_ID);
+    assert_eq!(v[2]["occurrence_id"], OCCURRENCE_ID);
     let calls = fake.calls();
     assert_eq!(calls.len(), 2);
     assert!(calls.iter().all(|(_, a)| a["send"] == false && a["response"] == "Accept"));
@@ -1977,6 +1979,22 @@ async fn respond_to_meeting_batch_returns_per_item_results() {
     let err = server.respond_to_meeting(Parameters(params)).await.unwrap_err();
     assert!(err.message.contains("Invalid response"), "{}", err.message);
     assert_eq!(fake.calls().len(), 2, "a bad response fails before any call");
+}
+
+#[tokio::test]
+async fn a_batch_write_returns_each_items_current_id_like_a_single_call() {
+    // Found live: a batch respond_to_meeting returned the ids it was called
+    // with, but accepting gives the calendar item a new EntryID, so they no
+    // longer opened anything. The same goes for update_email's move_to.
+    let server = OutlookMcpServer::new(Arc::new(FakeOutlookClient::new()));
+    let one: UpdateEmailParams = serde_json::from_value(json!({"email_id": EMAIL_ID, "move_to": "Archive"})).unwrap();
+    let one = result_json(&server.update_email(Parameters(one)).await.unwrap());
+    let many: UpdateEmailParams = serde_json::from_value(json!({"email_id": [EMAIL_ID, EMAIL_ID], "move_to": "Archive"})).unwrap();
+    let many = result_json(&server.update_email(Parameters(many)).await.unwrap());
+    assert_ne!(one["id"], EMAIL_ID, "a move changes the id");
+    assert_eq!(many[0]["id"], one["id"], "{many}");
+    assert_eq!(many[1]["id"], one["id"], "{many}");
+    assert_eq!(many[0]["undo"]["email_id"], one["id"], "undo is addressed by the current id too");
 }
 
 #[tokio::test]
@@ -3308,4 +3326,36 @@ async fn get_inline_image_output_dir_writes_image_bytes() {
     assert_eq!(std::fs::read(file).unwrap(), FAKE_IMAGE_BYTES);
     assert_eq!(v["size"], 4);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn category_names_with_a_comma_are_refused_before_any_write() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let p: CreateTaskParams = serde_json::from_value(json!({
+        "subject": "t", "categories": ["Smith, John", "Red Category"]
+    })).unwrap();
+    let e = err_text(server.create_task(Parameters(p)).await.unwrap_err());
+    assert!(e.contains("comma") && e.contains("Smith, John"), "{e}");
+    let p: UpdateEventParams = serde_json::from_value(json!({
+        "event_id": "e", "add_categories": ["Smith, John"]
+    })).unwrap();
+    let e = err_text(server.update_event(Parameters(p)).await.unwrap_err());
+    assert!(e.contains("comma"), "{e}");
+    assert!(fake.calls().is_empty(), "nothing reaches the client: {:?}", fake.calls());
+}
+
+#[tokio::test]
+async fn check_availability_refuses_a_zero_interval() {
+    let fake = Arc::new(FakeOutlookClient::new());
+    let server = OutlookMcpServer::new(fake.clone());
+    let e = err_text(server.check_availability(Parameters(CheckAvailabilityParams {
+        people: vec!["alice@example.com".to_string()],
+        start: "2099-01-01T09:00".to_string(),
+        end: "2099-01-01T17:00".to_string(),
+        interval_minutes: 0,
+        treat_as_free: vec!["free".to_string()],
+    })).await.unwrap_err());
+    assert!(e.contains("interval_minutes"), "{e}");
+    assert!(fake.calls().is_empty());
 }

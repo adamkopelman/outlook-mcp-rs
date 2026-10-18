@@ -729,37 +729,184 @@ pub struct CheckAvailabilityInput {
     pub treat_as_free: Vec<String>,
 }
 
+/// The `OlBusyStatus` for one character of a `Recipient.FreeBusy` string.
+/// The string mostly uses `OlBusyStatus`'s digits ('0' free, '1' tentative,
+/// '2' busy, '3' out of office), but reports working elsewhere (status 4) as
+/// '5' (confirmed live: appointments with BusyStatus 0..4 read "01235").
+/// '4' keeps its `OlBusyStatus` meaning (unverified live; in Exchange
+/// free/busy it may mean "no data"). Anything else counts as busy.
+fn freebusy_char_status(ch: char) -> i32 {
+    match ch {
+        '5' => crate::constants::OL_WORKING_ELSEWHERE,
+        _ => ch.to_digit(10).map(|d| d as i32).unwrap_or(crate::constants::OL_BUSY),
+    }
+}
+
 /// Parses Outlook's raw `Recipient.FreeBusy` status-code string (one ASCII
-/// digit per `interval_minutes`-sized slot: `'0'` free, `'1'` tentative,
-/// `'2'` busy, `'3'` out-of-office, `'4'` working-elsewhere — the exact
-/// `OlBusyStatus` numbering `friendly::busy_status_word` already maps) into
-/// timestamped slots starting at `start`. `FreeBusy` returns a string
-/// covering a much longer range than the caller's `[start, end)` window (it
-/// has no `end` parameter), so callers must compute `max_slots` themselves
-/// — `(end - start) / interval_minutes`, rounded up — and this function
-/// truncates to it. Any digit outside 0-4 (Outlook shouldn't produce one,
-/// but the string could be malformed) falls back to `"busy"`, the same
-/// catch-all `busy_status_word` uses.
-pub fn parse_freebusy_slots(
+/// digit per `interval_minutes`-sized slot, decoded by
+/// [`freebusy_char_status`]) into the timestamped slots that overlap
+/// `[start, end)`.
+///
+/// The string always begins at 00:00 of `start`'s date, whatever `start`'s
+/// time (confirmed live: a 10:00 appointment is at index 20 of a 30-minute
+/// string for starts of 00:00, 08:00 and 13:00), and it covers a much longer
+/// range than the window (`FreeBusy` has no end parameter). So slots are
+/// aligned to midnight: a window starting off a slot boundary includes the
+/// slot that contains `start`.
+///
+/// Each character is a slot of real elapsed time, not of wall-clock time
+/// (confirmed live on 2099's DST days: a 10:00 event on the 23-hour day is
+/// 9 elapsed hours after midnight). So slots are counted in UTC from local
+/// midnight in `tz` and labelled in local time: a 23-hour day has 46
+/// half-hour slots and skips 02:00-03:00, a 25-hour day has 50.
+pub fn parse_freebusy_slots<Tz: chrono::TimeZone>(
     raw: &str,
     start: &chrono::NaiveDateTime,
+    end: &chrono::NaiveDateTime,
     interval_minutes: i32,
-    max_slots: usize,
+    tz: &Tz,
 ) -> Vec<AvailabilitySlot> {
+    let midnight = local_to_utc(&start.date().and_hms_opt(0, 0, 0).expect("midnight is a valid time"), tz);
+    let (start, end) = (local_to_utc(start, tz), local_to_utc(end, tz));
+    let step = chrono::Duration::minutes(interval_minutes.max(1) as i64);
+    let label = |utc: chrono::NaiveDateTime| {
+        tz.from_utc_datetime(&utc).naive_local().format("%Y-%m-%dT%H:%M:%S").to_string()
+    };
     raw.chars()
-        .take(max_slots)
         .enumerate()
-        .map(|(i, ch)| {
-            let code = ch.to_digit(10).map(|d| d as i32).unwrap_or(crate::constants::OL_BUSY);
-            let slot_start = *start + chrono::Duration::minutes(i as i64 * interval_minutes as i64);
-            let slot_end = slot_start + chrono::Duration::minutes(interval_minutes as i64);
+        .map(|(i, ch)| (midnight + step * i as i32, ch))
+        .skip_while(|(slot_start, _)| *slot_start + step <= start)
+        .take_while(|(slot_start, _)| *slot_start < end)
+        .map(|(slot_start, ch)| {
+            let code = freebusy_char_status(ch);
             AvailabilitySlot {
-                start: slot_start.format("%Y-%m-%dT%H:%M:%S").to_string(),
-                end: slot_end.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                start: label(slot_start),
+                end: label(slot_start + step),
                 status: crate::friendly::busy_status_word(code).to_string(),
             }
         })
         .collect()
+}
+
+/// The UTC instant of a local wall-clock time in `tz`. A repeated time (the
+/// fall-back hour) is its first occurrence; a skipped one (the spring-forward
+/// gap) is read as the moment the gap ends, the way Outlook reads it.
+fn local_to_utc<Tz: chrono::TimeZone>(local: &chrono::NaiveDateTime, tz: &Tz) -> chrono::NaiveDateTime {
+    use chrono::LocalResult;
+    match tz.from_local_datetime(local) {
+        LocalResult::Single(t) | LocalResult::Ambiguous(t, _) => t.naive_utc(),
+        LocalResult::None => {
+            // Step forward to the first minute that exists, then back by
+            // the same amount in UTC.
+            (1..=180)
+                .find_map(|m| {
+                    let later = *local + chrono::Duration::minutes(m);
+                    tz.from_local_datetime(&later).earliest()
+                        .map(|t| t.naive_utc() - chrono::Duration::minutes(m))
+                })
+                .unwrap_or(*local)
+        }
+    }
+}
+
+/// Refuses an event time that doesn't exist on the local clock because DST
+/// skips it (e.g. 02:30 on a spring-forward day). Outlook reads such a time
+/// as an hour later, so an end in the gap lands before the start; the failed
+/// Save then leaves a broken item in the Calendar that makes every
+/// `list_events` over that day fail (found live, DST1a/DST1d).
+pub fn check_local_time_exists<Tz: chrono::TimeZone>(
+    local: &chrono::NaiveDateTime, field: &str, tz: &Tz,
+) -> Result<(), ToolError> {
+    if tz.from_local_datetime(local).earliest().is_some() {
+        return Ok(());
+    }
+    Err(ToolError::new(format!(
+        "{field} {} doesn't exist in the local time zone: the clocks skip that hour for daylight \
+         saving time. Use a time after the change (e.g. one hour later).",
+        local.format("%Y-%m-%dT%H:%M")
+    )))
+}
+
+/// The end to give an all-day event. Outlook rounds a real range out to whole
+/// days itself, but saves an empty one (end <= start) as a zero-length
+/// all-day event (found live, AD1); that becomes the single day of `start`.
+pub fn all_day_end(start: &chrono::NaiveDateTime, end: &chrono::NaiveDateTime) -> chrono::NaiveDateTime {
+    if end > start {
+        return *end;
+    }
+    (start.date() + chrono::Days::new(1)).and_hms_opt(0, 0, 0).expect("midnight is a valid time")
+}
+
+/// `check_availability`'s slot length must be at least one minute (0 used to
+/// be read silently as 1).
+pub fn check_interval_minutes(interval_minutes: i32) -> Result<(), ToolError> {
+    if interval_minutes >= 1 {
+        return Ok(());
+    }
+    Err(ToolError::new(format!(
+        "interval_minutes must be at least 1 (got {interval_minutes}); the default is 30."
+    )))
+}
+
+/// Outlook stores an item's categories as one comma-separated string, so a
+/// name containing a comma can't be stored: it reads back as two categories,
+/// and filters or `remove_categories` never find it again (found live,
+/// CT1-CT3). Refused on every tool that writes categories.
+pub fn check_category_names(lists: &[Option<&Vec<String>>]) -> Result<(), ToolError> {
+    let bad: Vec<&String> = lists.iter().flatten().flat_map(|l| l.iter()).filter(|c| c.contains(',')).collect();
+    if bad.is_empty() {
+        return Ok(());
+    }
+    Err(ToolError::new(format!(
+        "Category names can't contain a comma (Outlook separates categories with commas): {}. \
+         Rename the category, e.g. without the comma.",
+        bad.iter().map(|c| format!("{c:?}")).collect::<Vec<_>>().join(", ")
+    )))
+}
+
+/// A file name for `name` that `used` doesn't hold yet (compared
+/// case-insensitively, as Windows does), recorded in `used`: `a.txt`, then
+/// `a (2).txt`, `a (3).txt`. Two attachments with the same (or the same
+/// sanitized) name used to overwrite each other (found live, AT1/AT2).
+pub fn unique_file_name(name: &str, used: &mut std::collections::HashSet<String>) -> String {
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    let mut candidate = name.to_string();
+    let mut n = 2;
+    while !used.insert(candidate.to_lowercase()) {
+        candidate = format!("{stem} ({n}){ext}");
+        n += 1;
+    }
+    candidate
+}
+
+/// What an item of Outlook class `class` (`Item.Class`, OlObjectClass) is,
+/// for error messages.
+fn item_class_noun(class: i32) -> &'static str {
+    use crate::constants as c;
+    match class {
+        c::OL_CLASS_APPOINTMENT => "a calendar event",
+        c::OL_CLASS_MAIL => "an email",
+        c::OL_CLASS_NOTE => "a note",
+        c::OL_CLASS_TASK => "a task",
+        c::OL_CLASS_CONTACT => "a contact",
+        c::OL_CLASS_MEETING_REQUEST => "a meeting invite",
+        54..=57 => "a meeting cancellation or response",
+        _ => "another kind of Outlook item",
+    }
+}
+
+/// Refuses an id whose item isn't one of the `allowed` classes. `GetItemFromID`
+/// opens any id, so a task id given to `get_event` used to come back as an
+/// event starting 1899-12-30 (found live, ID3).
+/// `where_from` says where a right id comes from.
+pub fn check_item_class(class: i32, allowed: &[i32], wanted: &str, where_from: &str) -> Result<(), ToolError> {
+    if allowed.contains(&class) {
+        return Ok(());
+    }
+    Err(ToolError::new(format!("This id is {}, not {wanted}. Use an id from {where_from}.", item_class_noun(class))))
 }
 
 /// The windows where every **resolved** person's status is in
@@ -1780,10 +1927,19 @@ mod tests {
         chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").unwrap()
     }
 
+    /// A FreeBusy string as Outlook returns it: one char per `interval`
+    /// minutes from 00:00 of the start date, all free except `codes`
+    /// placed at `at_slot`.
+    fn freebusy(at_slot: usize, codes: &str) -> String {
+        format!("{}{codes}{}", "0".repeat(at_slot), "0".repeat(96))
+    }
+
     #[test]
     fn parse_freebusy_slots_maps_codes_to_words_and_times() {
-        // "02143" = free, busy, tentative, working_elsewhere, out_of_office
-        let slots = parse_freebusy_slots("02143", &dt("2099-01-01T09:00:00"), 30, 5);
+        // "02143" = free, busy, tentative, working_elsewhere, out_of_office,
+        // starting at 09:00 = slot 18 of the 30-minute string.
+        let raw = freebusy(18, "02143");
+        let slots = parse_freebusy_slots(&raw, &dt("2099-01-01T09:00:00"), &dt("2099-01-01T11:30:00"), 30, &chrono::Utc);
         assert_eq!(slots.len(), 5);
         assert_eq!(slots[0], AvailabilitySlot {
             start: "2099-01-01T09:00:00".to_string(),
@@ -1799,16 +1955,53 @@ mod tests {
     }
 
     #[test]
-    fn parse_freebusy_slots_truncates_to_max_slots() {
+    fn parse_freebusy_slots_reads_the_string_from_midnight_not_from_start() {
+        // Found live: Recipient.FreeBusy(start, ...) always begins at 00:00 of
+        // start's date, whatever start's time (a 10:00 appointment is at
+        // index 20 for starts of 00:00, 08:00 and 13:00). Reading it from
+        // `start` shifted every slot by start's time of day.
+        let raw = freebusy(20, "2"); // busy 10:00-10:30
+        let slots = parse_freebusy_slots(&raw, &dt("2099-01-01T08:00:00"), &dt("2099-01-01T12:00:00"), 30, &chrono::Utc);
+        assert_eq!(slots.len(), 8);
+        assert_eq!(slots[0].start, "2099-01-01T08:00:00");
+        let busy: Vec<&str> = slots.iter().filter(|s| s.status == "busy").map(|s| s.start.as_str()).collect();
+        assert_eq!(busy, vec!["2099-01-01T10:00:00"]);
+    }
+
+    #[test]
+    fn parse_freebusy_slots_covers_an_unaligned_window() {
+        // 08:10..09:05 overlaps the 08:00, 08:30 and 09:00 slots.
+        let raw = freebusy(16, "120");
+        let slots = parse_freebusy_slots(&raw, &dt("2099-01-01T08:10:00"), &dt("2099-01-01T09:05:00"), 30, &chrono::Utc);
+        let got: Vec<(&str, &str)> = slots.iter().map(|s| (s.start.as_str(), s.status.as_str())).collect();
+        assert_eq!(got, vec![
+            ("2099-01-01T08:00:00", "tentative"),
+            ("2099-01-01T08:30:00", "busy"),
+            ("2099-01-01T09:00:00", "free"),
+        ]);
+    }
+
+    #[test]
+    fn parse_freebusy_slots_truncates_to_the_window() {
         // Outlook's raw FreeBusy string commonly covers a much longer range
         // than the caller's requested [start, end) window.
-        let slots = parse_freebusy_slots("000000000000", &dt("2099-01-01T09:00:00"), 30, 3);
+        let slots = parse_freebusy_slots(&"0".repeat(1392), &dt("2099-01-01T09:00:00"), &dt("2099-01-01T10:30:00"), 30, &chrono::Utc);
         assert_eq!(slots.len(), 3);
     }
 
     #[test]
+    fn parse_freebusy_slots_reads_working_elsewhere_as_5() {
+        // Found live: the FreeBusy string reports BusyStatus 4 (working
+        // elsewhere) as '5'; appointments with BusyStatus 0..4 came back as
+        // "01235". It used to fall through to "busy".
+        let slots = parse_freebusy_slots("01235", &dt("2099-01-01T00:00:00"), &dt("2099-01-01T02:30:00"), 30, &chrono::Utc);
+        let got: Vec<&str> = slots.iter().map(|s| s.status.as_str()).collect();
+        assert_eq!(got, vec!["free", "tentative", "busy", "out_of_office", "working_elsewhere"]);
+    }
+
+    #[test]
     fn parse_freebusy_slots_treats_unrecognized_digit_as_busy() {
-        let slots = parse_freebusy_slots("9", &dt("2099-01-01T09:00:00"), 30, 1);
+        let slots = parse_freebusy_slots("9", &dt("2099-01-01T00:00:00"), &dt("2099-01-01T00:30:00"), 30, &chrono::Utc);
         assert_eq!(slots[0].status, "busy");
     }
 
@@ -2513,5 +2706,160 @@ mod inline_image_tests {
     #[test]
     fn empty_list_is_ok() {
         assert!(validate_inline_images(&[], true).unwrap().is_empty());
+    }
+}
+
+/// Bugs found by the 2026-10-18 edge-case system test.
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+    use chrono::{FixedOffset, LocalResult, NaiveDate, NaiveDateTime, TimeZone};
+    use types::AvailabilitySlot;
+
+    fn dt(s: &str) -> NaiveDateTime {
+        NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").unwrap()
+    }
+
+    /// A zone like Israel's in 2099: UTC+2, and UTC+3 from 2099-03-27 02:00
+    /// local (clocks jump to 03:00) to 2099-10-25 02:00 local (back to 01:00).
+    #[derive(Clone, Copy, Debug)]
+    struct DstZone;
+
+    impl DstZone {
+        fn offset_at_utc(utc: &NaiveDateTime) -> FixedOffset {
+            let summer = *utc >= dt("2099-03-27T00:00:00") && *utc < dt("2099-10-24T23:00:00");
+            FixedOffset::east_opt(if summer { 3 } else { 2 } * 3600).unwrap()
+        }
+    }
+
+    impl TimeZone for DstZone {
+        type Offset = FixedOffset;
+        fn from_offset(_: &FixedOffset) -> Self { DstZone }
+        fn offset_from_local_date(&self, local: &NaiveDate) -> LocalResult<FixedOffset> {
+            self.offset_from_local_datetime(&local.and_hms_opt(0, 0, 0).unwrap())
+        }
+        fn offset_from_local_datetime(&self, local: &NaiveDateTime) -> LocalResult<FixedOffset> {
+            let fits: Vec<FixedOffset> = [3, 2].iter()
+                .map(|h| FixedOffset::east_opt(h * 3600).unwrap())
+                .filter(|o| Self::offset_at_utc(&(*local - chrono::Duration::seconds(o.local_minus_utc() as i64))) == *o)
+                .collect();
+            match fits.as_slice() {
+                [] => LocalResult::None,
+                [o] => LocalResult::Single(*o),
+                [a, b, ..] => LocalResult::Ambiguous(*a, *b),
+            }
+        }
+        fn offset_from_utc_date(&self, utc: &NaiveDate) -> FixedOffset {
+            Self::offset_at_utc(&utc.and_hms_opt(0, 0, 0).unwrap())
+        }
+        fn offset_from_utc_datetime(&self, utc: &NaiveDateTime) -> FixedOffset {
+            Self::offset_at_utc(utc)
+        }
+    }
+
+    fn slot_starts(slots: &[AvailabilitySlot], status: &str) -> Vec<String> {
+        slots.iter().filter(|s| s.status == status).map(|s| s.start[11..16].to_string()).collect()
+    }
+
+    #[test]
+    fn freebusy_on_a_23_hour_day_counts_real_time_from_midnight() {
+        // Found live (DST3a): events at 09:00 and 10:00-11:00 on the spring-
+        // forward day sit at 30-minute indices 16 and 18-19, which is 8 and 9
+        // elapsed hours after local midnight.
+        let mut raw = "0".repeat(46);
+        raw.replace_range(16..17, "2");
+        raw.replace_range(18..20, "22");
+        let slots = parse_freebusy_slots(&raw, &dt("2099-03-27T00:00:00"), &dt("2099-03-28T00:00:00"), 30, &DstZone);
+        assert_eq!(slots.len(), 46, "a 23-hour day has 46 half-hour slots");
+        assert_eq!(slot_starts(&slots, "busy"), vec!["09:00", "10:00", "10:30"]);
+        // The skipped hour has no slots: 01:30 is followed by 03:00.
+        assert_eq!(slots[3].start, "2099-03-27T01:30:00");
+        assert_eq!(slots[3].end, "2099-03-27T03:00:00");
+        assert_eq!(slots[4].start, "2099-03-27T03:00:00");
+        assert_eq!(slots.last().unwrap().end, "2099-03-28T00:00:00");
+    }
+
+    #[test]
+    fn freebusy_on_a_25_hour_day_counts_real_time_from_midnight() {
+        // DST3b: on the fall-back day the same events are at indices 20 and 22-23.
+        let mut raw = "0".repeat(50);
+        raw.replace_range(20..21, "2");
+        raw.replace_range(22..24, "22");
+        let slots = parse_freebusy_slots(&raw, &dt("2099-10-25T00:00:00"), &dt("2099-10-26T00:00:00"), 30, &DstZone);
+        assert_eq!(slots.len(), 50, "a 25-hour day has 50 half-hour slots");
+        assert_eq!(slot_starts(&slots, "busy"), vec!["09:00", "10:00", "10:30"]);
+    }
+
+    #[test]
+    fn freebusy_window_inside_a_dst_day_is_still_exact() {
+        let mut raw = "0".repeat(46);
+        raw.replace_range(18..20, "22");
+        let slots = parse_freebusy_slots(&raw, &dt("2099-03-27T09:00:00"), &dt("2099-03-27T12:00:00"), 30, &DstZone);
+        let got: Vec<(&str, &str)> = slots.iter().map(|s| (&s.start[11..16], s.status.as_str())).collect();
+        assert_eq!(got, vec![("09:00", "free"), ("09:30", "free"), ("10:00", "busy"), ("10:30", "busy"),
+                             ("11:00", "free"), ("11:30", "free")]);
+    }
+
+    #[test]
+    fn a_time_in_the_skipped_dst_hour_is_rejected() {
+        let err = check_local_time_exists(&dt("2099-03-27T02:30:00"), "start", &DstZone).unwrap_err();
+        assert!(err.to_string().contains("doesn't exist"), "{err}");
+        assert!(err.to_string().contains("start"), "{err}");
+        assert!(check_local_time_exists(&dt("2099-03-27T03:00:00"), "start", &DstZone).is_ok());
+        assert!(check_local_time_exists(&dt("2099-03-27T01:59:00"), "start", &DstZone).is_ok());
+        // The repeated hour on the fall-back day exists (twice).
+        assert!(check_local_time_exists(&dt("2099-10-25T01:30:00"), "start", &DstZone).is_ok());
+    }
+
+    #[test]
+    fn an_empty_all_day_range_gets_one_day() {
+        assert_eq!(all_day_end(&dt("2099-07-01T00:00:00"), &dt("2099-07-01T00:00:00")), dt("2099-07-02T00:00:00"));
+        assert_eq!(all_day_end(&dt("2099-07-01T00:00:00"), &dt("2099-06-30T00:00:00")), dt("2099-07-02T00:00:00"));
+        // A real range is left to Outlook, which rounds it to whole days.
+        assert_eq!(all_day_end(&dt("2099-07-10T00:00:00"), &dt("2099-07-13T00:00:00")), dt("2099-07-13T00:00:00"));
+        assert_eq!(all_day_end(&dt("2099-07-02T10:00:00"), &dt("2099-07-02T11:00:00")), dt("2099-07-02T11:00:00"));
+    }
+
+    #[test]
+    fn category_names_with_a_comma_are_rejected() {
+        let ok = vec!["Red Category".to_string(), "צוות".to_string()];
+        let bad = vec!["Smith, John".to_string()];
+        assert!(check_category_names(&[Some(&ok), None]).is_ok());
+        let err = check_category_names(&[Some(&ok), Some(&bad)]).unwrap_err().to_string();
+        assert!(err.contains("Smith, John") && err.contains("comma"), "{err}");
+    }
+
+    #[test]
+    fn interval_minutes_must_be_positive() {
+        assert!(check_interval_minutes(1).is_ok());
+        assert!(check_interval_minutes(1440).is_ok());
+        for bad in [0, -5] {
+            let err = check_interval_minutes(bad).unwrap_err().to_string();
+            assert!(err.contains("interval_minutes"), "{err}");
+        }
+    }
+
+    #[test]
+    fn colliding_attachment_names_get_numbered() {
+        let mut used = std::collections::HashSet::new();
+        assert_eq!(unique_file_name("a.txt", &mut used), "a.txt");
+        assert_eq!(unique_file_name("a.txt", &mut used), "a (2).txt");
+        assert_eq!(unique_file_name("A.TXT", &mut used), "A (3).TXT", "Windows names are case-insensitive");
+        assert_eq!(unique_file_name("a (2).txt", &mut used), "a (2) (2).txt");
+        assert_eq!(unique_file_name("README", &mut used), "README");
+        assert_eq!(unique_file_name("README", &mut used), "README (2)");
+        assert_eq!(unique_file_name("archive.tar.gz", &mut used), "archive.tar.gz");
+        assert_eq!(unique_file_name("archive.tar.gz", &mut used), "archive.tar (2).gz");
+    }
+
+    #[test]
+    fn item_class_check_names_what_the_id_is() {
+        assert!(check_item_class(26, &[26], "a calendar event", "list_events").is_ok());
+        let err = check_item_class(48, &[26], "a calendar event", "list_events").unwrap_err().to_string();
+        assert_eq!(err, "This id is a task, not a calendar event. Use an id from list_events.");
+        let err = check_item_class(26, &[48], "a task", "list_tasks").unwrap_err().to_string();
+        assert!(err.contains("a calendar event") && err.contains("not a task"), "{err}");
+        let err = check_item_class(43, &[26, 53], "a meeting invite", "list_events").unwrap_err().to_string();
+        assert!(err.contains("an email"), "{err}");
     }
 }

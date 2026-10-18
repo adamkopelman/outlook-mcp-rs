@@ -166,7 +166,7 @@ fn system_test_plans_10_to_12() {
 
         for (label, id) in [("T1a", t1a_id), ("T1b", t1b_id)] {
             if let Some(id) = id {
-                match c.delete_task(id, false) {
+                match c.delete_task(id, true) {
                     Ok(_) => { cleanup_tasks.retain(|(l, _)| l != label); }
                     Err(e) => println!("T1 cleanup FAILED for {label}: {e}"),
                 }
@@ -190,7 +190,7 @@ fn system_test_plans_10_to_12() {
                         .unwrap_or(None);
                     let has_blue = found.as_ref().map(|cats| cats.iter().any(|c| c == "Blue Category")).unwrap_or(false);
                     r.record("T2", has_blue, format!("categories after create: {found:?}"));
-                    match c.delete_task(id, false) {
+                    match c.delete_task(id, true) {
                         Ok(_) => { cleanup_tasks.retain(|(l, _)| l != "T2"); }
                         Err(e) => println!("T2 cleanup FAILED: {e}"),
                     }
@@ -251,7 +251,7 @@ fn system_test_plans_10_to_12() {
                          is_reopened={is_reopened} edit_ok={edit_ok}"
                     ));
 
-                    match c.delete_task(id, false) {
+                    match c.delete_task(id, true) {
                         Ok(_) => { cleanup_tasks.retain(|(l, _)| l != "T3"); }
                         Err(e) => println!("T3 cleanup FAILED: {e}"),
                     }
@@ -272,7 +272,7 @@ fn system_test_plans_10_to_12() {
                 if let Some(id) = v["id"].as_str() {
                     let id = id.to_string();
                     cleanup_tasks.push(("T4".to_string(), id.clone()));
-                    match c.delete_task(id.clone(), false) {
+                    match c.delete_task(id.clone(), true) {
                         Ok(v) => {
                             r.record("T4", v["status"] == "deleted", format!("{v}"));
                             cleanup_tasks.retain(|(l, _)| l != "T4");
@@ -332,7 +332,7 @@ fn system_test_plans_10_to_12() {
 
         for (label, id) in [("N1a", n1a_id), ("N1b", n1b_id)] {
             if let Some(id) = id {
-                match c.delete_note(id, false) {
+                match c.delete_note(id, true) {
                     Ok(_) => { cleanup_notes.retain(|(l, _)| l != label); }
                     Err(e) => println!("N1 cleanup FAILED for {label}: {e}"),
                 }
@@ -384,7 +384,7 @@ fn system_test_plans_10_to_12() {
                          nondecreasing={modified_nondecreasing}"
                     ));
 
-                    match c.delete_note(id, false) {
+                    match c.delete_note(id, true) {
                         Ok(_) => { cleanup_notes.retain(|(l, _)| l != "N2"); }
                         Err(e) => println!("N2 cleanup FAILED: {e}"),
                     }
@@ -438,7 +438,7 @@ fn system_test_plans_10_to_12() {
                         "add_ok={add_ok} has_pink={has_pink} remove_ok={remove_ok} pink_gone={pink_gone}"
                     ));
 
-                    match c.delete_note(id, false) {
+                    match c.delete_note(id, true) {
                         Ok(_) => { cleanup_notes.retain(|(l, _)| l != "N3"); }
                         Err(e) => println!("N3 cleanup FAILED: {e}"),
                     }
@@ -459,7 +459,7 @@ fn system_test_plans_10_to_12() {
                 if let Some(id) = v["id"].as_str() {
                     let id = id.to_string();
                     cleanup_notes.push(("N4".to_string(), id.clone()));
-                    match c.delete_note(id.clone(), false) {
+                    match c.delete_note(id.clone(), true) {
                         Ok(v) => {
                             r.record("N4", v["status"] == "deleted", format!("{v}"));
                             cleanup_notes.retain(|(l, _)| l != "N4");
@@ -478,7 +478,7 @@ fn system_test_plans_10_to_12() {
     println!("\n--- Cleanup ---");
     let mut leftovers: Vec<String> = Vec::new();
     for (label, id) in &cleanup_tasks {
-        match c.delete_task(id.clone(), false) {
+        match c.delete_task(id.clone(), true) {
             Ok(_) => println!("cleaned up leftover task {label} ({id})"),
             Err(e) => {
                 println!("FAILED to clean up task {label} ({id}): {e}");
@@ -487,7 +487,7 @@ fn system_test_plans_10_to_12() {
         }
     }
     for (label, id) in &cleanup_notes {
-        match c.delete_note(id.clone(), false) {
+        match c.delete_note(id.clone(), true) {
             Ok(_) => println!("cleaned up leftover note {label} ({id})"),
             Err(e) => {
                 println!("FAILED to clean up note {label} ({id}): {e}");

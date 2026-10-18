@@ -17,7 +17,12 @@ pub const OL_TASK_ITEM: i32 = 3;
 pub const OL_NOTE_ITEM: i32 = 5;
 
 // OlObjectClass (Item.Class)
+pub const OL_CLASS_APPOINTMENT: i32 = 26;
+pub const OL_CLASS_CONTACT: i32 = 40;
 pub const OL_CLASS_MAIL: i32 = 43;
+pub const OL_CLASS_NOTE: i32 = 44;
+pub const OL_CLASS_TASK: i32 = 48;
+pub const OL_CLASS_MEETING_REQUEST: i32 = 53;
 
 // OlBodyFormat
 pub const OL_FORMAT_PLAIN: i32 = 1;

@@ -113,6 +113,10 @@ fn check_set(r: &mut Results, id: &str, actual: HashSet<&str>, expected: &[&str]
 fn system_test_plans_1_to_9() {
     let c = client();
     let mut r = Results::new();
+    // A minute of slack for clock rounding; the cleanup sweep only touches
+    // items received after this.
+    let run_started = (chrono::Local::now() - chrono::Duration::minutes(1))
+        .format("%Y-%m-%dT%H:%M:%S").to_string();
     // ids to delete_email at the very end (label -> current id)
     let mut cleanup_emails: Vec<(String, String)> = Vec::new();
     let mut cleanup_events: Vec<(String, String, bool)> = Vec::new(); // (label, id, send_cancellation)
@@ -414,7 +418,7 @@ fn system_test_plans_1_to_9() {
                     .map(|l| l.iter().any(|e| e.id == id))
                     .unwrap_or(false);
                 r.record("A7", found_in_drafts, format!("draft {id} present in Drafts: {found_in_drafts}"));
-                match c.delete_email(id.to_string(), false) {
+                match c.delete_email(id.to_string(), true) {
                     Ok(_) => r.record("A7-cleanup", true, "draft deleted"),
                     Err(e) => r.record("A7-cleanup", false, format!("delete_email failed: {e}")),
                 }
@@ -512,7 +516,7 @@ fn system_test_plans_1_to_9() {
         for label in ["A6", "A8"] {
             if let Some(pos) = cleanup_emails.iter().position(|(l, _)| l == label) {
                 let (_, id) = cleanup_emails.remove(pos);
-                match c.delete_email(id, false) {
+                match c.delete_email(id, true) {
                     Ok(v) => notes.push(format!("{label}: {}", v["status"])),
                     Err(e) => { ok = false; notes.push(format!("{label} FAILED: {e}")); }
                 }
@@ -786,7 +790,9 @@ fn system_test_plans_1_to_9() {
     if let Some(id) = b2_id.clone() {
         match c.update_event(EventUpdate {
             event_id: id.clone(), add_required_attendees: Some(vec![EXTERNAL_ADDR.to_string()]),
-            send_update: true,
+            // Quiet, like the removal below: a sent invite whose removal is
+            // quiet left an orphan event in the attendee's calendar every run.
+            send_update: false,
             subject: None, start: None, end: None, location: None, body: None, all_day: None,
             reminder_minutes: None, show_as: None, add_categories: None, remove_categories: None,
             add_optional_attendees: None, remove_attendees: None, recurrence: None, clear_recurrence: false, require_no_attendees: false,
@@ -825,7 +831,7 @@ fn system_test_plans_1_to_9() {
         for label in ["B2", "B4", "B5"] {
             if let Some(pos) = cleanup_events.iter().position(|(l, _, _)| l == label) {
                 let (_, id, send_cancellation) = cleanup_events.remove(pos);
-                match c.delete_event(id, send_cancellation, false, false) {
+                match c.delete_event(id, send_cancellation, true, false) {
                     Ok(v) => notes.push(format!("{label}: {}", v["status"])),
                     Err(e) => { ok = false; notes.push(format!("{label} FAILED: {e}")); }
                 }
@@ -840,7 +846,7 @@ fn system_test_plans_1_to_9() {
     println!("\n--- Cleanup ---");
     let mut leftovers: Vec<String> = Vec::new();
     for (label, id) in cleanup_emails {
-        match c.delete_email(id.clone(), false) {
+        match c.delete_email(id.clone(), true) {
             Ok(_) => println!("cleaned up email {label} ({id})"),
             Err(e) => {
                 println!("FAILED to clean up email {label} ({id}): {e}");
@@ -849,7 +855,7 @@ fn system_test_plans_1_to_9() {
         }
     }
     for (label, id, _) in cleanup_events {
-        match c.delete_event(id.clone(), false, false, false) {
+        match c.delete_event(id.clone(), false, true, false) {
             Ok(_) => println!("cleaned up event {label} ({id})"),
             Err(e) => {
                 println!("FAILED to clean up event {label} ({id}): {e}");
@@ -860,8 +866,58 @@ fn system_test_plans_1_to_9() {
     for f in scratch_files {
         let _ = std::fs::remove_file(f);
     }
+    // The sent copies of every send, the received self-loop copies and the
+    // meeting invite/update/cancellation items: only this tag, and only
+    // received since this run started (TAG is constant, so older runs' items
+    // also match it). Meeting messages are queued by the deletes just above and
+    // reach the Outbox, then Sent Items, seconds later, so one sweep races
+    // them: sweep until nothing new has turned up (and the Outbox holds none of
+    // ours) for 30 s. Never delete from the Outbox: that would cancel the
+    // cancellations. Outlook.com also throttles rapid deletes ("still being
+    // processed by the server"), so a failed delete is retried on a later pass.
+    let ours_in = |folder: &str| -> Vec<EmailSummary> {
+        c.list_emails(EmailQuery { query: Some("\"outlook-mcp-rs systest\"".into()), count: 200, ..eq_default(folder) })
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.subject.contains(TAG) && e.received.as_deref().is_some_and(|r| r >= run_started.as_str()))
+            .collect()
+    };
+    let sweep_started = std::time::Instant::now();
+    let mut quiet_since = std::time::Instant::now();
+    let mut swept = 0;
+    let mut last_errors: Vec<String> = Vec::new();
+    loop {
+        last_errors.clear();
+        let mut busy = !ours_in("outbox").is_empty();
+        for folder in ["sent", "inbox", "deleted"] {
+            for e in ours_in(folder) {
+                busy = true;
+                match c.delete_email(e.id.clone(), true) {
+                    Ok(_) => swept += 1,
+                    Err(err) => last_errors.push(format!("{folder} {:?}: {err}", e.subject)),
+                }
+            }
+        }
+        if busy {
+            quiet_since = std::time::Instant::now();
+        }
+        if quiet_since.elapsed() >= std::time::Duration::from_secs(30)
+            || sweep_started.elapsed() >= std::time::Duration::from_secs(240)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+    leftovers.extend(last_errors);
+    for folder in ["outbox", "sent", "inbox", "deleted"] {
+        for e in ours_in(folder) {
+            leftovers.push(format!("still in {folder}: {:?}", e.subject));
+        }
+    }
+    println!("swept {swept} sent/received/deleted copies in {:?}", sweep_started.elapsed());
     let email_sweep_clean = c.list_emails(EmailQuery { query: Some("systest".into()), ..eq_default("inbox") })
-        .map(|l| l.is_empty()).unwrap_or(false);
+        .map(|l| !l.iter().any(|e| e.subject.contains(TAG) && e.received.as_deref().is_some_and(|r| r >= run_started.as_str())))
+        .unwrap_or(false);
     let event_sweep_clean = c.list_events(EventQuery {
         start_after: Some("2099-05-01".into()), start_before: Some("2099-06-10".into()), ..Default::default()
     }).map(|l| l.is_empty()).unwrap_or(false);
